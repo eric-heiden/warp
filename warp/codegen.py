@@ -923,6 +923,19 @@ class Adjoint:
         # Collect the LTOIR required at link-time
         adj.ltoirs = []
 
+        adj.smem_bytes_forward = 0   # tracks how much shared memory is used during the forward pass
+        adj.smem_bytes_backward = 0   # tracks how much shared memory is used during the backward pass
+
+    # allocate shared memory for the forward pass
+    def alloc_shared_forward(adj, num_bytes):
+        adj.smem_bytes_forward += num_bytes
+        return adj.smem_bytes_forward
+
+    # allocate shared memory for the backward pass
+    def alloc_shared_backward(adj, num_bytes):
+        adj.smem_bytes_backward += num_bytes
+        return adj.smem_bytes_backward
+
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
         # arg Var read/write flags are held during module rebuilds, so we reset here even when skipping a build
@@ -3086,6 +3099,9 @@ static CUDA_CALLABLE void adj_{name}(
 
 cuda_kernel_template = """
 
+__constant__ int {name}_cuda_kernel_forward_smem_bytes = {smem_bytes_forward};
+__constant__ int {name}_cuda_kernel_backward_smem_bytes = {smem_bytes_backward};
+
 extern "C" __global__ void {name}_cuda_kernel_forward(
     {forward_args})
 {{
@@ -3110,6 +3126,9 @@ extern "C" __global__ void {name}_cuda_kernel_backward(
 
 
 cpu_kernel_template = """
+
+static int {name}_cpu_kernel_forward_smem_bytes = {smem_bytes_forward};
+static int {name}_cpu_kernel_backward_smem_bytes = {smem_bytes_backward};
 
 void {name}_cpu_kernel_forward(
     {forward_args})
@@ -3342,7 +3361,7 @@ def codegen_func_forward(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit()};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adj.alloc_shared_forward, adj)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3379,7 +3398,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit()};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adj.alloc_shared_backward, adjoint=True)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3394,7 +3413,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
         ctype = var.ctype(value_type=True)
 
         if is_tile(var.type):
-            lines += [f"{ctype} {name} = {var.type.cinit(adjoint=True)};\n"]
+            lines += [f"{ctype} {name} = {var.type.cinit(adj.alloc_shared_backward, adjoint=True)};\n"]
         else:
             lines += [f"{ctype} {name} = {{}};\n"]
 
@@ -3627,7 +3646,8 @@ def codegen_kernel(kernel, device, options):
         reverse_args=indent(reverse_args),
         forward_body=forward_body,
         reverse_body=reverse_body,
-    )
+        shaadj.smem_bytes_forward,
+        adj.smem_bytes_backward)
 
     return s
 

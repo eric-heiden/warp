@@ -2991,7 +2991,7 @@ class Tile:
             raise RuntimeError(f"Unrecognized tile storage type {self.storage}")
 
     # generates C-initializer string
-    def cinit(self, adjoint=False):
+    def cinit(self, allocator, adjoint=False):
         from warp.codegen import Var
 
         if self.storage == "register":
@@ -3001,22 +3001,28 @@ class Tile:
             # then don't allocate any memory
 
             if adjoint:
-                # backward pass requires zeroed memory
-                return f"wp::tile_alloc_zeros<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{self.strides[0]}, {self.strides[1]}, {Tile.alloc()}>()"
+                
+                # allocate dynamic shared memory for this tile
+                shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
+
+                # backward pass requires zeroed memory                
+                return f"wp::tile_alloc_zeros<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{self.strides[0]}, {self.strides[1]}, {shared_memory_offset}>()"
             else:
                 if not self.owner:
                     # will be initialized by subsequent call, e.g.: t = tile_broadcast(a)
                     return "NULL"
                 else:
-                    # forward mode can be uninitialized until first used by the kernel
-                    return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{Tile.alloc()}>()"
+                    # allocate dynamic shared memory for this tile
+                    shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
 
-    # generate a unique allocation index for shared memory
-    @classmethod
-    def alloc(cls):
-        index = Tile.allocation
-        Tile.allocation += 1
-        return index
+                    # forward mode can be uninitialized until first used by the kernel
+                    return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{shared_memory_offset}>()"
+
+
+    # return total tile size in bytes
+    def size_in_bytes(self):
+        num_bytes = type_size_in_bytes(self.dtype)*self.M*self.N
+        return num_bytes
 
 
 class TileZeros(Tile):

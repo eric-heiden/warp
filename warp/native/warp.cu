@@ -155,6 +155,7 @@ struct DeviceInfo
     int arch = 0;
     int is_uva = 0;
     int is_mempool_supported = 0;
+    int max_smem_bytes = 0;
     CUcontext primary_context = NULL;
 };
 
@@ -268,6 +269,7 @@ int cuda_init()
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, device));
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].is_uva, CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING, device));
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].is_mempool_supported, CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device));
+                check_cu(cuDeviceGetAttribute_f(&g_devices[i].max_smem_bytes, CU_DEVICE_ATTRIBUTE_max_smem_bytes_PER_BLOCK, device));
                 int major = 0;
                 int minor = 0;
                 check_cu(cuDeviceGetAttribute_f(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
@@ -2666,6 +2668,7 @@ size_t cuda_compile_program(const char* cuda_src, int arch, const char* include_
     {
         opts.push_back("--define-macro=_DEBUG");
         opts.push_back("--generate-line-info");
+
         // disabling since it causes issues with `Unresolved extern function 'cudaGetParameterBufferV2'
         //opts.push_back("--device-debug");
     }
@@ -3114,24 +3117,42 @@ void* cuda_get_kernel(void* context, void* module, const char* name)
         return NULL;
     }
 
+    // look up symbol in the module that stores the amount of 
+    // required dynamic memory for this kernel
+    std::string smem_symbol = std::string(name) + "_smem_bytes";
+    int kernel_smem_bytes;
+    cudaError_t err = cudaMemcpyFromSymbol(&kernel_smem_bytes, smem_symbol.c_str(), sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != CUDA_SUCCESS):
+    {
+        printf("Failed to lookup shared memory size from module with name %s\n", smem_symbol.c_str());
+    }
+
+    // configure shared memory 
+    err = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes)
+    if (err != CUDA_SUCCESS)
+    {
+        int max_smem_bytes = g_contexts[context].device_info->max_smem_bytes;
+        
+        printf("Failed to configure kernel shared memory for this device, tried to configure %s kernel for %d bytes, but maximum available is %d", name, kernel_smem_bytes, max_smem_bytes);
+        return err;
+    }
+
     g_kernel_names[kernel] = name;
 
     return kernel;
 }
 
-size_t cuda_launch_kernel(void* context, void* kernel, size_t dim, int max_blocks, int tile_size, void** args, void* stream)
+size_t cuda_launch_kernel(void* context, void* kernel, size_t dim, int max_blocks, int block_dim, int shared_memory_bytes, void** args, void* stream)
 {
     ContextGuard guard(context);
 
-    if (tile_size <= 0)
+    if (block_dim <= 0)
     {
 #if defined(_DEBUG)
-        fprintf(stderr, "Warp warning: Got tile_size %d. Setting to 256.\n", dim, tile_size);
+        fprintf(stderr, "Warp warning: Launch got block_dim %d. Setting to 256.\n", dim, block_dim);
 #endif
-        tile_size = 256;
+        block_dim = 256;
     }
-
-    const int block_dim = tile_size;
 
     // CUDA specs up to compute capability 9.0 says the max x-dim grid is 2**31-1, so
     // grid_dim is fine as an int for the near future
@@ -3163,7 +3184,8 @@ size_t cuda_launch_kernel(void* context, void* kernel, size_t dim, int max_block
         (CUfunction)kernel,
         grid_dim, 1, 1,
         block_dim, 1, 1,
-        0, static_cast<CUstream>(stream),
+        shared_memory_bytes,
+        static_cast<CUstream>(stream),
         args,
         0);
 

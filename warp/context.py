@@ -3424,6 +3424,7 @@ class Runtime:
                 ctypes.c_size_t,
                 ctypes.c_int,
                 ctypes.c_int,
+                ctypes.c_int,
                 ctypes.POINTER(ctypes.c_void_p),
                 ctypes.c_void_p,
             ]
@@ -5138,6 +5139,7 @@ def launch(
                     bounds.size,
                     max_blocks,
                     block_dim,
+                    kernel.adj.adj_shared_memory,
                     kernel_params,
                     stream.cuda_stream,
                 )
@@ -5167,6 +5169,7 @@ def launch(
                         bounds.size,
                         max_blocks,
                         block_dim,
+                        kernel.adj.fwd_shared_memory,
                         kernel_params,
                         stream.cuda_stream,
                     )

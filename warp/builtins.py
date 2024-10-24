@@ -1749,11 +1749,12 @@ def tile_zeros_dispatch_func(arg_types: Mapping[str, type], return_type: Any, ar
 
 add_builtin(
     "tile_zeros",
-    input_types={"m": int, "n": int, "dtype": Scalar, "storage": str},
+    input_types={"m": int, "n": int, "dtype": Any, "storage": str},
     defaults={"storage": "register"},
     value_func=tile_zeros_value_func,
     dispatch_func=tile_zeros_dispatch_func,
-    variadic=True,
+    variadic=False,
+    missing_grad=True,
     doc="""Allocates a tile of zero-initialized items.
 
     :param m: Size of the first dimension of the output tile
@@ -1805,11 +1806,11 @@ def tile_ones_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg
 
 add_builtin(
     "tile_ones",
-    input_types={"m": int, "n": int, "dtype": Scalar, "storage": str},
+    input_types={"m": int, "n": int, "dtype": Any, "storage": str},
     defaults={"storage": "register"},
     value_func=tile_ones_value_func,
     dispatch_func=tile_ones_dispatch_func,
-    variadic=True,
+    missing_grad=True,
     doc="""Allocates a tile of one-initialized items.
 
     :param m: Size of the first dimension of the output tile
@@ -1888,11 +1889,11 @@ def tile_arange_dispatch_func(arg_types: Mapping[str, type], return_type: Any, a
 
 add_builtin(
     "tile_arange",
-    input_types={"*args": Scalar, "dtype": Scalar, "storage": str},
+    input_types={"*args": Scalar, "dtype": Any, "storage": str},
     defaults={"dtype": None, "storage": "register"},
     value_func=tile_arange_value_func,
     dispatch_func=tile_arange_dispatch_func,
-    variadic=True,
+    missing_grad=True,
     doc="""Generates a tile of linearly spaced elements.
 
     :param args: Variable-length positional arguments, interpreted as:

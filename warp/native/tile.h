@@ -444,6 +444,7 @@ struct tile_shared_t
     static constexpr int StrideN = StrideN_;
 
     static constexpr bool Aligned = Size%WP_TILE_BLOCK_DIM == 0;
+    static constexpr bool Unique = (StrideM >= N) && (StrideN >= 1);
 
     T* data = NULL;
 
@@ -607,10 +608,14 @@ struct tile_shared_t
             if (!Aligned && linear >= Size)
                 break;
 
-            // use shared memory atomics to accumulate gradients
-            // since for broadcast tiles multiple incoming threads 
-            // may map to a single location in shared memory
-            atomic_add(&(*this)(linear), tile.data[i]);
+            if (Unique)
+                (*this)(linear) += tile.data[i];
+            else
+                // use shared memory atomics to accumulate gradients
+                // since for broadcast tiles (e.g.: a bias vector) multiple incoming threads 
+                // may map to a single location in shared memory
+                atomic_add(&(*this)(linear), tile.data[i]);
+            
         }
 
         WP_TILE_SYNC();
@@ -782,10 +787,11 @@ inline CUDA_CALLABLE void adj_print(Tile& t, AdjTile& a)
 
 
 // helpers to allocate shared tiles
-template <typename T, int M, int N, int Alloc>
+template <typename T, int M, int N, int Offset>
 inline CUDA_CALLABLE auto tile_alloc_empty()
 {
-    WP_TILE_SHARED __align__(16) T data[M*N];
+    extern __shared__ char dynamic_smem_base[];
+    T* data = (T*)(dynamic_smem_base + Offset);
 
 #if FP_CHECK
 
@@ -799,13 +805,14 @@ inline CUDA_CALLABLE auto tile_alloc_empty()
     return tile_shared_t<T, M, N>(data);
 }
 
-template <typename T, int M, int N, int StrideM=N, int StrideN=1, int Alloc>
+template <typename T, int M, int N, int StrideM=N, int StrideN=1, int Offset>
 inline CUDA_CALLABLE auto tile_alloc_zeros()
 {
     // compute the total storage required for the tile (may be different from M*N) for broadcast tiles
     constexpr int Len = (M-1)*StrideM + (N-1)*StrideN + 1;
 
-    WP_TILE_SHARED __align__(16) T data[Len];
+    extern __shared__ char dynamic_smem_base[];
+    T* data = (T*)(dynamic_smem_base + Offset);
 
     for (int i=threadIdx.x; i < Len; i+= WP_TILE_BLOCK_DIM)
         data[i] = T(0);
@@ -1437,7 +1444,7 @@ inline CUDA_CALLABLE void adj_tile_broadcast(Tile& t, Tile& adj_t, AdjTile& adj_
     // we can simply update the gradient element by element
     for (int i=threadIdx.x; i < LenTile; i+=WP_TILE_BLOCK_DIM)
     {
-        atomic_add(&adj_t.data[i], adj_ret.data[i]);
+        adj_t.data[i] += adj_ret.data[i];
     }
 
     WP_TILE_SYNC();
