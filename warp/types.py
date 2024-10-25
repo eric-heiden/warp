@@ -671,6 +671,10 @@ def transformation(dtype=Any):
 
         def __init__(self, *args, **kwargs):
             if len(args) == 1 and len(kwargs) == 0:
+                if is_float(args[0]):
+                    # Initialize from a single scalar.
+                    super().__init__(args[0])
+                    return
                 if args[0]._wp_generic_type_str_ == self._wp_generic_type_str_:
                     # Copy constructor.
                     super().__init__(*args[0])
