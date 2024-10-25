@@ -923,18 +923,18 @@ class Adjoint:
         # Collect the LTOIR required at link-time
         adj.ltoirs = []
 
-        adj.smem_bytes_forward = 0   # tracks how much shared memory is used during the forward pass
-        adj.smem_bytes_backward = 0   # tracks how much shared memory is used during the backward pass
 
     # allocate shared memory for the forward pass
     def alloc_shared_forward(adj, num_bytes):
+        base = adj.smem_bytes_forward
         adj.smem_bytes_forward += num_bytes
-        return adj.smem_bytes_forward
+        return base
 
     # allocate shared memory for the backward pass
     def alloc_shared_backward(adj, num_bytes):
+        base = adj.smem_bytes_backward
         adj.smem_bytes_backward += num_bytes
-        return adj.smem_bytes_backward
+        return base
 
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
@@ -975,6 +975,9 @@ class Adjoint:
 
         # used to generate new label indices
         adj.label_count = 0
+
+        adj.smem_bytes_forward = 0   # tracks how much shared memory is used during the forward pass
+        adj.smem_bytes_backward = 0   # tracks how much shared memory is used during the backward pass
 
         # update symbol map for each argument
         for a in adj.args:
@@ -3646,8 +3649,8 @@ def codegen_kernel(kernel, device, options):
         reverse_args=indent(reverse_args),
         forward_body=forward_body,
         reverse_body=reverse_body,
-        shaadj.smem_bytes_forward,
-        adj.smem_bytes_backward)
+        smem_bytes_forward=adj.smem_bytes_forward,
+        smem_bytes_backward=adj.smem_bytes_backward)
 
     return s
 

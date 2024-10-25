@@ -269,7 +269,7 @@ int cuda_init()
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, device));
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].is_uva, CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING, device));
                 check_cu(cuDeviceGetAttribute_f(&g_devices[i].is_mempool_supported, CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device));
-                check_cu(cuDeviceGetAttribute_f(&g_devices[i].max_smem_bytes, CU_DEVICE_ATTRIBUTE_max_smem_bytes_PER_BLOCK, device));
+                check_cu(cuDeviceGetAttribute_f(&g_devices[i].max_smem_bytes, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device));
                 int major = 0;
                 int minor = 0;
                 check_cu(cuDeviceGetAttribute_f(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
@@ -3106,6 +3106,29 @@ void cuda_unload_module(void* context, void* module)
     check_cu(cuModuleUnload_f((CUmodule)module));
 }
 
+
+int cuda_get_max_shared_memory(void* context)
+{
+    ContextInfo* info = get_context_info(context);
+    if (!info)
+        return -1;
+
+    int max_smem_bytes = info->device_info->max_smem_bytes;
+    return max_smem_bytes;
+}
+
+bool cuda_configure_kernel_shared_memory(void* kernel, int size)
+{
+    int requested_smem_bytes = size;
+
+    // configure shared memory 
+    CUresult res = cuFuncSetAttribute_f(kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_smem_bytes);
+    if (res != CUDA_SUCCESS)
+        return false;
+
+    return true;
+}
+
 void* cuda_get_kernel(void* context, void* module, const char* name)
 {
     ContextGuard guard(context);
@@ -3117,28 +3140,7 @@ void* cuda_get_kernel(void* context, void* module, const char* name)
         return NULL;
     }
 
-    // look up symbol in the module that stores the amount of 
-    // required dynamic memory for this kernel
-    std::string smem_symbol = std::string(name) + "_smem_bytes";
-    int kernel_smem_bytes;
-    cudaError_t err = cudaMemcpyFromSymbol(&kernel_smem_bytes, smem_symbol.c_str(), sizeof(int), cudaMemcpyDeviceToHost);
-    if (err != CUDA_SUCCESS):
-    {
-        printf("Failed to lookup shared memory size from module with name %s\n", smem_symbol.c_str());
-    }
-
-    // configure shared memory 
-    err = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes)
-    if (err != CUDA_SUCCESS)
-    {
-        int max_smem_bytes = g_contexts[context].device_info->max_smem_bytes;
-        
-        printf("Failed to configure kernel shared memory for this device, tried to configure %s kernel for %d bytes, but maximum available is %d", name, kernel_smem_bytes, max_smem_bytes);
-        return err;
-    }
-
     g_kernel_names[kernel] = name;
-
     return kernel;
 }
 
