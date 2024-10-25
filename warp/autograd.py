@@ -77,6 +77,20 @@ def gradcheck(
 
     assert isinstance(function, wp.Kernel), "The function argument must be a Warp kernel"
 
+    if not function.options.get("enable_backward", True):
+        raise ValueError("Kernel must have backward enabled to compute Jacobians")
+
+    jacs_ad = jacobian(
+        function,
+        dim=dim,
+        inputs=inputs,
+        outputs=outputs,
+        input_output_mask=input_output_mask,
+        device=device,
+        max_blocks=max_blocks,
+        max_outputs_per_var=max_outputs_per_var,
+        plot_jacobians=False,
+    )
     jacs_fd = jacobian_fd(
         function,
         dim=dim,
@@ -90,24 +104,12 @@ def gradcheck(
         plot_jacobians=False,
     )
 
-    jacs_ad = jacobian(
-        function,
-        dim=dim,
-        inputs=inputs,
-        outputs=outputs,
-        input_output_mask=input_output_mask,
-        device=device,
-        max_blocks=max_blocks,
-        max_outputs_per_var=max_outputs_per_var,
-        plot_jacobians=False,
-    )
-
     relative_error_jacs = {}
     absolute_error_jacs = {}
 
     if show_summary:
         summary = []
-        summary_header = ["Input", "Output", "Max Abs Error", "Max Rel Error", "Pass"]
+        summary_header = ["Input", "Output", "Max Abs Error", "AD at MAE", "FD at MAE", "Max Rel Error", "Pass"]
 
         class FontColors:
             OKGREEN = "\033[92m"
@@ -116,6 +118,8 @@ def gradcheck(
             ENDC = "\033[0m"
 
     success = True
+    any_grad_mismatch = False
+    any_grad_nan = False
     for (input_i, output_i), jac_fd in jacs_fd.items():
         jac_ad = jacs_ad[input_i, output_i]
         if plot_relative_error or plot_absolute_error:
@@ -142,28 +146,15 @@ def gradcheck(
             cut_jac_fd = cut_jac_fd[:, :max_inputs_per_var]
             cut_jac_ad = cut_jac_ad[:, :max_inputs_per_var]
         grad_matches = np.allclose(cut_jac_ad, cut_jac_fd, atol=atol, rtol=rtol)
+        any_grad_mismatch = any_grad_mismatch or not grad_matches
         success = success and grad_matches
-        if not grad_matches:
-            if raise_exception:
-                raise ValueError(
-                    f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
-                    f"finite difference and autodiff gradients do not match"
-                )
-            elif not show_summary:
-                return False
         isnan = np.any(np.isnan(cut_jac_ad))
+        any_grad_nan = any_grad_nan or isnan
         success = success and not isnan
-        if isnan:
-            if raise_exception:
-                raise ValueError(
-                    f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
-                    f"gradient contains NaN values"
-                )
-            elif not show_summary:
-                return False
 
         if show_summary:
             max_abs_error = np.abs(cut_jac_ad - cut_jac_fd).max()
+            arg_max_abs_error = np.unravel_index(np.argmax(np.abs(cut_jac_ad - cut_jac_fd)), cut_jac_ad.shape)
             max_rel_error = np.abs((cut_jac_ad - cut_jac_fd) / (cut_jac_fd + 1e-8)).max()
             if isnan:
                 pass_str = FontColors.FAIL + "NaN" + FontColors.ENDC
@@ -173,7 +164,17 @@ def gradcheck(
                 pass_str = FontColors.FAIL + "FAIL" + FontColors.ENDC
             input_name = function.adj.args[input_i].label
             output_name = function.adj.args[len(inputs) + output_i].label
-            summary.append([input_name, output_name, f"{max_abs_error:.7e}", f"{max_rel_error:.7e}", pass_str])
+            summary.append(
+                [
+                    input_name,
+                    output_name,
+                    f"{max_abs_error:.3e} at {arg_max_abs_error}",
+                    f"{cut_jac_ad[arg_max_abs_error]:.3e}",
+                    f"{cut_jac_fd[arg_max_abs_error]:.3e}",
+                    f"{max_rel_error:.3e}",
+                    pass_str,
+                ]
+            )
 
     if show_summary:
         print_table(summary_header, summary)
@@ -198,6 +199,18 @@ def gradcheck(
             title=f"{function.key} kernel Jacobian absolute error",
         )
 
+    if raise_exception:
+        if any_grad_mismatch:
+            raise ValueError(
+                f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
+                f"finite difference and autodiff gradients do not match"
+            )
+        if any_grad_nan:
+            raise ValueError(
+                f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
+                f"gradient contains NaN values"
+            )
+
     return success
 
 
@@ -216,6 +229,7 @@ def gradcheck_tape(
     plot_relative_error=False,
     plot_absolute_error=False,
     show_summary: bool = True,
+    reverse_launches: bool = False,
 ) -> bool:
     """
     Checks whether the autodiff gradients for kernels recorded on the Warp tape match finite differences.
@@ -243,6 +257,7 @@ def gradcheck_tape(
         plot_relative_error: If True, visualizes the relative error of the Jacobians in a plot (requires ``matplotlib``).
         plot_absolute_error: If True, visualizes the absolute error of the Jacobians in a plot (requires ``matplotlib``).
         show_summary: If True, prints a summary table of the gradient check results.
+        reverse_launches: If True, reverses the order of the kernel launches on the tape to check.
 
     Returns:
         True if the gradient check passes for all kernels on the tape, False otherwise.
@@ -259,7 +274,10 @@ def gradcheck_tape(
         whitelist_kernels = set(whitelist_kernels)
 
     overall_success = True
-    for launch in tape.launches:
+    launches = reversed(tape.launches) if reverse_launches else tape.launches
+    for launch in launches:
+        if not isinstance(launch, tuple) and not isinstance(launch, list):
+            continue
         if not isinstance(launch[0], wp.Kernel):
             continue
         kernel, dim, max_blocks, inputs, outputs, device = launch[:6]
@@ -267,6 +285,9 @@ def gradcheck_tape(
             continue
         if kernel.key in blacklist_kernels:
             continue
+        if not kernel.options.get("enable_backward", True):
+            continue
+
         input_output_mask = input_output_masks.get(kernel.key)
         success = gradcheck(
             kernel,
@@ -346,11 +367,15 @@ def jacobian_plot(
 
     input_to_ax = {}
     output_to_ax = {}
+    ax_to_input = {}
+    ax_to_output = {}
     for i, j in jacobians.keys():
         if i not in input_to_ax:
             input_to_ax[i] = len(input_to_ax)
+            ax_to_input[input_to_ax[i]] = i
         if j not in output_to_ax:
             output_to_ax[j] = len(output_to_ax)
+            ax_to_output[output_to_ax[j]] = j
 
     num_rows = len(output_to_ax)
     num_cols = len(input_to_ax)
@@ -382,6 +407,8 @@ def jacobian_plot(
             height_ratios.append(jac_wp.shape[0])
             break
 
+    # plt.figure()
+    # plt.clf()
     fig, axs = plt.subplots(
         ncols=num_cols,
         nrows=num_rows,
@@ -416,7 +443,7 @@ def jacobian_plot(
     has_plot = np.ones((num_rows, num_cols), dtype=bool)
     for i in range(num_rows):
         for j in range(num_cols):
-            if (j, i) not in jacobians:
+            if (ax_to_input[j], ax_to_output[i]) not in jacobians:
                 ax = axs[i, j]
                 ax.axis("off")
                 has_plot[i, j] = False
@@ -445,17 +472,17 @@ def jacobian_plot(
         jac = jac_wp.numpy()
         # Jacobian matrix has output stride already multiplied to first dimension
         jac = jac.reshape(jac_wp.shape[0], jac_wp.shape[1] * input_stride)
-        ax.xaxis.set_minor_formatter("")
-        ax.yaxis.set_minor_formatter("")
-        ax.xaxis.set_minor_locator(MultipleLocator(1))
-        ax.yaxis.set_minor_locator(MultipleLocator(1))
+        # ax.xaxis.set_minor_formatter("")
+        # ax.yaxis.set_minor_formatter("")
+        # ax.xaxis.set_minor_locator(MultipleLocator(1))
+        # ax.yaxis.set_minor_locator(MultipleLocator(1))
         # ax.set_xticks(np.arange(jac.shape[0]))
         # stride = jac.shape[1] // jacobians[jac_i].shape[1]
         # ax.xaxis.set_major_locator(MultipleLocator(input_stride))
-        if input_stride > 1:
-            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=1, steps=[input_stride]))
-            ticks = FuncFormatter(lambda x, pos, input_stride=input_stride: "{0:g}".format(x // input_stride))
-            ax.xaxis.set_major_formatter(ticks)
+        # if input_stride > 1:
+        #     ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=1, steps=[input_stride]))
+        #     ticks = FuncFormatter(lambda x, pos, input_stride=input_stride: "{0:g}".format(x // input_stride))
+        #     ax.xaxis.set_major_formatter(ticks)
         # ax.xaxis.set_major_locator(FixedLocator(np.arange(0, jac.shape[1] + 1, input_stride)))
         # ax.xaxis.set_major_formatter('{x:.0f}')
         # ticks =  np.arange(jac_wp.shape[1] + 1)
@@ -465,13 +492,19 @@ def jacobian_plot(
         # ax.yaxis.set_major_formatter('{x:.0f}')
         # ax.yaxis.set_major_locator(MultipleLocator(output_stride))
 
-        if output_stride > 1:
-            ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=1, steps=[output_stride]))
-        max_y = jac_wp.shape[0]
-        ticks = FuncFormatter(
-            lambda y, pos, max_y=max_y, output_stride=output_stride: "{0:g}".format((max_y - y) // output_stride)
-        )
-        ax.yaxis.set_major_formatter(ticks)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+        # if output_stride > 1:
+        #     try:
+        #         ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=1, steps=[output_stride]))
+        #     except ValueError:
+        #         pass
+        # max_y = jac_wp.shape[0]
+        # ticks = FuncFormatter(
+        #     lambda y, pos, max_y=max_y, output_stride=output_stride: "{0:g}".format((max_y - y) // output_stride)
+        # )
+        # ax.yaxis.set_major_formatter(ticks)
         # divide by output stride to get the correct number of rows
         ticks = np.arange(jac_wp.shape[0] // output_stride + 1)
         # flip y labels to match the order of matrix rows starting from the top
@@ -568,6 +601,76 @@ def plot_kernel_jacobians(
     )
 
 
+@wp.kernel
+def convert_array_1d_to_float64(arr_in: wp.array(dtype=float), arr_out: wp.array(dtype=wp.float64)):
+    i = wp.tid()
+    arr_out[i] = wp.float64(arr_in[i])
+
+
+@wp.kernel
+def convert_array_2d_to_float64(arr_in: wp.array(dtype=float, ndim=2), arr_out: wp.array(dtype=wp.float64, ndim=2)):
+    i, j = wp.tid()
+    arr_out[i, j] = wp.float64(arr_in[i, j])
+
+
+@wp.kernel
+def convert_array_3d_to_float64(arr_in: wp.array(dtype=float, ndim=3), arr_out: wp.array(dtype=wp.float64, ndim=3)):
+    i, j, k = wp.tid()
+    arr_out[i, j, k] = wp.float64(arr_in[i, j, k])
+
+
+@wp.kernel
+def convert_array_4d_to_float64(arr_in: wp.array(dtype=float, ndim=4), arr_out: wp.array(dtype=wp.float64, ndim=4)):
+    i, j, k, l = wp.tid()
+    arr_out[i, j, k, l] = wp.float64(arr_in[i, j, k, l])
+
+
+conversion_kernels = {
+    1: convert_array_1d_to_float64,
+    2: convert_array_2d_to_float64,
+    3: convert_array_3d_to_float64,
+    4: convert_array_4d_to_float64,
+}
+
+
+def convert_to_float64(arr):
+    if arr.dtype == wp.float64:
+        return arr
+    arr_float64 = wp.empty(arr.shape, dtype=wp.float64, device=arr.device)
+    wp.launch(conversion_kernels[arr.ndim], dim=arr.shape, inputs=[arr, arr_float64], device=arr.device)
+    return arr_float64
+
+
+type_conversions = {
+    wp.float32: wp.float64,
+    wp.float64: wp.float64,
+    wp.vec2f: wp.vec2d,
+    wp.vec3f: wp.vec3d,
+    wp.vec4f: wp.vec4d,
+    wp.mat22f: wp.mat22d,
+    wp.mat33f: wp.mat33d,
+    wp.mat44f: wp.mat44d,
+    wp.vec2d: wp.vec2d,
+    wp.vec3d: wp.vec3d,
+    wp.vec4d: wp.vec4d,
+    wp.mat22d: wp.mat22d,
+    wp.mat33d: wp.mat33d,
+    wp.mat44d: wp.mat44d,
+    wp.quatf: wp.quatd,
+    wp.quatd: wp.quatd,
+    wp.spatial_matrixf: wp.spatial_matrixd,
+    wp.spatial_matrixd: wp.spatial_matrixd,
+    wp.transformf: wp.transformd,
+    wp.transformd: wp.transformd,
+    wp.spatial_vectorf: wp.spatial_vectord,
+    wp.spatial_vectord: wp.spatial_vectord,
+}
+
+
+def type_to_float64(t):
+    return type_conversions[t]
+
+
 def scalarize_array_1d(arr):
     # convert array to 1D array with scalar dtype
     if arr.dtype in wp.types.scalar_types:
@@ -640,6 +743,8 @@ def jacobian(
     Returns:
         A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
     """
+    if not kernel.options.get("enable_backward", True):
+        raise ValueError("Kernel must have backward enabled to compute Jacobians")
     if outputs is None:
         outputs = []
     if input_output_mask is None:
@@ -650,6 +755,11 @@ def jacobian(
         if isinstance(name, int):
             return name
         return arg_names.index(name) + offset
+
+    def zero_grads(arrays):
+        for array in arrays:
+            if isinstance(array, wp.array) and array.requires_grad:
+                array.grad.zero_()
 
     input_output_mask = [
         (resolve_arg(input_name), resolve_arg(output_name, -len(inputs)))
@@ -662,6 +772,9 @@ def jacobian(
 
     tape = wp.Tape()
     tape.record_launch(kernel=kernel, dim=dim, max_blocks=max_blocks, inputs=inputs, outputs=outputs, device=device)
+
+    zero_grads(inputs)
+    zero_grads(outputs)
 
     jacobians = {}
 
@@ -681,12 +794,18 @@ def jacobian(
         if max_outputs_per_var > 0:
             output_num = min(output_num, max_outputs_per_var)
         for i in range(output_num):
-            tape.zero()
+            output.grad.zero_()
             if i > 0:
                 set_element(out_grad, i - 1, 0.0)
             set_element(out_grad, i, 1.0)
             tape.backward()
             jacobian[i].assign(input.grad)
+            # if i < output_num - 1:
+            #     # reset input gradients
+            #     tape.zero()
+
+            zero_grads(inputs)
+            zero_grads(outputs)
         output.grad.zero_()
         jacobians[input_i, output_i] = jacobian
 
@@ -763,6 +882,12 @@ def jacobian_fd(
 
     jacobians = {}
 
+    def conditional_clone(obj):
+        if isinstance(obj, wp.array):
+            return wp.clone(obj)
+        return obj
+    outputs_copy = [conditional_clone(output) for output in outputs]
+
     for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
         if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
             continue
@@ -777,13 +902,20 @@ def jacobian_fd(
 
         left = wp.clone(output)
         right = wp.clone(output)
+        left_copy = wp.clone(output)
+        right_copy = wp.clone(output)
         flat_left = scalarize_array_1d(left)
         flat_right = scalarize_array_1d(right)
 
-        left_outputs = outputs[:output_i] + [left] + outputs[output_i + 1 :]
-        right_outputs = outputs[:output_i] + [right] + outputs[output_i + 1 :]
+        outputs_until_left = [conditional_clone(output) for output in outputs_copy[:output_i]]
+        outputs_until_right = [conditional_clone(output) for output in outputs_copy[:output_i]]
+        outputs_after_left = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
+        outputs_after_right = [conditional_clone(output) for output in outputs_copy[output_i + 1 :]]
+        left_outputs = outputs_until_left + [left] + outputs_after_left
+        right_outputs = outputs_until_right + [right] + outputs_after_right
 
         input_num = flat_input.shape[0]
+        flat_input_copy = wp.clone(flat_input)
         jacobian = wp.empty((flat_left.size, input.size), dtype=input.dtype, device=input.device)
         jacobian.fill_(wp.nan)
 
@@ -792,15 +924,28 @@ def jacobian_fd(
         if max_inputs_per_var > 0:
             input_num = min(input_num, max_inputs_per_var)
         for i in range(input_num):
-            set_element(flat_input, i, -eps, relative=True)
+            set_element(flat_input, i, wp.float64(-eps), relative=True)
             wp.launch(kernel, dim=dim, max_blocks=max_blocks, inputs=inputs, outputs=left_outputs, device=device)
 
-            set_element(flat_input, i, 2 * eps, relative=True)
+            set_element(flat_input, i, wp.float64(2 * eps), relative=True)
             wp.launch(kernel, dim=dim, max_blocks=max_blocks, inputs=inputs, outputs=right_outputs, device=device)
 
-            set_element(flat_input, i, -eps, relative=True)
+            # restore input
+            flat_input.assign(flat_input_copy)
 
-            compute_fd(flat_left, flat_right, eps, jacobian_t[i])
+            compute_fd(
+                flat_left,
+                flat_right,
+                wp.float64(eps),
+                jacobian_t[i],
+            )
+
+            if i < input_num - 1:
+                # reset output buffers
+                left.assign(left_copy)
+                right.assign(right_copy)
+                flat_left = scalarize_array_1d(left)
+                flat_right = scalarize_array_1d(right)
 
         output.grad.zero_()
         jacobians[input_i, output_i] = jacobian
@@ -831,7 +976,7 @@ def set_element(a: wp.array(dtype=Any), i: int, val: Any, relative: bool = False
 @wp.kernel(enable_backward=False)
 def compute_fd_kernel(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: Any, fd: wp.array(dtype=Any)):
     tid = wp.tid()
-    fd[tid] = (right[tid] - left[tid]) / (2.0 * eps)
+    fd[tid] = wp.float32((wp.float64(right[tid]) - wp.float64(left[tid])) / (wp.float64(2.0) * eps))
 
 
 def compute_fd(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: float, fd: wp.array(dtype=Any)):
@@ -848,7 +993,10 @@ def compute_error_kernel(
     tid = wp.tid()
     ad = jacobian_ad[tid]
     fd = jacobian_fd[tid]
-    relative_error[tid] = (ad - fd) / (ad + 1e-8)
+    denom = ad
+    if abs(ad) < 1e-8:
+        denom = (type(ad))(1e-8)
+    relative_error[tid] = (ad - fd) / denom
     absolute_error[tid] = wp.abs(ad - fd)
 
 
