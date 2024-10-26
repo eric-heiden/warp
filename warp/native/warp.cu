@@ -3122,7 +3122,7 @@ bool cuda_configure_kernel_shared_memory(void* kernel, int size)
     int requested_smem_bytes = size;
 
     // configure shared memory 
-    CUresult res = cuFuncSetAttribute_f(kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_smem_bytes);
+    CUresult res = cuFuncSetAttribute_f((CUfunction)kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_smem_bytes);
     if (res != CUDA_SUCCESS)
         return false;
 

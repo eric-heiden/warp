@@ -1624,8 +1624,8 @@ class ModuleBuilder:
         for kernel in self.kernels:
             name = kernel.get_mangled_name()
 
-            meta[name + "_smem_bytes"] = kernel.adj.smem_bytes_forward
-            meta[name + "_smem_bytes"] = kernel.adj.smem_bytes_backward
+            meta[name + "_cuda_kernel_forward_smem_bytes"] = kernel.adj.smem_bytes_forward
+            meta[name + "_cuda_kernel_backward_smem_bytes"] = kernel.adj.smem_bytes_backward
 
         return meta
 
@@ -1715,24 +1715,24 @@ class ModuleExec:
 
         if self.device.is_cuda:
             
-            forward_name = (name + "_cuda_kernel_forward").encode("utf-8")
-            forward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, forward_name)
+            forward_name = (name + "_cuda_kernel_forward")
+            forward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, forward_name.encode("utf-8"))
             
-            backward_name = (name + "_cuda_kernel_backward").encode("utf-8")
-            backward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, backward_name)
+            backward_name = (name + "_cuda_kernel_backward")
+            backward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, backward_name.encode("utf-8"))
 
             # look up the required shared memory size for each kernel from module metadata
             forward_smem_bytes = self.meta[forward_name + "_smem_bytes"]
             backward_smem_bytes = self.meta[backward_name + "_smem_bytes"]
 
             # configure kernels maximum shared memory size           
-            max_smem_size = runtime.core.cuda_get_max_shared_memory(self.device_context)
+            max_smem_bytes = runtime.core.cuda_get_max_shared_memory(self.device.context)
             
-            if not runtime.core.cuda_configure_kernel_smem(self.device_context, forward, forward_smem_bytes):
-                print(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+            if not runtime.core.cuda_configure_kernel_shared_memory(forward_kernel, forward_smem_bytes):
+                raise RuntimeError(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
 
-            if not runtime.core.cuda_configure_kernel_smem(self.device_context, backward, backward_smem_bytes):
-                print(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+            if not runtime.core.cuda_configure_kernel_shared_memory(backward_kernel, backward_smem_bytes):
+                raise RuntimeError(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
 
             hooks = KernelHooks(forward_kernel,
                                 backward_kernel,
@@ -2124,7 +2124,7 @@ class Module:
             # -----------------------------------------------------------
             # Load CPU or CUDA binary
 
-            meta_path = os.path.join(build_dir, "module_codegen.meta")
+            meta_path = os.path.join(module_dir, "module_codegen.meta")
             with open(meta_path, "r") as meta_file:
                 meta = json.load(meta_file)
             
@@ -3470,8 +3470,8 @@ class Runtime:
             self.core.cuda_get_max_shared_memory.argtypes = [ctypes.c_void_p]
             self.core.cuda_get_max_shared_memory.restype = ctypes.c_int
 
-            self.core.cuda_configure_kernel_smem.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            self.core.cuda_configure_kernel_smem.restype = ctypes.c_bool
+            self.core.cuda_configure_kernel_shared_memory.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self.core.cuda_configure_kernel_shared_memory.restype = ctypes.c_bool
 
             self.core.cuda_launch_kernel.argtypes = [
                 ctypes.c_void_p,
