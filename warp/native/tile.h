@@ -328,6 +328,11 @@ struct tile_register_t
         return *this; 
     }
 
+    inline CUDA_CALLABLE const auto& copy_to_register() const 
+    {
+        return *this; 
+    }
+
     void copy_to_global(array_t<T> dest, int x)
     {
         assert(dest.ndim == 1);
@@ -432,7 +437,33 @@ auto tile_register_like()
 
 
 
-template <typename T, int M_, int N_, int StrideM_=N_, int StrideN_=1>
+inline CUDA_CALLABLE void* tile_alloc_shared(int num_bytes, bool init=false)
+{
+    // we maintain a per-thread offset into dynamic
+    // shared memory that allows us to keep track of 
+    // current use across dynamic function calls
+    __shared__ int smem_base[WP_TILE_BLOCK_DIM];
+
+    if (init)
+    {
+        smem_base[threadIdx.x] = 0;
+        return NULL;
+    }
+    else
+    {
+        const int offset = smem_base[threadIdx.x];
+        
+        // one entry per-thread so no need for synchronization
+        smem_base[threadIdx.x] += num_bytes;
+
+        extern __shared__ char dynamic_smem_base[];
+        return &(dynamic_smem_base[offset]);
+    }
+}
+
+
+
+template <typename T, int M_, int N_, int StrideM_=N_, int StrideN_=1, bool Owner_=true>
 struct tile_shared_t
 {
     using Type = T;
@@ -445,6 +476,7 @@ struct tile_shared_t
 
     static constexpr bool Aligned = Size%WP_TILE_BLOCK_DIM == 0;
     static constexpr bool Unique = (StrideM >= N) && (StrideN >= 1);
+    static constexpr bool Owner = Owner_;
 
     T* data = NULL;
 
@@ -456,7 +488,16 @@ struct tile_shared_t
     // initialize from an existing tile's memory
     inline CUDA_CALLABLE tile_shared_t(T* smem) : data(smem)
     {
-    }    
+    }
+
+    inline CUDA_CALLABLE ~tile_shared_t()
+    {
+        if (Owner)
+        {
+            // update our per-thread shared memory allocator
+            tile_alloc_shared(-M*N*sizeof(T));
+        }
+    }
 
     // assign from a register tile
     template <typename Tile>
@@ -789,13 +830,13 @@ inline CUDA_CALLABLE void adj_print(Tile& t, AdjTile& a)
 // helpers to allocate shared tiles
 template <typename T, int M, int N, int Offset>
 inline CUDA_CALLABLE auto tile_alloc_empty()
-{
-    extern __shared__ char dynamic_smem_base[];
-    T* data = (T*)(dynamic_smem_base + Offset);
+
+{   constexpr int Len = M*N;
+    T* data = (T*)tile_alloc_shared(Len*sizeof(T));
 
 #if FP_CHECK
 
-    for (int i=threadIdx.x; i < M*N; i+= WP_TILE_BLOCK_DIM)
+    for (int i=threadIdx.x; i < Len; i+= WP_TILE_BLOCK_DIM)
         data[i] = T(nanf(""));
 
     WP_TILE_SYNC();
@@ -810,9 +851,7 @@ inline CUDA_CALLABLE auto tile_alloc_zeros()
 {
     // compute the total storage required for the tile (may be different from M*N) for broadcast tiles
     constexpr int Len = (M-1)*StrideM + (N-1)*StrideN + 1;
-
-    extern __shared__ char dynamic_smem_base[];
-    T* data = (T*)(dynamic_smem_base + Offset);
+    T* data = (T*)tile_alloc_shared(Len*sizeof(T));
 
     for (int i=threadIdx.x; i < Len; i+= WP_TILE_BLOCK_DIM)
         data[i] = T(0);
@@ -1264,6 +1303,14 @@ inline CUDA_CALLABLE auto tile_add(TileA& a, TileB& b)
     return tile_binary_map(add, a, b);
 }
 
+// tile + tile, we implement this 
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE auto add(TileA& a, TileB& b)
+{
+    return tile_binary_map(add, a, b);
+}
+
+
 template <typename TileA, typename TileB, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_add(TileA& a, TileB& b, TileA& adj_a, TileB& adj_b, AdjTile& adj_c)
 {
@@ -1412,7 +1459,7 @@ template <typename Tile>
 inline CUDA_CALLABLE auto tile_transpose(Tile& t)
 {    
     // alias incoming tile 
-    return tile_shared_t<typename Tile::Type, Tile::N, Tile::M, Tile::StrideN, Tile::StrideM>(t.data);
+    return tile_shared_t<typename Tile::Type, Tile::N, Tile::M, Tile::StrideN, Tile::StrideM, false>(t.data);
 }
 
 template <typename Tile, typename AdjTile>
@@ -1428,7 +1475,7 @@ template <int M, int N, int StrideM, int StrideN, typename Tile>
 inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
 {    
     // alias incoming tile with new strides
-    return tile_shared_t<typename Tile::Type, M, N, StrideN, StrideM>(t.data);
+    return tile_shared_t<typename Tile::Type, M, N, StrideN, StrideM, false>(t.data);
 }
 
 template <typename Tile, typename AdjTile>

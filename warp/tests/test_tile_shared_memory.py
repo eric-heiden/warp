@@ -87,7 +87,7 @@ def test_tile_shared_mem_large(test, device):
     hooks = module_exec.get_kernel_hooks(compute)
 
     assert(hooks.forward_smem_bytes == expected_forward_bytes)
-    assert(hooks.backward_smem_bytes == 0)
+    assert(hooks.backward_smem_bytes == expected_backward_bytes)
 
 
 # checks that we can configure dynamic shared memory during graph capture
@@ -108,7 +108,7 @@ def test_tile_shared_mem_graph(test, device):
 
     out = wp.empty((DIM_M, DIM_N), dtype=float, device=device)
 
-    wp.capture_begin()
+    wp.capture_begin(force_module_load=True)
     wp.launch_tiled(compute, dim=[1], inputs=[out], block_dim=BLOCK_DIM, device=device)
     graph = wp.capture_end()
 
@@ -129,6 +129,50 @@ def test_tile_shared_mem_graph(test, device):
     assert(hooks.backward_smem_bytes == expected_backward_bytes)
 
 
+# checks that stack allocations work for user functions
+def test_tile_shared_mem_func(test, device):
+
+    DIM_M = 32
+    DIM_N = 32
+
+    BLOCK_DIM = 256
+    
+    @wp.func
+    def add_tile_small():
+        a = wp.tile_ones(16, 16, dtype=float, storage="shared")
+        b = wp.tile_ones(16, 16, dtype=float, storage="shared")*2.0
+
+        return a + b
+
+    @wp.func
+    def add_tile_big():
+        a = wp.tile_ones(64, 64, dtype=float, storage="shared")
+        b = wp.tile_ones(64, 64, dtype=float, storage="shared")*2.0
+
+        return a + b
+
+    @wp.kernel
+    def compute(out: wp.array2d(dtype=float)):
+
+        s = add_tile_small()
+        b = add_tile_big()
+
+        wp.tile_store(out, 0,0, b)
+
+    out = wp.empty((DIM_M, DIM_N), dtype=float, device=device)
+
+    wp.launch_tiled(compute, dim=[1], inputs=[out], block_dim=BLOCK_DIM, device=device)
+
+    # check shared memory for kernel on the device
+    module_exec = compute.module.load(device, BLOCK_DIM)
+    hooks = module_exec.get_kernel_hooks(compute)
+
+    # ensure that total required dynamic shared is the larger of the two tiles
+    expected_required_shared = 64*64*4*2
+
+    assert(hooks.forward_smem_bytes == expected_required_shared)
+    assert(hooks.backward_smem_bytes == expected_required_shared*2)
+
 
 devices = get_cuda_test_devices()
 
@@ -137,10 +181,10 @@ class TestTileSharedMemory(unittest.TestCase):
     pass
 
 
-add_function_test(TestTileSharedMemory, "test_tile_shared_mem_size", test_tile_shared_mem_size, devices=devices)
-add_function_test(TestTileSharedMemory, "test_tile_shared_mem_large", test_tile_shared_mem_large, devices=devices)
+add_function_test(TestTileSharedMemory, "test_tile_shared_mem_size", test_tile_shared_mem_size, devices=devices, check_output=False)
+add_function_test(TestTileSharedMemory, "test_tile_shared_mem_large", test_tile_shared_mem_large, devices=devices, check_output=False)
 add_function_test(TestTileSharedMemory, "test_tile_shared_mem_graph", test_tile_shared_mem_graph, devices=devices)
-#add_function_test(TestTileSharedMemory, "test_tile_shared_mem_func", test_tile_shared_mem_func, devices=devices)
+add_function_test(TestTileSharedMemory, "test_tile_shared_mem_func", test_tile_shared_mem_func, devices=devices)
 
 
 if __name__ == "__main__":

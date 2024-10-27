@@ -2991,7 +2991,7 @@ class Tile:
             raise RuntimeError(f"Unrecognized tile storage type {self.storage}")
 
     # generates C-initializer string
-    def cinit(self, allocator, adjoint=False):
+    def cinit(self, adjoint=False):
         from warp.codegen import Var
 
         if self.storage == "register":
@@ -3003,20 +3003,20 @@ class Tile:
             if adjoint:
                 
                 # allocate dynamic shared memory for this tile
-                shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
+                #shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
 
                 # backward pass requires zeroed memory                
-                return f"wp::tile_alloc_zeros<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{self.strides[0]}, {self.strides[1]}, {shared_memory_offset}>()"
+                return f"wp::tile_alloc_zeros<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{self.strides[0]}, {self.strides[1]}, {0}>()"
             else:
                 if not self.owner:
                     # will be initialized by subsequent call, e.g.: t = tile_broadcast(a)
                     return "NULL"
                 else:
                     # allocate dynamic shared memory for this tile
-                    shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
+                    #shared_memory_offset = allocator(num_bytes=self.size_in_bytes())
 
                     # forward mode can be uninitialized until first used by the kernel
-                    return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{shared_memory_offset}>()"
+                    return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{0}>()"
 
 
     # return total tile size in bytes

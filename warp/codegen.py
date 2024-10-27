@@ -924,17 +924,25 @@ class Adjoint:
         adj.ltoirs = []
 
 
-    # allocate shared memory for the forward pass
-    def alloc_shared_forward(adj, num_bytes):
-        base = adj.smem_bytes_forward
-        adj.smem_bytes_forward += num_bytes
+    # allocate a shared memory tile
+    def alloc_shared(adj, num_bytes):
+        base = adj.smem_bytes
+        adj.smem_bytes += num_bytes
         return base
 
-    # allocate shared memory for the backward pass
-    def alloc_shared_backward(adj, num_bytes):
-        base = adj.smem_bytes_backward
-        adj.smem_bytes_backward += num_bytes
-        return base
+    # allocate extra space for a function call that requires its
+    # own shared memory space, we treat shared memory as a stack
+    # where each function pushes and pops space off, the extra
+    # quantity is the 'roofline' amount required for the entire kernel
+    def alloc_shared_extra(adj, num_bytes):
+        adj.smem_bytes_extra = max(adj.smem_bytes_extra, num_bytes)
+
+    # returns the total number of bytes for a function 
+    # based on it's own requirements + worst case
+    # requirements of any dependent functions
+    def get_total_required_shared(adj):
+        return adj.smem_bytes + adj.smem_bytes_extra
+
 
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
@@ -976,8 +984,8 @@ class Adjoint:
         # used to generate new label indices
         adj.label_count = 0
 
-        adj.smem_bytes_forward = 0   # tracks how much shared memory is used during the forward pass
-        adj.smem_bytes_backward = 0   # tracks how much shared memory is used during the backward pass
+        adj.smem_bytes = 0         # tracks how much shared memory is used by this function
+        adj.smem_bytes_extra = 0   # tracks how much *worst case* shared memory is required by any dependent function calls 
 
         # update symbol map for each argument
         for a in adj.args:
@@ -1106,6 +1114,10 @@ class Adjoint:
         adj.variables.append(v)
 
         adj.blocks[-1].vars.append(v)
+
+        # keep track of shared memory allocations
+        if is_tile(type) and type.storage == "shared":
+            adj.alloc_shared(type.size_in_bytes())
 
         return v
 
@@ -1398,6 +1410,11 @@ class Adjoint:
             if arg_str is not None:
                 reverse_call = f"{func.namespace}adj_{func.native_func}({arg_str});"
                 adj.add_reverse(reverse_call)
+
+        # update our smem roofline requirements based on any 
+        # shared memory required by the dependent function call
+        if not func.is_builtin():
+            adj.alloc_shared_extra(func.adj.get_total_required_shared())
 
         return output
 
@@ -3102,9 +3119,6 @@ static CUDA_CALLABLE void adj_{name}(
 
 cuda_kernel_template = """
 
-__constant__ int {name}_cuda_kernel_forward_smem_bytes = {smem_bytes_forward};
-__constant__ int {name}_cuda_kernel_backward_smem_bytes = {smem_bytes_backward};
-
 extern "C" __global__ void {name}_cuda_kernel_forward(
     {forward_args})
 {{
@@ -3112,6 +3126,9 @@ extern "C" __global__ void {name}_cuda_kernel_forward(
          _idx < dim.size;
          _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
+        // reset shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
 {forward_body}    }}
 }}
 
@@ -3122,6 +3139,9 @@ extern "C" __global__ void {name}_cuda_kernel_backward(
          _idx < dim.size;
          _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
+        // reset shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
 {reverse_body}    }}
 }}
 
@@ -3129,9 +3149,6 @@ extern "C" __global__ void {name}_cuda_kernel_backward(
 
 
 cpu_kernel_template = """
-
-static int {name}_cpu_kernel_forward_smem_bytes = {smem_bytes_forward};
-static int {name}_cpu_kernel_backward_smem_bytes = {smem_bytes_backward};
 
 void {name}_cpu_kernel_forward(
     {forward_args})
@@ -3364,7 +3381,7 @@ def codegen_func_forward(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adj.alloc_shared_forward, adj)};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adjoint=False)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3401,7 +3418,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adj.alloc_shared_backward, adjoint=True)};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adjoint=False)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3416,7 +3433,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
         ctype = var.ctype(value_type=True)
 
         if is_tile(var.type):
-            lines += [f"{ctype} {name} = {var.type.cinit(adj.alloc_shared_backward, adjoint=True)};\n"]
+            lines += [f"{ctype} {name} = {var.type.cinit(adjoint=True)};\n"]
         else:
             lines += [f"{ctype} {name} = {{}};\n"]
 
@@ -3648,9 +3665,7 @@ def codegen_kernel(kernel, device, options):
         forward_args=indent(forward_args),
         reverse_args=indent(reverse_args),
         forward_body=forward_body,
-        reverse_body=reverse_body,
-        smem_bytes_forward=adj.smem_bytes_forward,
-        smem_bytes_backward=adj.smem_bytes_backward)
+        reverse_body=reverse_body)
 
     return s
 
