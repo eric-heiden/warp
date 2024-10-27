@@ -1729,11 +1729,13 @@ class ModuleExec:
             max_smem_bytes = runtime.core.cuda_get_max_shared_memory(self.device.context)
             
             if not runtime.core.cuda_configure_kernel_shared_memory(forward_kernel, forward_smem_bytes):
-                raise RuntimeError(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+                print(f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
 
-            if "enable_backward" in kernel.options and kernel.options["enable_backward"]:
-                if not runtime.core.cuda_configure_kernel_shared_memory(backward_kernel, backward_smem_bytes):
-                    raise RuntimeError(f"Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+            options = dict(kernel.module.options)
+            options.update(kernel.options)
+
+            if options["enable_backward"] != False and not runtime.core.cuda_configure_kernel_shared_memory(backward_kernel, backward_smem_bytes):
+                print(f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
 
             hooks = KernelHooks(forward_kernel,
                                 backward_kernel,

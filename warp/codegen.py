@@ -924,25 +924,25 @@ class Adjoint:
         adj.ltoirs = []
 
 
-    # allocate a shared memory tile
-    def alloc_shared(adj, num_bytes):
-        base = adj.smem_bytes
-        adj.smem_bytes += num_bytes
-        return base
-
     # allocate extra space for a function call that requires its
     # own shared memory space, we treat shared memory as a stack
     # where each function pushes and pops space off, the extra
     # quantity is the 'roofline' amount required for the entire kernel
     def alloc_shared_extra(adj, num_bytes):
-        adj.smem_bytes_extra = max(adj.smem_bytes_extra, num_bytes)
+        adj.max_required_extra_shared_memory = max(adj.max_required_extra_shared_memory, num_bytes)
 
     # returns the total number of bytes for a function 
     # based on it's own requirements + worst case
     # requirements of any dependent functions
     def get_total_required_shared(adj):
-        return adj.smem_bytes + adj.smem_bytes_extra
 
+        total_shared = 0
+
+        for var in adj.variables:
+            if is_tile(var.type) and var.type.storage == "shared":
+                total_shared += var.type.size_in_bytes()
+
+        return total_shared + adj.max_required_extra_shared_memory
 
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
@@ -984,8 +984,8 @@ class Adjoint:
         # used to generate new label indices
         adj.label_count = 0
 
-        adj.smem_bytes = 0         # tracks how much shared memory is used by this function
-        adj.smem_bytes_extra = 0   # tracks how much *worst case* shared memory is required by any dependent function calls 
+        # tracks how much additional shared memory is required by any dependent function calls
+        adj.max_required_extra_shared_memory = 0   
 
         # update symbol map for each argument
         for a in adj.args:
@@ -1114,10 +1114,6 @@ class Adjoint:
         adj.variables.append(v)
 
         adj.blocks[-1].vars.append(v)
-
-        # keep track of shared memory allocations
-        if is_tile(type) and type.storage == "shared":
-            adj.alloc_shared(type.size_in_bytes())
 
         return v
 
