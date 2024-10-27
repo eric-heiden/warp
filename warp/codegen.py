@@ -1517,7 +1517,7 @@ class Adjoint:
         # zero adjoints
         for i in body_block.vars:
             if is_tile(i.type):
-                reverse.append(adj.indentation + f"\t{i.emit_adj()}.zero();")
+                reverse.append(adj.indentation + f"\t{i.emit_adj()}.grad_zero();")
             else:
                 reverse.append(adj.indentation + f"\t{i.emit_adj()} = {{}};")
 
@@ -3381,7 +3381,7 @@ def codegen_func_forward(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adjoint=False)};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(requires_grad=False)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3418,7 +3418,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
 
     for var in adj.variables:
         if is_tile(var.type):
-            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(adjoint=False)};\n"]
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(requires_grad=True)};\n"]
         elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
@@ -3433,7 +3433,10 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
         ctype = var.ctype(value_type=True)
 
         if is_tile(var.type):
-            lines += [f"{ctype} {name} = {var.type.cinit(adjoint=True)};\n"]
+            if var.type.storage == "register":
+                lines += [f"{var.type.ctype()} {name}(0.0);\n"]   # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
+            elif var.type.storage == "shared":
+                lines += [f"{var.type.ctype()}& {name} = {var.emit()};\n"]    # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
         else:
             lines += [f"{ctype} {name} = {{}};\n"]
 

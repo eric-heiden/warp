@@ -520,6 +520,7 @@ def test_tile_broadcast_grad(test, device):
     b.grad = wp.ones_like(b, device=device)
     tape.backward()
 
+    assert_np_equal(b.numpy(), a.numpy() + np.ones((5,5)))
     assert_np_equal(a.grad.numpy(), np.ones(5) * 5.0)
 
 
