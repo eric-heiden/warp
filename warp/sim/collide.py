@@ -1626,12 +1626,12 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
 
         if model.shape_contact_pair_count or model.ground and model.shape_ground_contact_pair_count:
             if requires_grad:
-                model.rigid_contact_point0 = wp.clone(model.rigid_contact_point0)
-                model.rigid_contact_point1 = wp.clone(model.rigid_contact_point1)
-                model.rigid_contact_offset0 = wp.clone(model.rigid_contact_offset0)
-                model.rigid_contact_offset1 = wp.clone(model.rigid_contact_offset1)
-                model.rigid_contact_normal = wp.clone(model.rigid_contact_normal)
-                model.rigid_contact_thickness = wp.clone(model.rigid_contact_thickness)
+                model.rigid_contact_point0 = wp.empty_like(model.rigid_contact_point0)
+                model.rigid_contact_point1 = wp.empty_like(model.rigid_contact_point1)
+                model.rigid_contact_offset0 = wp.empty_like(model.rigid_contact_offset0)
+                model.rigid_contact_offset1 = wp.empty_like(model.rigid_contact_offset1)
+                model.rigid_contact_normal = wp.empty_like(model.rigid_contact_normal)
+                model.rigid_contact_thickness = wp.empty_like(model.rigid_contact_thickness)
                 model.rigid_contact_count = wp.zeros_like(model.rigid_contact_count)
                 model.rigid_contact_tids = wp.zeros_like(model.rigid_contact_tids)
                 model.rigid_contact_shape0 = wp.empty_like(model.rigid_contact_shape0)
