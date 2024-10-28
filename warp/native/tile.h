@@ -620,7 +620,6 @@ struct tile_shared_t
     // in-place zero
     inline CUDA_CALLABLE void zero()
     {
-        // todo: make this subtile (stride aware)
         for (int i=threadIdx.x; i < M*N; i+= WP_TILE_BLOCK_DIM)
             data(i) = T(0);
 
@@ -742,7 +741,7 @@ struct tile_shared_t
     }
 
     // copy shared tile to register
-    inline CUDA_CALLABLE tile_register_t<T, M, N> copy_to_register() 
+    inline CUDA_CALLABLE tile_register_t<T, M, N> copy_to_register() const
     { 
         tile_register_t<T, M, N> out;
 
@@ -762,7 +761,7 @@ struct tile_shared_t
         return out;
     }
 
-    inline CUDA_CALLABLE void copy_to_global(array_t<T> dest, int x)
+    inline CUDA_CALLABLE void copy_to_global(array_t<T> dest, int x) const
     {
         assert(dest.ndim == 1);
 
@@ -782,18 +781,45 @@ struct tile_shared_t
         const int tile_i = x*M;
         const int tile_j = y*N;
 
-        // wp.array() indexing generates poor code due to char* casting
-        // here we unroll some of the ops, note this assumes byte strides are 
-        // aligned to the element size
-        T* ptr = &wp::index(dest, tile_i, tile_j);
-        const int stride_i = dest.strides[0]/sizeof(T);
-        const int stride_j = dest.strides[1]/sizeof(T);    
+        // check each row is contiguous and 128bit aligned
+        if (dest.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
+        {            
+            constexpr int num_rows = M;
+            constexpr int num_cols = (N*sizeof(T))/sizeof(float4);
 
-        WP_PRAGMA_UNROLL
-        for (int i=threadIdx.x; i < Size; i += WP_TILE_BLOCK_DIM)
+            tile_shared_t<float4, num_rows, num_cols> src128((float4*)data.ptr);
+
+            // alias of shared tile with 128bit type
+            float4* ptr = (float4*)&wp::index(dest, tile_i, tile_j);
+
+            assert(((uint64_t)(data.ptr))%sizeof(float4) == 0);
+            assert(((uint64_t)(ptr))%sizeof(float4) == 0);
+
+            const int stride_i = dest.strides[0]/sizeof(float4);
+            const int stride_j = 1;
+
+            WP_PRAGMA_UNROLL
+            for (int i=threadIdx.x; i < src128.Size; i += WP_TILE_BLOCK_DIM)
+            {  
+                coord_t c = src128.coord(i);
+                ptr[c.i*stride_i + c.j*stride_j] = src128.data(i);
+            }
+        }
+        else
         {
-            coord_t c = coord(i);
-            ptr[c.i*stride_i + c.j*stride_j] = data(c.i, c.j);
+            // wp.array() indexing generates poor code due to char* casting
+            // here we unroll some of the ops, note this assumes byte strides are 
+            // aligned to the element size
+            T* ptr = &wp::index(dest, tile_i, tile_j);
+            const int stride_i = dest.strides[0]/sizeof(T);
+            const int stride_j = dest.strides[1]/sizeof(T);    
+
+            WP_PRAGMA_UNROLL
+            for (int i=threadIdx.x; i < Size; i += WP_TILE_BLOCK_DIM)
+            {
+                coord_t c = coord(i);
+                ptr[c.i*stride_i + c.j*stride_j] = data(c.i, c.j);
+            }
         }
     }
 
@@ -817,22 +843,49 @@ struct tile_shared_t
         const int tile_i = x*M;
         const int tile_j = y*N;
 
-        // wp.array() indexing generates poor code due to char* casting
-        // here we unroll some of the ops, note this assumes array byte strides are 
-        // aligned to the element size
-        const T* ptr = &wp::index(src, tile_i, tile_j);
+        // check each row is contiguous and 128bit aligned
+        if (src.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
+        {            
+            constexpr int num_rows = M;
+            constexpr int num_cols = (N*sizeof(T))/sizeof(float4);
 
-        assert(src.strides[0]%sizeof(T) == 0);
-        assert(src.strides[1]%sizeof(T) == 0);
+            // alias of shared tile with 128bit type
+            tile_shared_t<float4, num_rows, num_cols> dest128((float4*)data.ptr);
 
-        const int stride_i = src.strides[0]/sizeof(T);
-        const int stride_j = src.strides[1]/sizeof(T);
+            const float4* ptr = (const float4*)&wp::index(src, tile_i, tile_j);
 
-        WP_PRAGMA_UNROLL
-        for (int i=threadIdx.x; i < Size; i += WP_TILE_BLOCK_DIM)
-        {  
-            coord_t c = coord(i);
-            data(c.i, c.j) = ptr[c.i*stride_i + c.j*stride_j];
+            assert(((uint64_t)(data.ptr))%sizeof(float4) == 0);
+            assert(((uint64_t)(ptr))%sizeof(float4) == 0);
+
+            const int stride_i = src.strides[0]/sizeof(float4);
+            const int stride_j = 1;
+
+            WP_PRAGMA_UNROLL
+            for (int i=threadIdx.x; i < dest128.Size; i += WP_TILE_BLOCK_DIM)
+            {  
+                coord_t c = dest128.coord(i);
+                dest128.data(i) = ptr[c.i*stride_i + c.j];
+            }
+        }
+        else
+        {
+            // wp.array() indexing generates poor code due to char* casting
+            // here we unroll some of the ops, note this assumes array byte strides are 
+            // aligned to the element size
+            const T* ptr = &wp::index(src, tile_i, tile_j);
+
+            assert(src.strides[0]%sizeof(T) == 0);
+            assert(src.strides[1]%sizeof(T) == 0);
+
+            const int stride_i = src.strides[0]/sizeof(T);
+            const int stride_j = src.strides[1]/sizeof(T);
+
+            WP_PRAGMA_UNROLL
+            for (int i=threadIdx.x; i < Size; i += WP_TILE_BLOCK_DIM)
+            {  
+                coord_t c = coord(i);
+                data(c.i, c.j) = ptr[c.i*stride_i + c.j*stride_j];
+            }
         }
 
         WP_TILE_SYNC();
