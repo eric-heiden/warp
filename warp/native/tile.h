@@ -10,7 +10,6 @@
 #define WP_TILE_SYNC __syncthreads
 #endif
 
-// CUTLASS_PRAGMA_(UNROLL|NO_UNROLL) optimization directives for the CUDA compiler.
 #if defined(__CUDA_ARCH__) && !defined(__INTELLISENSE__)
   #if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
     #define WP_PRAGMA_UNROLL _Pragma("unroll")
@@ -27,6 +26,10 @@
 
 #endif
 
+#define WP_USE_ASYNC_PIPELINE 0
+#if WP_USE_ASYNC_PIPELINE
+#include "cuda_pipeline_primitives.h"
+#endif // WP_USE_ASYNC_PIPELINE
 
 
 /* Tile Expressions
@@ -864,8 +867,21 @@ struct tile_shared_t
             for (int i=threadIdx.x; i < dest128.Size; i += WP_TILE_BLOCK_DIM)
             {  
                 coord_t c = dest128.coord(i);
+                
+#if WP_USE_ASYNC_PIPELINE
+                __pipeline_memcpy_async(&dest128.data(i),
+                        &ptr[c.i*stride_i + c.j],
+                        sizeof(float4));
+#else
                 dest128.data(i) = ptr[c.i*stride_i + c.j];
+#endif // WP_USE_ASYNC_PIPELINE
             }
+
+#if WP_USE_ASYNC_PIPELINE
+            __pipeline_commit();
+            __pipeline_wait_prior(0);
+#endif // WP_USE_ASYNC_PIPELINE
+
         }
         else
         {
