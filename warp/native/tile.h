@@ -31,6 +31,7 @@
 #include "cuda_pipeline_primitives.h"
 #endif // WP_USE_ASYNC_PIPELINE
 
+#define WP_USE_REGISTER_GEMM 0
 
 /* Tile Expressions
 
@@ -785,7 +786,7 @@ struct tile_shared_t
         const int tile_j = y*N;
 
         // check each row is contiguous and 128bit aligned
-        if (dest.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
+        if (StrideN == 1 && dest.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
         {            
             constexpr int num_rows = M;
             constexpr int num_cols = (N*sizeof(T))/sizeof(float4);
@@ -847,7 +848,7 @@ struct tile_shared_t
         const int tile_j = y*N;
 
         // check each row is contiguous and 128bit aligned
-        if (src.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
+        if (StrideN == 1 && src.strides[1] == sizeof(T) && (N*sizeof(T))%sizeof(float4) == 0)
         {            
             constexpr int num_rows = M;
             constexpr int num_cols = (N*sizeof(T))/sizeof(float4);
@@ -879,7 +880,6 @@ struct tile_shared_t
 
 #if WP_USE_ASYNC_PIPELINE
             __pipeline_commit();
-            __pipeline_wait_prior(0);
 #endif // WP_USE_ASYNC_PIPELINE
 
         }
@@ -904,7 +904,10 @@ struct tile_shared_t
             }
         }
 
-        WP_TILE_SYNC();
+#if !WP_USE_ASYNC_PIPELINE
+    WP_TILE_SYNC();
+#endif
+
     }
 };
 
@@ -1451,12 +1454,12 @@ inline CUDA_CALLABLE auto tile_add(TileA& a, TileB& b)
     return tile_binary_map(add, a, b);
 }
 
-// tile + tile, we implement this 
-template <typename TileA, typename TileB>
-inline CUDA_CALLABLE auto add(TileA& a, TileB& b)
-{
-    return tile_binary_map(add, a, b);
-}
+// // tile + tile, we implement this 
+// template <typename TileA, typename TileB>
+// inline CUDA_CALLABLE auto add(TileA& a, TileB& b)
+// {
+//     return tile_binary_map(add, a, b);
+// }
 
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, typename AdjTile>
@@ -1538,12 +1541,150 @@ void adj_tile_extract(Tile& t, int i, int j, AdjTile& adj_t, int adj_i, int adj_
     adj_t.adj_extract(i, j, adj_ret);
 }
 
+namespace partitioned_gemm
+{
+
+template <typename T>
+inline CUDA_CALLABLE const T& index(const T* __restrict__ p, int i, int j, int stride)
+{
+    return p[i*stride + j];
+}
+
+template <typename T>
+inline CUDA_CALLABLE T& index(T* __restrict__ p, int i, int j, int stride)
+{
+    return p[i*stride + j];
+}
+
+template <int PartitionM, int PartitionN, typename Tile>
+struct partition_t
+{
+    static constexpr int M = PartitionM;
+    static constexpr int N = PartitionN;
+    static constexpr int Stride = Tile::N;
+    
+    using T = typename Tile::Type;    
+
+    inline partition_t(Tile& A) 
+    {
+        data = A.data.ptr;
+        
+        // todo: do ceil div for non-multiples of M,N
+        shape[0] = Tile::M/PartitionM;
+        shape[1] = Tile::N/PartitionN;
+    }
+
+    // underlying data
+    T* data;
+    
+    // partition dimensions
+    int shape[2];
+};
+
+template <typename Partition>
+inline int partition_size(const Partition& part)
+{
+    return part.shape[0]*part.shape[1];
+}
+
+// returns the x, y coordinates of a tile given a linear index
+template <typename Partition>
+inline void partition_coord(const Partition& part, const int t, int& i, int& j)
+{
+    i = t/part.shape[1];
+    j = t%part.shape[1];
+}
+
+template <typename Partition>
+inline auto partition_load(const Partition& tile, int i, int j)
+{
+    mat_t<Partition::M, Partition::N, typename Partition::T> out;
+    
+    const int tile_i = i*Partition::M;
+    const int tile_j = j*Partition::N;
+
+    WP_PRAGMA_UNROLL
+    for (int i=0; i < Partition::M; ++i)
+    {
+        WP_PRAGMA_UNROLL
+        for (int j=0; j < Partition::N; ++j)
+        {
+            out.data[i][j] = index(tile.data, tile_i + i, tile_j + j, Partition::Stride);
+        }
+    }
+
+    return out;
+}
+
+template <typename Partition, typename Value>
+inline void partition_store(const Partition& tile, int i, int j, const Value& value)
+{
+    const int tile_i = Partition::M*i;
+    const int tile_j = Partition::N*j;
+
+    WP_PRAGMA_UNROLL
+    for (int i=0; i < Partition::M; ++i)
+    {	
+        WP_PRAGMA_UNROLL
+        for (int j=0; j < Partition::N; ++j)
+        {
+            index(tile.data, tile_i + i, tile_j + j, Partition::Stride) = value.data[i][j];
+        }
+    }
+}
+
+template <typename TileA, typename TileB, typename TileC>
+inline CUDA_CALLABLE void matmul(TileA& A, TileB& B, TileC& out)
+{   
+    const int TILE_M = 4;
+    const int TILE_N = 4;
+    const int TILE_K = 4;
+
+    auto A_tile = partition_t<TILE_M, TILE_K, TileA>(A);
+    auto B_tile = partition_t<TILE_K, TILE_N, TileB>(B);
+    auto C_tile = partition_t<TILE_M, TILE_N, TileC>(out);
+
+    const int length = partition_size(C_tile);
+
+    for (int t=threadIdx.x; t < length; t += blockDim.x)
+    {  
+        int i, j;
+        partition_coord(C_tile, t, i, j);
+
+        // accumulator
+        auto sum = partition_load(C_tile, i, j);
+
+        WP_PRAGMA_UNROLL
+        for (int k=0; k < A_tile.shape[1]; k++)
+        {
+            const auto a = partition_load(A_tile, i, k);
+            const auto b = partition_load(B_tile, k, j);
+
+            sum += mul(a, b);
+        }
+        
+        partition_store(C_tile, i, j, sum);
+    }
+}
+    
+} // namespace partition_gemm
+
 template <int Add, typename Fwd, typename AdjA, typename AdjB, typename TileA, typename TileB, typename TileC>
 TileC& tile_matmul(Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C)
 {       
     using T = typename TileA::Type;
 
+#if WP_USE_ASYNC_PIPELINE
+    __pipeline_wait_prior(0);
+    WP_TILE_SYNC();
+#endif
+
+#if WP_USE_REGISTER_GEMM
+    partitioned_gemm::matmul(A, B, C);
+#else
     fun_forward(T(1.0), A.data.ptr, B.data.ptr, T(Add), C.data.ptr);
+#endif
+    
     WP_TILE_SYNC();
     
     return C;
