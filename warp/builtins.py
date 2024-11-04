@@ -2230,8 +2230,6 @@ def tile_view_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg
     template_args = []
     template_args.append(return_type.M)
     template_args.append(return_type.N)
-    template_args.append(return_type.strides[0])
-    template_args.append(return_type.strides[1])
 
     return ((tile,i,j), template_args)
 

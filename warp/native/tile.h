@@ -334,7 +334,7 @@ struct tile_register_t
         }
     }
 
-    inline CUDA_CALLABLE void print();
+    inline CUDA_CALLABLE void print() const;
 
 
     // return the in-register version of this tile (nop)
@@ -740,7 +740,7 @@ struct tile_shared_t
         return out;
     }
 
-    inline CUDA_CALLABLE void print()
+    inline CUDA_CALLABLE void print() const
     {
         if (threadIdx.x == 0)
         {
@@ -929,7 +929,7 @@ struct tile_shared_t
 };
 
 template <typename T, int M, int N>
-void tile_register_t<T, M, N>::print()
+void tile_register_t<T, M, N>::print() const
 {
     // create a temporary shared tile so that
     // we can print it deterministically
@@ -973,14 +973,14 @@ inline CUDA_CALLABLE void adj_print(const tile_register_t<T, M, N>& t, const til
     a.print();
 }
 
-template <typename T, int M, int N>
-inline CUDA_CALLABLE void print(const tile_shared_t<T, M, N>& t)
+template <typename T, int M, int N, int StrideM, int StrideN, bool Owner>
+inline CUDA_CALLABLE void print(const tile_shared_t<T, M, N, StrideM, StrideN, Owner>& t)
 {
     t.print();
 }
 
-template <typename T, int M, int N>
-inline CUDA_CALLABLE void adj_print(const tile_shared_t<T, M, N>& t, const tile_shared_t<T, M, N>& a)
+template <typename T, int M, int N, int StrideM, int StrideN, bool Owner>
+inline CUDA_CALLABLE void adj_print(const tile_shared_t<T, M, N, StrideM, StrideN, Owner>& t, const tile_shared_t<T, M, N, StrideM, StrideN, Owner>& a)
 {
     a.print();
 }
@@ -1807,11 +1807,11 @@ inline CUDA_CALLABLE void adj_tile_broadcast(Tile& t, Tile& adj_t, AdjTile& adj_
 
 }
 
-template <int M, int N, int StrideM, int StrideN, typename Tile>
+template <int M, int N, typename Tile>
 inline CUDA_CALLABLE auto tile_view(Tile& t, int i, int j)
 {    
     // alias incoming tile with new strides
-    return tile_shared_t<typename Tile::Type, M, N, StrideM, StrideN, false>(&t.data(i, j), &t.grad(i, j));
+    return tile_shared_t<typename Tile::Type, M, N, Tile::StrideM, Tile::StrideN, false>(&t.data(i, j), &t.grad(i, j));
 }
 
 template <typename Tile, typename AdjTile>

@@ -5292,13 +5292,13 @@ def launch_tiled(*args, **kwargs):
             ...
     """
 
-    if len(kwargs["dim"]) > 3:
-        raise RuntimeError("wp.launch_tiled() requires a grid with fewer than 4 dimensions")
-
     # promote dim to a list in case it was passed as a scalar or tuple
     dim = kwargs["dim"]
     if not isinstance(dim, list):
         dim = list(dim) if isinstance(dim, tuple) else [dim]
+
+    if len(dim) > 3:
+        raise RuntimeError("wp.launch_tiled() requires a grid with fewer than 4 dimensions")
 
     # add trailing dimension
     kwargs["dim"] = dim + [kwargs["block_dim"]]
