@@ -2255,6 +2255,25 @@ add_builtin(
     export=False,
 )
 
+def tile_assign_value_func(arg_types, arg_values):
+    # return generic type (for doc builds)
+    return None
+   
+add_builtin(
+    "tile_assign",
+    input_types={"dst": Tile(dtype=Any, M=Any, N=Any), "i": int, "j": int, "src": Tile(dtype=Any, M=Any, N=Any)},
+    value_func=tile_assign_value_func,
+#    dispatch_func=tile_assign_dispatch_func,
+    doc="""Assign a tile to a subrange of a destination tile at coordinates (i,j).
+
+    :param t: The destination tile to assign to
+    :param i: Offset in the source tile along the first dimension
+    :param j: Offset in the source tile along the second dimensions
+    :param src: The source tile to read values from""",
+    group="Tile Primitives",
+    export=False,
+)
+
 
 def tile_value_func(arg_types, arg_values):
     # return generic type (for doc builds)

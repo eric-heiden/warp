@@ -1821,5 +1821,31 @@ inline CUDA_CALLABLE void adj_tile_view(Tile& t, int i, int j, Tile& adj_t, int 
 
 }
 
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_assign(TileA& dest, int i, int j, TileB& src)
+{   
+    for (int t=threadIdx.x; t < src.Size; t += WP_TILE_BLOCK_DIM)
+    {
+        coord_t c = src.coord(t);
+        dest.data(i + c.i, j + c.j) = src.data(c.i, c.j);
+    }
+
+    WP_TILE_SYNC();
+}
+
+template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
+inline CUDA_CALLABLE void adj_tile_assign(TileA& dest, int i, int j, TileB& src,
+                                          AdjTileA& adj_dest, int adj_i, int adj_j, AdjTileB& adj_src)
+{
+    for (int t=threadIdx.x; t < src.Size; t += WP_TILE_BLOCK_DIM)
+    {
+        coord_t c = src.coord(t);
+        src.grad(c.i, c.j) += dest.grad(i + c.i, j + c.j);
+    } 
+
+    WP_TILE_SYNC();
+}
+
+
 
 } // namespace wp
