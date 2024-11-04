@@ -879,7 +879,7 @@ struct tile_shared_t
             assert(((uint64_t)(ptr))%sizeof(float4) == 0);
 
             const int stride_i = src.strides[0]/sizeof(float4);
-            const int stride_j = 1;
+            //const int stride_j = 1;
 
             WP_PRAGMA_UNROLL
             for (int i=threadIdx.x; i < dest128.Size; i += WP_TILE_BLOCK_DIM)
@@ -1802,6 +1802,20 @@ inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_broadcast(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+{   
+    // nop, since memory is aliased grads already accumulated
+
+}
+
+template <int M, int N, int StrideM, int StrideN, typename Tile>
+inline CUDA_CALLABLE auto tile_view(Tile& t, int i, int j)
+{    
+    // alias incoming tile with new strides
+    return tile_shared_t<typename Tile::Type, M, N, StrideM, StrideN, false>(&t.data(i, j), &t.grad(i, j));
+}
+
+template <typename Tile, typename AdjTile>
+inline CUDA_CALLABLE void adj_tile_view(Tile& t, int i, int j, Tile& adj_t, int adj_i, int adj_j, AdjTile& adj_ret)
 {   
     // nop, since memory is aliased grads already accumulated
 

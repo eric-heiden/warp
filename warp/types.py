@@ -2976,7 +2976,7 @@ def array_type_id(a):
 class Tile:
     allocation = 0
 
-    def __init__(self, dtype, M, N, op=None, storage="register", layout="rowmajor", owner=True):
+    def __init__(self, dtype, M, N, op=None, storage="register", layout="rowmajor", strides=None, owner=True):
         self.dtype = type_to_warp(dtype)
         self.M = M
         self.N = N
@@ -2984,11 +2984,13 @@ class Tile:
         self.storage = storage
         self.layout = layout
 
-        # default to row major layout
-        if layout == "rowmajor":
-            self.strides = (N, 1)
-        elif layout == "colmajor":
-            self.strides = (1, M)
+        if strides == None:
+            if layout == "rowmajor":
+                self.strides = (N, 1)
+            elif layout == "colmajor":
+                self.strides = (1, M)
+        else:
+            self.strides = strides
 
         self.owner = owner
 

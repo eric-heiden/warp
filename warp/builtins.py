@@ -2191,6 +2191,70 @@ add_builtin(
     export=False,
 )
 
+def tile_view_value_func(arg_types, arg_values):
+    # return generic type (for doc builds)
+    if arg_types is None:
+        return Tile(dtype=Any, M=Any, N=Any)
+
+    tile = arg_types["t"]
+    
+    if "m" not in arg_values:
+        m = 1
+    else:
+        m = arg_values["m"]
+
+    if "n" not in arg_values:
+        n = tile.N
+    else:
+        n = arg_values["n"]
+
+    if m > tile.M or n > tile.N:
+        raise RuntimeError(f"Trying to view a tile subrange with dimensions ({m}, {n}) which is larger than source tile with dimensions ({tile.M}, {tile.N})")
+        
+    # force source tile to shared memory
+    tile.storage = "shared"
+
+    output = Tile(dtype=tile.dtype, M=m, N=n, strides=tile.strides, layout=tile.layout, storage="shared", owner=False)
+    return output
+    
+
+def tile_view_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
+    tile = arg_values["t"]
+    i = arg_values["i"]
+    
+    if "j" not in arg_values:
+        j = warp.codegen.Var(label=None, type=int, constant=0)
+    else:
+        j = arg_values["j"]
+
+    template_args = []
+    template_args.append(return_type.M)
+    template_args.append(return_type.N)
+    template_args.append(return_type.strides[0])
+    template_args.append(return_type.strides[1])
+
+    return ((tile,i,j), template_args)
+
+
+add_builtin(
+    "tile_view",
+    input_types={"t": Tile(dtype=Any, M=Any, N=Any), "i": int, "j": int, "m": int, "n": int},
+    value_func=tile_view_value_func,
+    dispatch_func=tile_view_dispatch_func,
+    defaults={"j": None, "m": None, "n": None},
+    variadic=True,
+    doc="""Return a subrange of a given tile from coordinates (i,j) to (i+m, j+n).
+
+    :param t: Input tile to extract a subrange from
+    :param i: Offset in the source tile along the first dimension
+    :param j: Offset in the source tile along the second dimensions
+    :param m: Size of the subrange to return along the first dimension
+    :param n: Size of the subrange to return along the second dimension
+    :returns: A tile with dimensions (m,n) and the same datatype as the input tile""",
+    group="Tile Primitives",
+    export=False,
+)
+
 
 def tile_value_func(arg_types, arg_values):
     # return generic type (for doc builds)
@@ -2383,7 +2447,7 @@ def tile_transpose_value_func(arg_types, arg_values):
     # force the input tile to shared memory
     t.storage = "shared"
 
-    return Tile(dtype=t.dtype, M=t.N, N=t.M, op="transpose", storage=t.storage, layout=layout, owner=False)
+    return Tile(dtype=t.dtype, M=t.N, N=t.M, op="transpose", storage=t.storage, strides=t.strides[::-1], layout=layout, owner=False)
 
 
 add_builtin(
@@ -2440,9 +2504,7 @@ def tile_broadcast_value_func(arg_types, arg_values):
     # force the input tile to shared memory
     t.storage = "shared"
 
-    tile_type = Tile(dtype=t.dtype, M=m, N=n, op="broadcast", storage=t.storage, owner=False)
-    tile_type.strides = (stride_m, stride_n)
-
+    tile_type = Tile(dtype=t.dtype, M=m, N=n, op="broadcast", storage=t.storage, strides=(stride_m, stride_n), owner=False)
     return tile_type
 
 
