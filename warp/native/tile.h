@@ -239,6 +239,14 @@ struct tile_register_t
 
     }
 
+    // define the += operator which is used during backward pass codegen
+    // when returning a register tile from a user defined function
+    inline CUDA_CALLABLE auto& operator += (tile_register_t<T, M, N>& rhs) 
+    {
+        this->grad_add(rhs);
+        return *this;
+    }
+
     inline CUDA_CALLABLE T& operator()(int index)
     {
         assert(index < NumRegs);
@@ -249,7 +257,8 @@ struct tile_register_t
     {
         assert(index < NumRegs);
         return data[index];
-    }    
+    }
+
 
     // compute linear tile index from a local register index
     inline CUDA_CALLABLE int index(int reg) const
