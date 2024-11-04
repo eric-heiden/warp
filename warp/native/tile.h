@@ -1,3 +1,11 @@
+/** Copyright (c) 2024 NVIDIA CORPORATION.  All rights reserved.
+ * NVIDIA CORPORATION and its licensors retain all intellectual property
+ * and proprietary rights in and to this software, related documentation
+ * and any modifications thereto.  Any use, reproduction, disclosure or
+ * distribution of this software and related documentation without an express
+ * license agreement from NVIDIA CORPORATION is strictly prohibited.
+ */
+
 #pragma once
 
 #include "builtin.h"
@@ -944,18 +952,29 @@ void tile_register_t<T, M, N>::print()
     WP_TILE_SYNC();
 }
 
-template <typename Tile>
-inline CUDA_CALLABLE void print(Tile& t)
+template <typename T, int M, int N>
+inline CUDA_CALLABLE void print(const tile_register_t<T, M, N>& t)
 {
     t.print();
 }
 
-template <typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void adj_print(Tile& t, AdjTile& a)
+template <typename T, int M, int N>
+inline CUDA_CALLABLE void adj_print(const tile_register_t<T, M, N>& t, const tile_register_t<T, M, N>& a)
 {
     a.print();
 }
 
+template <typename T, int M, int N>
+inline CUDA_CALLABLE void print(const tile_shared_t<T, M, N>& t)
+{
+    t.print();
+}
+
+template <typename T, int M, int N>
+inline CUDA_CALLABLE void adj_print(const tile_shared_t<T, M, N>& t, const tile_shared_t<T, M, N>& a)
+{
+    a.print();
+}
 
 // helpers to allocate shared tiles
 template <typename T, int M, int N, bool RequiresGrad>
@@ -1714,13 +1733,18 @@ void adj_tile_matmul(Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, 
     WP_TILE_SYNC();
 }
 
-
+// TODO(lcambier): use a properly overaligned complex type that matches cuFFTDx's expectation
+// TODO(lcambier): use dynamic smem
 #define tile_fft(function_name, dtype, shared_memory_size, batch_size, ept, Xinout) \
     do { \
         void function_name(dtype*, dtype*); \
         WP_TILE_SHARED __align__(16) char buffer[shared_memory_size]; \
+        __align__(16) dtype data[ept]; \
         for(int b = 0; b < (int)batch_size; b++) { \
-            function_name(Xinout.data.ptr + (int)b * (int)ept, (dtype*)buffer); \
+            dtype* inout = Xinout.data + (int)b * (int)ept; \
+            memcpy(data, inout, sizeof(dtype) * ept); \
+            function_name(data, (dtype*)buffer); \
+            memcpy(inout, data, sizeof(dtype) * ept); \
             WP_TILE_SYNC(); \
         } \
     } while (0)

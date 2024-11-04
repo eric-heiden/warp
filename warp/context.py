@@ -6,7 +6,6 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import ast
-import builtins
 import ctypes
 import functools
 import hashlib
@@ -23,7 +22,6 @@ import weakref
 import json
 from copy import copy as shallowcopy
 from pathlib import Path
-from struct import pack as struct_pack
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -1261,6 +1259,7 @@ def add_builtin(
                     key,
                     input_types=arg_types,
                     value_type=return_type,
+                    value_func=value_func if return_type is Any else None,
                     export_func=export_func,
                     dispatch_func=dispatch_func,
                     lto_dispatch_func=lto_dispatch_func,
@@ -1499,30 +1498,16 @@ class ModuleHasher:
         # hash referenced constants
         for name, value in constants.items():
             ch.update(bytes(name, "utf-8"))
-            # hash the referenced object
-            if isinstance(value, builtins.bool):
-                # This needs to come before the check for `int` since all boolean
-                # values are also instances of `int`.
-                ch.update(struct_pack("?", value))
-            elif isinstance(value, int):
-                ch.update(struct_pack("<q", value))
-            elif isinstance(value, float):
-                ch.update(struct_pack("<d", value))
-            elif isinstance(value, warp.types.float16):
-                # float16 is a special case
-                p = ctypes.pointer(ctypes.c_float(value.value))
-                ch.update(p.contents)
-            elif isinstance(value, tuple(warp.types.scalar_types)):
-                p = ctypes.pointer(value._type_(value.value))
-                ch.update(p.contents)
-            elif isinstance(value, ctypes.Array):
-                ch.update(bytes(value))
-            else:
-                raise RuntimeError(f"Invalid constant type: {type(value)}")
+            ch.update(self.get_constant_bytes(value))
 
         # hash wp.static() expressions that were evaluated at declaration time
         for k, v in adj.static_expressions.items():
-            ch.update(bytes(f"{k} = {v}", "utf-8"))
+            ch.update(bytes(k, "utf-8"))
+            if isinstance(v, Function):
+                if v not in self.functions_in_progress:
+                    ch.update(self.hash_function(v))
+            else:
+                ch.update(self.get_constant_bytes(v))
 
         # hash referenced types
         for t in types.keys():
@@ -1534,6 +1519,24 @@ class ModuleHasher:
                 ch.update(self.hash_function(f))
 
         return ch.digest()
+
+    def get_constant_bytes(self, value):
+        if isinstance(value, int):
+            # this also handles builtins.bool
+            return bytes(ctypes.c_int(value))
+        elif isinstance(value, float):
+            return bytes(ctypes.c_float(value))
+        elif isinstance(value, warp.types.float16):
+            # float16 is a special case
+            return bytes(ctypes.c_float(value.value))
+        elif isinstance(value, tuple(warp.types.scalar_and_bool_types)):
+            return bytes(value._type_(value.value))
+        elif hasattr(value, "_wp_scalar_type_"):
+            return bytes(value)
+        elif isinstance(value, warp.codegen.StructInstance):
+            return bytes(value._ctype)
+        else:
+            raise TypeError(f"Invalid constant type: {type(value)}")
 
     def get_module_hash(self):
         return self.module_hash
@@ -1969,6 +1972,7 @@ class Module:
             # determine output paths
             if device.is_cpu:
                 output_name = "module_codegen.o"
+                output_arch = None
 
             elif device.is_cuda:
                 # determine whether to use PTX or CUBIN
@@ -1992,9 +1996,6 @@ class Module:
                     output_arch = device.arch
                     output_name = f"module_codegen.sm{output_arch}.cubin"
 
-                # Some of the Tile codegen, such as cuFFTDx and cuBLASDx, requires knowledge of the target arch
-                self.options["output_arch"] = output_arch
-
             # final object binary path
             binary_path = os.path.join(module_dir, output_name)
 
@@ -2010,7 +2011,12 @@ class Module:
                 or not warp.config.cache_kernels
                 or warp.config.verify_autograd_array_access
             ):
-                builder = ModuleBuilder(self, self.options, hasher=self.hasher)
+                builder_options = {
+                    **self.options,
+                    # Some of the Tile codegen, such as cuFFTDx and cuBLASDx, requires knowledge of the target arch
+                    "output_arch": output_arch,
+                }
+                builder = ModuleBuilder(self, builder_options, hasher=self.hasher)
 
                 # create a temporary (process unique) dir for build outputs before moving to the binary dir
                 build_dir = os.path.join(
@@ -6021,9 +6027,6 @@ def export_stubs(file):  # pragma: no cover
     print('Cols = TypeVar("Cols", bound=int)', file=file)
     print('DType = TypeVar("DType")', file=file)
 
-    print('Int = TypeVar("Int")', file=file)
-    print('Float = TypeVar("Float")', file=file)
-    print('Scalar = TypeVar("Scalar")', file=file)
     print("Vector = Generic[Length, Scalar]", file=file)
     print("Matrix = Generic[Rows, Cols, Scalar]", file=file)
     print("Quaternion = Generic[Float]", file=file)

@@ -5,6 +5,7 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import functools
 import unittest
 
 import numpy as np
@@ -18,10 +19,10 @@ TILE_M = wp.constant(8)
 TILE_N = wp.constant(4)
 TILE_K = wp.constant(8)
 
-N_FFT = wp.constant(128)
-
 # num threads per-tile
-TILE_DIM = 64
+TILE_DIM = 32
+FFT_SIZE_FP32 = 64
+FFT_SIZE_FP64 = 64
 
 
 @wp.kernel()
@@ -68,32 +69,45 @@ def test_tile_math_matmul(test, device):
 
 
 @wp.kernel()
-def tile_math_fft_kernel(gx: wp.array2d(dtype=wp.vec2f), gy: wp.array2d(dtype=wp.vec2f)):
+def tile_math_fft_kernel_vec2f(gx: wp.array2d(dtype=wp.vec2f), gy: wp.array2d(dtype=wp.vec2f)):
     i, j = wp.tid()
-    xy = wp.tile_load(gx, i, j, m=N_FFT, n=N_FFT)
+    xy = wp.tile_load(gx, i, j, m=FFT_SIZE_FP32, n=FFT_SIZE_FP32)
     wp.tile_fft(xy)
     wp.tile_store(gy, i, j, xy)
 
 
-def test_tile_math_fft(test, device):
+@wp.kernel()
+def tile_math_fft_kernel_vec2d(gx: wp.array2d(dtype=wp.vec2d), gy: wp.array2d(dtype=wp.vec2d)):
+    i, j = wp.tid()
+    xy = wp.tile_load(gx, i, j, m=FFT_SIZE_FP64, n=FFT_SIZE_FP64)
+    wp.tile_fft(xy)
+    wp.tile_store(gy, i, j, xy)
+
+
+def test_tile_math_fft(test, device, wp_dtype):
+    np_real_dtype = {wp.vec2f: np.float32, wp.vec2d: np.float64}[wp_dtype]
+    np_cplx_dtype = {wp.vec2f: np.complex64, wp.vec2d: np.complex128}[wp_dtype]
+    kernel = {wp.vec2d: tile_math_fft_kernel_vec2d, wp.vec2f: tile_math_fft_kernel_vec2f}[wp_dtype]
+    fft_size = {wp.vec2d: FFT_SIZE_FP64, wp.vec2f: FFT_SIZE_FP32}[wp_dtype]
+
     rng = np.random.default_rng(42)
 
     # Warp doesn't really have a complex64 type,
     # so we use 2 float32 to represent a single complex64 number and then convert it to vec2f
 
-    X = rng.random((N_FFT, 2 * N_FFT), dtype=np.float32)
+    X = rng.random((fft_size, 2 * fft_size), dtype=np_real_dtype)
     Y = np.zeros_like(X)
 
-    X_wp = wp.array2d(X, requires_grad=True, dtype=wp.vec2f, device=device)
-    Y_wp = wp.array2d(Y, requires_grad=True, dtype=wp.vec2f, device=device)
+    X_wp = wp.array2d(X, requires_grad=True, dtype=wp_dtype, device=device)
+    Y_wp = wp.array2d(Y, requires_grad=True, dtype=wp_dtype, device=device)
 
-    X_c64 = X.view(np.complex64).reshape(N_FFT, N_FFT)
+    X_c64 = X.view(np_cplx_dtype).reshape(fft_size, fft_size)
     Y_c64 = np.fft.fft(X_c64, axis=-1)
 
     with wp.Tape() as tape:
-        wp.launch_tiled(tile_math_fft_kernel, dim=[1, 1], inputs=[X_wp, Y_wp], block_dim=TILE_DIM, device=device)
+        wp.launch_tiled(kernel, dim=[1, 1], inputs=[X_wp, Y_wp], block_dim=TILE_DIM, device=device)
 
-    Y_wp_c64 = Y_wp.numpy().view(np.complex64).reshape(N_FFT, N_FFT)
+    Y_wp_c64 = Y_wp.numpy().view(np_cplx_dtype).reshape(fft_size, fft_size)
 
     assert_np_equal(Y_wp_c64, Y_c64, tol=1.0e-4)
 
@@ -108,8 +122,22 @@ class TestTileMathDx(unittest.TestCase):
     pass
 
 
-add_function_test(TestTileMathDx, "test_tile_math_matmul", test_tile_math_matmul, devices=devices)
-add_function_test(TestTileMathDx, "test_tile_math_fft", test_tile_math_fft, devices=devices)
+# check_output=False so we can enable libmathdx's logging without failing the tests
+add_function_test(TestTileMathDx, "test_tile_math_matmul", test_tile_math_matmul, devices=devices, check_output=False)
+add_function_test(
+    TestTileMathDx,
+    "test_tile_math_fft_vec2f",
+    functools.partial(test_tile_math_fft, wp_dtype=wp.vec2f),
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestTileMathDx,
+    "test_tile_math_fft_vec2d",
+    functools.partial(test_tile_math_fft, wp_dtype=wp.vec2d),
+    devices=devices,
+    check_output=False,
+)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
