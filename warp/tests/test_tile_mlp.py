@@ -19,6 +19,7 @@ wp.init()
 # needs to be constant for the whole module
 NUM_THREADS = 32
 
+
 def create_layer(rng, dim_in, dim_hid, dtype=float):
     w = rng.uniform(-1.0 / np.sqrt(dim_in), 1.0 / np.sqrt(dim_in), (dim_hid, dim_in))
     b = rng.uniform(-1.0 / np.sqrt(dim_in), 1.0 / np.sqrt(dim_in), (dim_hid, 1))
@@ -170,7 +171,7 @@ def test_multi_layer_nn(test, device):
         reference_np = np.load(os.path.join(os.path.dirname(__file__), "assets/pixel.npy"), allow_pickle=True) / 255.0
         reference = wp.array(reference_np, dtype=float)
 
-        assert(reference.shape[1] == IMG_WIDTH*IMG_HEIGHT)
+        assert reference.shape[1] == IMG_WIDTH * IMG_HEIGHT
 
         loss = wp.zeros(1, dtype=float, requires_grad=True)
 

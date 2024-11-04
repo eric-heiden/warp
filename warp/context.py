@@ -1628,7 +1628,7 @@ class ModuleBuilder:
             name = kernel.get_mangled_name()
 
             meta[name + "_cuda_kernel_forward_smem_bytes"] = kernel.adj.get_total_required_shared()
-            meta[name + "_cuda_kernel_backward_smem_bytes"] = kernel.adj.get_total_required_shared()*2
+            meta[name + "_cuda_kernel_backward_smem_bytes"] = kernel.adj.get_total_required_shared() * 2
 
         return meta
 
@@ -1717,33 +1717,39 @@ class ModuleExec:
         name = kernel.get_mangled_name()
 
         if self.device.is_cuda:
-            
-            forward_name = (name + "_cuda_kernel_forward")
-            forward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, forward_name.encode("utf-8"))
-            
-            backward_name = (name + "_cuda_kernel_backward")
-            backward_kernel = runtime.core.cuda_get_kernel(self.device.context, self.handle, backward_name.encode("utf-8"))
+            forward_name = name + "_cuda_kernel_forward"
+            forward_kernel = runtime.core.cuda_get_kernel(
+                self.device.context, self.handle, forward_name.encode("utf-8")
+            )
+
+            backward_name = name + "_cuda_kernel_backward"
+            backward_kernel = runtime.core.cuda_get_kernel(
+                self.device.context, self.handle, backward_name.encode("utf-8")
+            )
 
             # look up the required shared memory size for each kernel from module metadata
             forward_smem_bytes = self.meta[forward_name + "_smem_bytes"]
             backward_smem_bytes = self.meta[backward_name + "_smem_bytes"]
 
-            # configure kernels maximum shared memory size           
+            # configure kernels maximum shared memory size
             max_smem_bytes = runtime.core.cuda_get_max_shared_memory(self.device.context)
-            
+
             if not runtime.core.cuda_configure_kernel_shared_memory(forward_kernel, forward_smem_bytes):
-                print(f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+                print(
+                    f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {forward_name} kernel for {forward_smem_bytes} bytes, but maximum available is {max_smem_bytes}"
+                )
 
             options = dict(kernel.module.options)
             options.update(kernel.options)
 
-            if options["enable_backward"] != False and not runtime.core.cuda_configure_kernel_shared_memory(backward_kernel, backward_smem_bytes):
-                print(f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}")
+            if options["enable_backward"] != False and not runtime.core.cuda_configure_kernel_shared_memory(
+                backward_kernel, backward_smem_bytes
+            ):
+                print(
+                    f"Warning: Failed to configure kernel dynamic shared memory for this device, tried to configure {backward_name} kernel for {backward_smem_bytes} bytes, but maximum available is {max_smem_bytes}"
+                )
 
-            hooks = KernelHooks(forward_kernel,
-                                backward_kernel,
-                                forward_smem_bytes,
-                                backward_smem_bytes)
+            hooks = KernelHooks(forward_kernel, backward_kernel, forward_smem_bytes, backward_smem_bytes)
 
         else:
             func = ctypes.CFUNCTYPE(None)
@@ -1755,7 +1761,7 @@ class ModuleExec:
             )
 
             hooks = KernelHooks(forward, backward)
-       
+
         self.kernel_hooks[kernel] = hooks
         return hooks
 
@@ -2087,7 +2093,7 @@ class Module:
                         module_load_timer.extra_msg = " (error)"
                         raise (e)
 
-                #------------------------------------------------------------
+                # ------------------------------------------------------------
                 # build meta data
 
                 meta = builder.build_meta()
@@ -2136,7 +2142,7 @@ class Module:
             meta_path = os.path.join(module_dir, "module_codegen.meta")
             with open(meta_path, "r") as meta_file:
                 meta = json.load(meta_file)
-            
+
             if device.is_cpu:
                 # LLVM modules are identified using strings, so we need to ensure uniqueness
                 module_handle = f"{module_name}_{self.cpu_exec_id}"

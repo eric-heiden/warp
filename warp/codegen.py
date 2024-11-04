@@ -923,7 +923,6 @@ class Adjoint:
         # Collect the LTOIR required at link-time
         adj.ltoirs = []
 
-
     # allocate extra space for a function call that requires its
     # own shared memory space, we treat shared memory as a stack
     # where each function pushes and pops space off, the extra
@@ -931,11 +930,10 @@ class Adjoint:
     def alloc_shared_extra(adj, num_bytes):
         adj.max_required_extra_shared_memory = max(adj.max_required_extra_shared_memory, num_bytes)
 
-    # returns the total number of bytes for a function 
+    # returns the total number of bytes for a function
     # based on it's own requirements + worst case
     # requirements of any dependent functions
     def get_total_required_shared(adj):
-
         total_shared = 0
 
         for var in adj.variables:
@@ -987,7 +985,7 @@ class Adjoint:
         adj.label_count = 0
 
         # tracks how much additional shared memory is required by any dependent function calls
-        adj.max_required_extra_shared_memory = 0   
+        adj.max_required_extra_shared_memory = 0
 
         # update symbol map for each argument
         for a in adj.args:
@@ -1407,7 +1405,7 @@ class Adjoint:
                 reverse_call = f"{func.namespace}adj_{func.native_func}({arg_str});"
                 adj.add_reverse(reverse_call)
 
-        # update our smem roofline requirements based on any 
+        # update our smem roofline requirements based on any
         # shared memory required by the dependent function call
         if not func.is_builtin():
             adj.alloc_shared_extra(func.adj.get_total_required_shared())
@@ -3425,9 +3423,13 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
 
         if is_tile(var.type):
             if var.type.storage == "register":
-                lines += [f"{var.type.ctype()} {name}(0.0);\n"]   # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
+                lines += [
+                    f"{var.type.ctype()} {name}(0.0);\n"
+                ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
             elif var.type.storage == "shared":
-                lines += [f"{var.type.ctype()}& {name} = {var.emit()};\n"]    # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
+                lines += [
+                    f"{var.type.ctype()}& {name} = {var.emit()};\n"
+                ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
         else:
             lines += [f"{ctype} {name} = {{}};\n"]
 
@@ -3659,7 +3661,8 @@ def codegen_kernel(kernel, device, options):
         forward_args=indent(forward_args),
         reverse_args=indent(reverse_args),
         forward_body=forward_body,
-        reverse_body=reverse_body)
+        reverse_body=reverse_body,
+    )
 
     return s
 

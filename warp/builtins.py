@@ -1894,7 +1894,7 @@ add_builtin(
     defaults={"dtype": None, "storage": "register"},
     value_func=tile_arange_value_func,
     dispatch_func=tile_arange_dispatch_func,
-    variadic=True,    
+    variadic=True,
     missing_grad=True,
     doc="""Generates a tile of linearly spaced elements.
 

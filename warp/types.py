@@ -3012,16 +3012,14 @@ class Tile:
         elif self.storage == "shared":
             if self.owner:
                 # allocate new shared memory tile
-                return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{'true' if requires_grad else 'false'}>()"                                
+                return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},{self.M},{self.N},{'true' if requires_grad else 'false'}>()"
             else:
                 # tile will be initialized by another call, e.g.: tile_transpose()
                 return "NULL"
-               
-
 
     # return total tile size in bytes
     def size_in_bytes(self):
-        num_bytes = type_size_in_bytes(self.dtype)*self.M*self.N
+        num_bytes = type_size_in_bytes(self.dtype) * self.M * self.N
         return num_bytes
 
 
