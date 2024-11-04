@@ -40,8 +40,7 @@ def create_mlp_kernel(m, n, k):
 
 
 def benchmark_torch(A, B, warm_up, iterations):
-    linear = tc.nn.Linear(K, N, bias=False).cuda()
-    
+   
     # warm-up
     for i in range(warm_up):
         tc.matmul(A, B)

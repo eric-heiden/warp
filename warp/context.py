@@ -5050,6 +5050,7 @@ class Launch:
                 self.bounds.size,
                 self.max_blocks,
                 self.block_dim,
+                self.hooks.forward_smem_bytes,
                 self.params_addr,
                 stream.cuda_stream,
             )
