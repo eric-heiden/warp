@@ -44,6 +44,7 @@ def parse_urdf(
     ensure_nonstatic_links=True,
     static_link_mass=1e-2,
     collapse_fixed_joints=False,
+    ignore_visuals=False,
 ):
     """
     Parses a URDF file and adds the bodies and joints to the given ModelBuilder.
@@ -77,6 +78,7 @@ def parse_urdf(
         ensure_nonstatic_links (bool): If True, links with zero mass are given a small mass (see `static_link_mass`) to ensure they are dynamic.
         static_link_mass (float): The mass to assign to links with zero mass (if `ensure_nonstatic_links` is set to True).
         collapse_fixed_joints (bool): If True, fixed joints are removed and the respective bodies are merged.
+        ignore_visuals (bool): If True, the visual shapes are ignored and only the collision shapes are used.
     """
     if xform is None:
         xform = wp.transform()
@@ -268,14 +270,14 @@ def parse_urdf(
 
         if parse_visuals_as_colliders:
             colliders = visuals
-        else:
+        elif not ignore_visuals:
             s = parse_shapes(link, visuals, density=0.0, just_visual=True)
             visual_shapes.extend(s)
 
         show_colliders = force_show_colliders
         if parse_visuals_as_colliders:
             show_colliders = True
-        elif len(visuals) == 0:
+        elif len(visuals) == 0 or ignore_visuals:
             # we need to show the collision shapes since there are no visual shapes
             show_colliders = True
 
