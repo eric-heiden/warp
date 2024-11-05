@@ -23,6 +23,10 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 import warp.config
 from warp.types import *
 
+# used as a globally accessible copy
+# of current compile options (block_dim) etc
+options = {}
+
 
 class WarpCodegenError(RuntimeError):
     def __init__(self, message):
@@ -637,6 +641,8 @@ class Var:
                 dtypestr = f"wp::{t.dtype.__name__}"
             classstr = f"wp::{type(t).__name__}"
             return f"{classstr}_t<{dtypestr}>"
+        elif is_tile(t):
+            return t.ctype()
         elif isinstance(t, Struct):
             return t.native_name
         elif isinstance(t, type) and issubclass(t, StructInstance):
@@ -914,6 +920,28 @@ class Adjoint:
         # for unit testing errors being spit out from kernels.
         adj.skip_build = False
 
+        # Collect the LTOIR required at link-time
+        adj.ltoirs = []
+
+    # allocate extra space for a function call that requires its
+    # own shared memory space, we treat shared memory as a stack
+    # where each function pushes and pops space off, the extra
+    # quantity is the 'roofline' amount required for the entire kernel
+    def alloc_shared_extra(adj, num_bytes):
+        adj.max_required_extra_shared_memory = max(adj.max_required_extra_shared_memory, num_bytes)
+
+    # returns the total number of bytes for a function
+    # based on it's own requirements + worst case
+    # requirements of any dependent functions
+    def get_total_required_shared(adj):
+        total_shared = 0
+
+        for var in adj.variables:
+            if is_tile(var.type) and var.type.storage == "shared":
+                total_shared += var.type.size_in_bytes()
+
+        return total_shared + adj.max_required_extra_shared_memory
+
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
         # arg Var read/write flags are held during module rebuilds, so we reset here even when skipping a build
@@ -934,12 +962,17 @@ class Adjoint:
         else:
             adj.builder_options = default_builder_options
 
+        global options
+        options = adj.builder_options
+
         adj.symbols = {}  # map from symbols to adjoint variables
         adj.variables = []  # list of local variables (in order)
 
         adj.return_var = None  # return type for function or kernel
         adj.loop_symbols = []  # symbols at the start of each loop
-        adj.loop_const_iter_symbols = []  # iteration variables (constant) for static loops
+        adj.loop_const_iter_symbols = (
+            set()
+        )  # constant iteration variables for static loops (mutating them does not raise an error)
 
         # blocks
         adj.blocks = [Block()]
@@ -950,6 +983,9 @@ class Adjoint:
 
         # used to generate new label indices
         adj.label_count = 0
+
+        # tracks how much additional shared memory is required by any dependent function calls
+        adj.max_required_extra_shared_memory = 0
 
         # update symbol map for each argument
         for a in adj.args:
@@ -992,9 +1028,9 @@ class Adjoint:
             if isinstance(a, warp.context.Function):
                 # functions don't have a var_ prefix so strip it off here
                 if prefix == "var":
-                    arg_strs.append(a.native_func)
+                    arg_strs.append(f"{a.namespace}{a.native_func}")
                 else:
-                    arg_strs.append(f"{prefix}_{a.native_func}")
+                    arg_strs.append(f"{a.namespace}{prefix}_{a.native_func}")
             elif is_reference(a.type):
                 arg_strs.append(f"{prefix}_{a}")
             elif isinstance(a, Var):
@@ -1276,15 +1312,34 @@ class Adjoint:
             bound_arg_values,
         )
 
-        if func.dispatch_func is not None:
-            # If we have a built-in that requires special handling to dispatch
-            # the arguments to the underlying C++ function, then we can resolve
-            # these using the `dispatch_func`. Since this is only called from
-            # within codegen, we pass it directly `codegen.Var` objects,
-            # which allows for some more advanced resolution to be performed,
-            # for example by checking whether an argument corresponds to
-            # a literal value or references a variable.
+        # immediately allocate output variables so we can pass them into the dispatch method
+        if return_type is None:
+            # void function
+            output = None
+            output_list = []
+        elif not isinstance(return_type, Sequence) or len(return_type) == 1:
+            # single return value function
+            if isinstance(return_type, Sequence):
+                return_type = return_type[0]
+            output = adj.add_var(return_type)
+            output_list = [output]
+        else:
+            # multiple return value function
+            output = [adj.add_var(v) for v in return_type]
+            output_list = output
 
+        # If we have a built-in that requires special handling to dispatch
+        # the arguments to the underlying C++ function, then we can resolve
+        # these using the `dispatch_func`. Since this is only called from
+        # within codegen, we pass it directly `codegen.Var` objects,
+        # which allows for some more advanced resolution to be performed,
+        # for example by checking whether an argument corresponds to
+        # a literal value or references a variable.
+        if func.lto_dispatch_func is not None:
+            func_args, template_args, ltoirs = func.lto_dispatch_func(
+                func.input_types, return_type, output_list, bound_args, options=adj.builder_options, builder=adj.builder
+            )
+        elif func.dispatch_func is not None:
             func_args, template_args = func.dispatch_func(func.input_types, return_type, bound_args)
         else:
             func_args = tuple(bound_args.values())
@@ -1299,18 +1354,14 @@ class Adjoint:
             if not isinstance(func_arg, (Reference, warp.context.Function)):
                 func_arg = adj.load(func_arg)
 
-            # if the argument is a function, build it recursively
-            if isinstance(func_arg, warp.context.Function):
+            # if the argument is a function (and not a builtin), then build it recursively
+            if isinstance(func_arg, warp.context.Function) and not func_arg.is_builtin():
                 adj.builder.build_function(func_arg)
 
             fwd_args.append(strip_reference(func_arg))
 
         if return_type is None:
             # handles expression (zero output) functions, e.g.: void do_something();
-
-            output = None
-            output_list = []
-
             forward_call = (
                 f"{func.namespace}{func_name}({adj.format_forward_call_args(fwd_args, use_initializer_list)});"
             )
@@ -1320,12 +1371,6 @@ class Adjoint:
 
         elif not isinstance(return_type, Sequence) or len(return_type) == 1:
             # handle simple function (one output)
-
-            if isinstance(return_type, Sequence):
-                return_type = return_type[0]
-            output = adj.add_var(return_type)
-            output_list = [output]
-
             forward_call = f"var_{output} = {func.namespace}{func_name}({adj.format_forward_call_args(fwd_args, use_initializer_list)});"
             replay_call = forward_call
             if func.custom_replay_func is not None:
@@ -1333,10 +1378,6 @@ class Adjoint:
 
         else:
             # handle multiple value functions
-
-            output = [adj.add_var(v) for v in return_type]
-            output_list = output
-
             forward_call = (
                 f"{func.namespace}{func_name}({adj.format_forward_call_args(fwd_args + output, use_initializer_list)});"
             )
@@ -1363,6 +1404,11 @@ class Adjoint:
             if arg_str is not None:
                 reverse_call = f"{func.namespace}adj_{func.native_func}({arg_str});"
                 adj.add_reverse(reverse_call)
+
+        # update our smem roofline requirements based on any
+        # shared memory required by the dependent function call
+        if not func.is_builtin():
+            adj.alloc_shared_extra(func.adj.get_total_required_shared())
 
         return output
 
@@ -1464,7 +1510,10 @@ class Adjoint:
 
         # zero adjoints
         for i in body_block.vars:
-            reverse.append(adj.indentation + f"\t{i.emit_adj()} = {{}};")
+            if is_tile(i.type):
+                reverse.append(adj.indentation + f"\t{i.emit_adj()}.grad_zero();")
+            else:
+                reverse.append(adj.indentation + f"\t{i.emit_adj()} = {{}};")
 
         # replay
         for i in body_block.body_replay:
@@ -2000,22 +2049,11 @@ class Adjoint:
         )
         return range_call
 
-    def begin_record_constant_iter_symbols(adj):
-        if len(adj.loop_const_iter_symbols) > 0:
-            adj.loop_const_iter_symbols.append(adj.loop_const_iter_symbols[-1])
-        else:
-            adj.loop_const_iter_symbols.append(set())
-
-    def end_record_constant_iter_symbols(adj):
-        if len(adj.loop_const_iter_symbols) > 0:
-            adj.loop_const_iter_symbols.pop()
-
     def record_constant_iter_symbol(adj, sym):
-        if len(adj.loop_const_iter_symbols) > 0:
-            adj.loop_const_iter_symbols[-1].add(sym)
+        adj.loop_const_iter_symbols.add(sym)
 
     def is_constant_iter_symbol(adj, sym):
-        return len(adj.loop_const_iter_symbols) > 0 and sym in adj.loop_const_iter_symbols[-1]
+        return sym in adj.loop_const_iter_symbols
 
     def emit_For(adj, node):
         # try and unroll simple range() statements that use constant args
@@ -2045,7 +2083,6 @@ class Adjoint:
                 iter = adj.eval(node.iter)
 
             adj.symbols[node.target.id] = adj.begin_for(iter)
-            adj.begin_record_constant_iter_symbols()
 
             # for loops should be side-effect free, here we store a copy
             adj.loop_symbols.append(adj.symbols.copy())
@@ -2056,7 +2093,6 @@ class Adjoint:
 
             adj.materialize_redefinitions(adj.loop_symbols[-1])
             adj.loop_symbols.pop()
-            adj.end_record_constant_iter_symbols()
 
             adj.end_for(iter)
 
@@ -2296,6 +2332,14 @@ class Adjoint:
                     # view arg inherits target Var's read/write states
                     out.is_read = target.is_read
                     out.is_write = target.is_write
+
+        elif is_tile(target_type):
+            if len(indices) == 2:
+                # handles extracting a single element from a tile
+                out = adj.add_builtin_call("tile_extract", [target, *indices])
+            else:
+                # handles tile views
+                out = adj.add_builtin_call("tile_view", [target, *indices])
 
         else:
             # handles non-array type indexing, e.g: vec3, mat33, etc
@@ -2963,6 +3007,7 @@ class Adjoint:
 # code generation
 
 cpu_module_header = """
+#define WP_TILE_BLOCK_DIM {tile_size}
 #define WP_NO_CRT
 #include "builtin.h"
 
@@ -2973,7 +3018,7 @@ cpu_module_header = """
 #define int(x) cast_int(x)
 #define adj_int(x, adj_x, adj_ret) adj_cast_int(x, adj_x, adj_ret)
 
-#define builtin_tid1d() wp::tid(task_index)
+#define builtin_tid1d() wp::tid(task_index, dim)
 #define builtin_tid2d(x, y) wp::tid(x, y, task_index, dim)
 #define builtin_tid3d(x, y, z) wp::tid(x, y, z, task_index, dim)
 #define builtin_tid4d(x, y, z, w) wp::tid(x, y, z, w, task_index, dim)
@@ -2981,6 +3026,7 @@ cpu_module_header = """
 """
 
 cuda_module_header = """
+#define WP_TILE_BLOCK_DIM {tile_size}
 #define WP_NO_CRT
 #include "builtin.h"
 
@@ -2991,10 +3037,10 @@ cuda_module_header = """
 #define int(x) cast_int(x)
 #define adj_int(x, adj_x, adj_ret) adj_cast_int(x, adj_x, adj_ret)
 
-#define builtin_tid1d() wp::tid(task_index)
-#define builtin_tid2d(x, y) wp::tid(x, y, task_index, dim)
-#define builtin_tid3d(x, y, z) wp::tid(x, y, z, task_index, dim)
-#define builtin_tid4d(x, y, z, w) wp::tid(x, y, z, w, task_index, dim)
+#define builtin_tid1d() wp::tid(_idx, dim)
+#define builtin_tid2d(x, y) wp::tid(x, y, _idx, dim)
+#define builtin_tid3d(x, y, z) wp::tid(x, y, z, _idx, dim)
+#define builtin_tid4d(x, y, z, w) wp::tid(x, y, z, w, _idx, dim)
 
 """
 
@@ -3066,20 +3112,26 @@ cuda_kernel_template = """
 extern "C" __global__ void {name}_cuda_kernel_forward(
     {forward_args})
 {{
-    for (size_t task_index = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
-         task_index < dim.size;
-         task_index += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
+    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         _idx < dim.size;
+         _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
+        // reset shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
 {forward_body}    }}
 }}
 
 extern "C" __global__ void {name}_cuda_kernel_backward(
     {reverse_args})
 {{
-    for (size_t task_index = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
-         task_index < dim.size;
-         task_index += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
+    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+         _idx < dim.size;
+         _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
+        // reset shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
 {reverse_body}    }}
 }}
 
@@ -3317,7 +3369,9 @@ def codegen_func_forward(adj, func_type="kernel", device="cpu"):
     lines += ["// primal vars\n"]
 
     for var in adj.variables:
-        if var.constant is None:
+        if is_tile(var.type):
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(requires_grad=False)};\n"]
+        elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
             lines += [f"const {var.ctype()} {var.emit()} = {constant_str(var.constant)};\n"]
@@ -3352,7 +3406,9 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
     lines += ["// primal vars\n"]
 
     for var in adj.variables:
-        if var.constant is None:
+        if is_tile(var.type):
+            lines += [f"{var.ctype()} {var.emit()} = {var.type.cinit(requires_grad=True)};\n"]
+        elif var.constant is None:
             lines += [f"{var.ctype()} {var.emit()};\n"]
         else:
             lines += [f"const {var.ctype()} {var.emit()} = {constant_str(var.constant)};\n"]
@@ -3362,7 +3418,20 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu"):
     lines += ["// dual vars\n"]
 
     for var in adj.variables:
-        lines += [f"{var.ctype(value_type=True)} {var.emit_adj()} = {{}};\n"]
+        name = var.emit_adj()
+        ctype = var.ctype(value_type=True)
+
+        if is_tile(var.type):
+            if var.type.storage == "register":
+                lines += [
+                    f"{var.type.ctype()} {name}(0.0);\n"
+                ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
+            elif var.type.storage == "shared":
+                lines += [
+                    f"{var.type.ctype()}& {name} = {var.emit()};\n"
+                ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
+        else:
+            lines += [f"{ctype} {name} = {{}};\n"]
 
     # forward pass
     lines += ["//---------\n"]
