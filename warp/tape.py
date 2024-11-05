@@ -894,7 +894,10 @@ def visit_tape(
                             launch_id = launch_ids[j]
                             for arg_i, arg in enumerate(launch.inputs):
                                 if isinstance(arg, wp.array) and arg.ptr in output_arrays:
-                                    first_encountered_var = launch_to_array[(launch_id, arg_i)][0]
+                                    var_usage = launch_to_array[(launch_id, arg_i)]
+                                    if len(var_usage) == 0:
+                                        continue
+                                    first_encountered_var = var_usage[0]
                                     # print(array_to_launch[arg.ptr])
                                     # array_to_launch[arg.ptr].append((launch_id, arg_i))
                                     # launch_to_array[(launch_id, arg_i)].append(arg)
@@ -909,7 +912,10 @@ def visit_tape(
                             launch_id = launch_ids[j]
                             for arg_i, arg in enumerate(launch.inputs + launch.outputs):
                                 if isinstance(arg, wp.array):
-                                    array_repeated[arg.ptr] = launch_to_array[(launch_id, arg_i)][0].ptr
+                                    var_usage = launch_to_array[(launch_id, arg_i)]
+                                    if len(var_usage) == 0:
+                                        continue
+                                    array_repeated[arg.ptr] = var_usage[0].ptr
 
                         # skip launches during these repetitions
                         i += skip_len
