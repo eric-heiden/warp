@@ -5,8 +5,9 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import inspect
 import itertools
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -18,26 +19,28 @@ __all__ = [
     "gradcheck",
     "gradcheck_tape",
     "jacobian_plot",
+    "function_jacobian",
+    "function_jacobian_fd",
 ]
 
 
 def gradcheck(
-    function: wp.Kernel,
-    dim: Tuple[int],
-    inputs: Sequence,
-    outputs: Sequence,
+    function: Union[wp.Kernel, Callable],
+    dim: Tuple[int] = None,
+    inputs: Sequence = None,
+    outputs: Sequence = None,
     *,
-    eps=1e-4,
-    atol=1e-3,
-    rtol=1e-2,
-    raise_exception=True,
+    eps: float = 1e-4,
+    atol: float = 1e-3,
+    rtol: float = 1e-2,
+    raise_exception: bool = True,
     input_output_mask: List[Tuple[Union[str, int], Union[str, int]]] = None,
     device: wp.context.Devicelike = None,
-    max_blocks=0,
-    max_inputs_per_var=-1,
-    max_outputs_per_var=-1,
-    plot_relative_error=False,
-    plot_absolute_error=False,
+    max_blocks: int = 0,
+    max_inputs_per_var: int = -1,
+    max_outputs_per_var: int = -1,
+    plot_relative_error: bool = False,
+    plot_absolute_error: bool = False,
     show_summary: bool = True,
 ) -> bool:
     """
@@ -54,10 +57,10 @@ def gradcheck(
         Structs arguments are not yet supported by this function to compute Jacobians.
 
     Args:
-        function: The Warp kernel function, decorated with the ``@wp.kernel`` decorator.
-        dim: The number of threads to launch the kernel, can be an integer, or a Tuple of ints.
+        function: The Warp kernel function, decorated with the ``@wp.kernel`` decorator, or any function that involves Warp kernel launches.
+        dim: The number of threads to launch the kernel, can be an integer, or a Tuple of ints. Only required if the function is a Warp kernel.
         inputs: List of input variables.
-        outputs: List of output variables.
+        outputs: List of output variables. Only required if the function is a Warp kernel.
         eps: The finite-difference step size.
         atol: The absolute tolerance for the gradient check.
         rtol: The relative tolerance for the gradient check.
@@ -75,34 +78,56 @@ def gradcheck(
         True if the gradient check passes, False otherwise.
     """
 
-    assert isinstance(function, wp.Kernel), "The function argument must be a Warp kernel"
+    if inputs is None:
+        raise ValueError("The inputs argument must be provided")
 
-    if not function.options.get("enable_backward", True):
-        raise ValueError("Kernel must have backward enabled to compute Jacobians")
+    metadata = FunctionMetadata()
+    if isinstance(function, wp.Kernel):
+        if not function.options.get("enable_backward", True):
+            raise ValueError("Kernel must have backward enabled to compute Jacobians")
 
-    jacs_ad = jacobian(
-        function,
-        dim=dim,
-        inputs=inputs,
-        outputs=outputs,
-        input_output_mask=input_output_mask,
-        device=device,
-        max_blocks=max_blocks,
-        max_outputs_per_var=max_outputs_per_var,
-        plot_jacobians=False,
-    )
-    jacs_fd = jacobian_fd(
-        function,
-        dim=dim,
-        inputs=inputs,
-        outputs=outputs,
-        input_output_mask=input_output_mask,
-        device=device,
-        max_blocks=max_blocks,
-        max_inputs_per_var=max_inputs_per_var,
-        eps=eps,
-        plot_jacobians=False,
-    )
+        metadata.update_from_kernel(function, inputs)
+
+        jacs_ad = jacobian(
+            function,
+            dim=dim,
+            inputs=inputs,
+            outputs=outputs,
+            input_output_mask=input_output_mask,
+            device=device,
+            max_blocks=max_blocks,
+            max_outputs_per_var=max_outputs_per_var,
+            plot_jacobians=False,
+        )
+        jacs_fd = jacobian_fd(
+            function,
+            dim=dim,
+            inputs=inputs,
+            outputs=outputs,
+            input_output_mask=input_output_mask,
+            device=device,
+            max_blocks=max_blocks,
+            max_inputs_per_var=max_inputs_per_var,
+            eps=eps,
+            plot_jacobians=False,
+        )
+    else:
+        jacs_ad = function_jacobian(
+            function,
+            inputs,
+            input_output_mask=input_output_mask,
+            max_outputs_per_var=max_outputs_per_var,
+            plot_jacobians=False,
+        )
+        jacs_fd = function_jacobian_fd(
+            function,
+            inputs,
+            input_output_mask=input_output_mask,
+            max_inputs_per_var=max_inputs_per_var,
+            eps=eps,
+            plot_jacobians=False,
+            metadata=metadata,
+        )
 
     relative_error_jacs = {}
     absolute_error_jacs = {}
@@ -162,8 +187,8 @@ def gradcheck(
                 pass_str = FontColors.OKGREEN + "PASS" + FontColors.ENDC
             else:
                 pass_str = FontColors.FAIL + "FAIL" + FontColors.ENDC
-            input_name = function.adj.args[input_i].label
-            output_name = function.adj.args[len(inputs) + output_i].label
+            input_name = metadata.input_labels[input_i]
+            output_name = metadata.output_labels[output_i]
             summary.append(
                 [
                     input_name,
@@ -179,35 +204,35 @@ def gradcheck(
     if show_summary:
         print_table(summary_header, summary)
         if not success:
-            print(FontColors.FAIL + f"Gradient check for kernel {function.key} failed" + FontColors.ENDC)
+            print(FontColors.FAIL + f"Gradient check for kernel {metadata.key} failed" + FontColors.ENDC)
         else:
-            print(FontColors.OKGREEN + f"Gradient check for kernel {function.key} passed" + FontColors.ENDC)
+            print(FontColors.OKGREEN + f"Gradient check for kernel {metadata.key} passed" + FontColors.ENDC)
     if plot_relative_error:
         jacobian_plot(
             relative_error_jacs,
-            function,
+            metadata,
             inputs,
             outputs,
-            title=f"{function.key} kernel Jacobian relative error",
+            title=f"{metadata.key} kernel Jacobian relative error",
         )
     if plot_absolute_error:
         jacobian_plot(
             absolute_error_jacs,
-            function,
+            metadata,
             inputs,
             outputs,
-            title=f"{function.key} kernel Jacobian absolute error",
+            title=f"{metadata.key} kernel Jacobian absolute error",
         )
 
     if raise_exception:
         if any_grad_mismatch:
             raise ValueError(
-                f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
+                f"Gradient check failed for kernel {metadata.key}, input {input_i}, output {output_i}: "
                 f"finite difference and autodiff gradients do not match"
             )
         if any_grad_nan:
             raise ValueError(
-                f"Gradient check failed for kernel {function.key}, input {input_i}, output {output_i}: "
+                f"Gradient check failed for kernel {metadata.key}, input {input_i}, output {output_i}: "
                 f"gradient contains NaN values"
             )
 
@@ -328,11 +353,85 @@ def infer_device(xs: list):
     return wp.get_preferred_device()
 
 
+class FunctionMetadata:
+    def __init__(
+        self,
+        key: str = None,
+        input_labels: List[str] = None,
+        output_labels: List[str] = None,
+        input_strides: List[tuple] = None,
+        output_strides: List[tuple] = None,
+        input_dtypes: list = None,
+        output_dtypes: list = None,
+    ):
+        self.key = key
+        self.input_labels = input_labels
+        self.output_labels = output_labels
+        self.input_strides = input_strides
+        self.output_strides = output_strides
+        self.input_dtypes = input_dtypes
+        self.output_dtypes = output_dtypes
+
+    def input_is_array(self, i: int):
+        return self.input_strides[i] is not None
+
+    def output_is_array(self, i: int):
+        return self.output_strides[i] is not None
+
+    def update_from_kernel(self, kernel: wp.Kernel, inputs: Sequence):
+        self.key = kernel.key
+        self.input_labels = [arg.label for arg in kernel.adj.args[: len(inputs)]]
+        self.output_labels = [arg.label for arg in kernel.adj.args[len(inputs) :]]
+        self.input_strides = []
+        self.output_strides = []
+        self.input_dtypes = []
+        self.output_dtypes = []
+        for arg in kernel.adj.args[: len(inputs)]:
+            if arg.type is wp.array:
+                self.input_strides.append(arg.type.strides)
+                self.input_dtypes.append(arg.type.dtype)
+            else:
+                self.input_strides.append(None)
+                self.input_dtypes.append(None)
+        for arg in kernel.adj.args[len(inputs) :]:
+            if arg.type is wp.array:
+                self.output_strides.append(arg.type.strides)
+                self.output_dtypes.append(arg.type.dtype)
+            else:
+                self.output_strides.append(None)
+                self.output_dtypes.append(None)
+
+    def update_from_function(self, function: Callable, inputs: Sequence, outputs: Sequence = None):
+        self.key = function.__name__
+        self.input_labels = list(inspect.signature(function).parameters.keys())
+        if outputs is None:
+            outputs = function(*inputs)
+        self.output_labels = [f"output_{i}" for i in range(len(outputs))]
+        self.input_strides = []
+        self.output_strides = []
+        self.input_dtypes = []
+        self.output_dtypes = []
+        for input in inputs:
+            if isinstance(input, wp.array):
+                self.input_strides.append(input.strides)
+                self.input_dtypes.append(input.dtype)
+            else:
+                self.input_strides.append(None)
+                self.input_dtypes.append(None)
+        for output in outputs:
+            if isinstance(output, wp.array):
+                self.output_strides.append(output.strides)
+                self.output_dtypes.append(output.dtype)
+            else:
+                self.output_strides.append(None)
+                self.output_dtypes.append(None)
+
+
 def jacobian_plot(
     jacobians: Dict[Tuple[int, int], wp.array],
-    kernel: wp.Kernel,
-    inputs: Sequence,
-    outputs: Sequence,
+    kernel: Union[FunctionMetadata, wp.Kernel],
+    inputs: Sequence = None,
+    _outputs: Sequence = None,
     show_plot=True,
     show_colorbar=True,
     scale_colors_per_submatrix=False,
@@ -346,7 +445,7 @@ def jacobian_plot(
 
     Args:
         jacobians: A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
-        kernel: The Warp kernel function, decorated with the ``@wp.kernel`` decorator.
+        kernel: The Warp kernel function, decorated with the ``@wp.kernel`` decorator, or a dictionary with the kernel/function attributes.
         inputs: List of input variables.
         outputs: List of output variables.
         show_plot: If True, displays the plot via ``plt.show()``.
@@ -359,8 +458,18 @@ def jacobian_plot(
     Returns:
         The created Matplotlib figure.
     """
+
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter, MaxNLocator, MultipleLocator
+
+    if isinstance(kernel, wp.Kernel):
+        assert inputs is not None
+        metadata = FunctionMetadata()
+        metadata.update_from_kernel(kernel, inputs)
+    elif isinstance(kernel, FunctionMetadata):
+        metadata = kernel
+    else:
+        raise ValueError("Invalid kernel argument: must be a Warp kernel or a FunctionMetadata object")
 
     jacobians = sorted(jacobians.items(), key=lambda x: (x[0][1], x[0][0]))
     jacobians = dict(jacobians)
@@ -386,19 +495,19 @@ def jacobian_plot(
     # dimensions of the Jacobians
     width_ratios = []
     height_ratios = []
-    for i, input in enumerate(inputs):
-        if not isinstance(input, wp.array) or not input.requires_grad:
+    for i in range(len(metadata.input_labels)):
+        if not metadata.input_is_array(i):
             continue
-        input_stride = input.dtype._length_
-        for j in range(len(outputs)):
+        input_stride = metadata.input_strides[i][0]
+        for j in range(len(metadata.output_labels)):
             if (i, j) not in jacobians:
                 continue
             jac_wp = jacobians[(i, j)]
             width_ratios.append(jac_wp.shape[1] * input_stride)
             break
 
-    for i, output in enumerate(outputs):
-        if not isinstance(output, wp.array) or not output.requires_grad:
+    for i in range(len(metadata.output_labels)):
+        if not metadata.output_is_array(i):
             continue
         for j in range(len(inputs)):
             if (j, i) not in jacobians:
@@ -425,7 +534,8 @@ def jacobian_plot(
         squeeze=False,
     )
     if title is None:
-        title = f"{kernel.key} kernel Jacobian"
+        key = kernel.key if isinstance(kernel, wp.Kernel) else kernel.get("key", "unknown")
+        title = f"{key} kernel Jacobian"
     fig.suptitle(title)
     fig.canvas.manager.set_window_title(title)
 
@@ -450,15 +560,8 @@ def jacobian_plot(
 
     jac_i = 0
     for (input_i, output_i), jac_wp in jacobians.items():
-        input = inputs[input_i]
-        output = outputs[output_i]
-        if not isinstance(input, wp.array) or not input.requires_grad:
-            continue
-        if not isinstance(output, wp.array) or not output.requires_grad:
-            continue
-
-        input_name = kernel.adj.args[input_i].label
-        output_name = kernel.adj.args[len(inputs) + output_i].label
+        input_name = metadata.input_labels[input_i]
+        output_name = metadata.output_labels[output_i]
 
         ax_i, ax_j = output_to_ax[output_i], input_to_ax[input_i]
         ax = axs[ax_i, ax_j]
@@ -466,8 +569,8 @@ def jacobian_plot(
         ax.tick_params(which="minor", width=1, length=4, color="gray")
         # ax.yaxis.set_minor_formatter('{x:.0f}')
 
-        input_stride = input.dtype._length_
-        output_stride = output.dtype._length_
+        input_stride = metadata.input_dtypes[input_i]._length_
+        output_stride = metadata.output_dtypes[output_i]._length_
 
         jac = jac_wp.numpy()
         # Jacobian matrix has output stride already multiplied to first dimension
@@ -522,7 +625,7 @@ def jacobian_plot(
             vmin=vmin,
             vmax=vmax,
         )
-        if ax_i == len(outputs) - 1 or not has_plot[ax_i + 1 :, ax_j].any():
+        if ax_i == num_rows - 1 or not has_plot[ax_i + 1 :, ax_j].any():
             # last plot of this column
             ax.set_xlabel(input_name)
         if ax_j == 0 or not has_plot[ax_i, :ax_j].any():
@@ -756,11 +859,6 @@ def jacobian(
             return name
         return arg_names.index(name) + offset
 
-    def zero_grads(arrays):
-        for array in arrays:
-            if isinstance(array, wp.array) and array.requires_grad:
-                array.grad.zero_()
-
     input_output_mask = [
         (resolve_arg(input_name), resolve_arg(output_name, -len(inputs)))
         for input_name, output_name in input_output_mask
@@ -861,6 +959,7 @@ def jacobian_fd(
         A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
     """
     if outputs is None:
+        # TODO does it make sense to have no outputs?
         outputs = []
     if input_output_mask is None:
         input_output_mask = []
@@ -886,6 +985,7 @@ def jacobian_fd(
         if isinstance(obj, wp.array):
             return wp.clone(obj)
         return obj
+
     outputs_copy = [conditional_clone(output) for output in outputs]
 
     for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
@@ -961,6 +1061,210 @@ def jacobian_fd(
     return jacobians
 
 
+def function_jacobian(
+    func: Callable,
+    inputs: Sequence,
+    input_output_mask: List[Tuple[Union[str, int], Union[str, int]]] = None,
+    max_outputs_per_var=-1,
+    plot_jacobians=False,
+    metadata: FunctionMetadata = None,
+) -> Dict[Tuple[int, int], wp.array]:
+    """
+    Computes the Jacobians of a Python function for the provided selection of differentiable inputs to differentiable outputs.
+    The method uses a central difference scheme to approximate the Jacobian.
+
+    Note:
+        Only Warp arrays with ``requires_grad=True`` are considered for the Jacobian computation.
+
+    Args:
+        func: The Python function to compute the Jacobian for.
+        inputs: List of input variables.
+        input_output_mask: List of tuples specifying the input-output pairs to compute the Jacobian for. Inputs and outputs can be identified either by their integer indices of where they appear in the function arguments, or by the respective argument names as strings (only applies to inputs). If None, computes the Jacobian for all input-output pairs.
+        max_outputs_per_var: Maximum number of output dimensions over which to evaluate the Jacobians for the input-output pairs. Evaluates all output dimensions if value <= 0.
+        eps: The finite-difference step size.
+        plot_jacobians: If True, visualizes the computed Jacobians in a plot (requires ``matplotlib``).
+
+    Returns:
+        A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
+    """
+    if input_output_mask is None:
+        input_output_mask = []
+    arg_names = inspect.signature(func).parameters.keys()
+
+    def resolve_arg(name):
+        if isinstance(name, int):
+            return name
+        return list(arg_names).index(name)
+
+    input_output_mask = [(resolve_arg(input_name), output_index) for input_name, output_index in input_output_mask]
+    input_output_mask = set(input_output_mask)
+
+    jacobians = {}
+
+    tape = wp.Tape()
+    with tape:
+        outputs = func(*inputs)
+    if metadata is None:
+        metadata = FunctionMetadata()
+    metadata.update_from_function(func, inputs, outputs)
+
+    for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
+        if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
+            continue
+        input = inputs[input_i]
+        output = outputs[output_i]
+        if not isinstance(input, wp.array) or not input.requires_grad:
+            continue
+        if not isinstance(output, wp.array) or not output.requires_grad:
+            continue
+
+        zero_grads(outputs)
+        out_grad = scalarize_array_1d(output.grad)
+        output_num = out_grad.shape[0]
+        jacobian = wp.empty((output_num, input.size), dtype=input.dtype, device=input.device)
+        jacobian.fill_(wp.nan)
+        if max_outputs_per_var > 0:
+            output_num = min(output_num, max_outputs_per_var)
+        for i in range(output_num):
+            output.grad.zero_()
+            set_element(out_grad, i, 1.0)
+            tape.backward()
+            jacobian[i].assign(input.grad)
+            # if i < output_num - 1:
+            #     # reset input gradients
+            #     tape.zero()
+
+            zero_grads(inputs)
+            zero_grads(outputs)
+            tape.zero()
+
+        jacobians[input_i, output_i] = jacobian
+
+    if plot_jacobians:
+        jacobian_plot(
+            jacobians,
+            metadata,
+            inputs,
+            outputs,
+        )
+
+    return jacobians
+
+
+def function_jacobian_fd(
+    func: Callable,
+    inputs: Sequence,
+    input_output_mask: List[Tuple[Union[str, int], Union[str, int]]] = None,
+    max_inputs_per_var=-1,
+    eps=1e-4,
+    plot_jacobians=False,
+    metadata: FunctionMetadata = None,
+) -> Dict[Tuple[int, int], wp.array]:
+    """
+    Computes the finite-difference Jacobian of a Python function for the provided selection of differentiable inputs to differentiable outputs.
+    The method uses a central difference scheme to approximate the Jacobian.
+
+    Note:
+        Only Warp arrays with ``requires_grad=True`` are considered for the Jacobian computation.
+
+    Args:
+        func: The Python function to compute the Jacobian for.
+        inputs: List of input variables.
+        input_output_mask: List of tuples specifying the input-output pairs to compute the Jacobian for. Inputs and outputs can be identified either by their integer indices of where they appear in the function arguments, or by the respective argument names as strings (only applies to inputs). If None, computes the Jacobian for all input-output pairs.
+        max_inputs_per_var: Maximum number of input dimensions over which to evaluate the Jacobians for the input-output pairs. Evaluates all input dimensions if value <= 0.
+        eps: The finite-difference step size.
+        plot_jacobians: If True, visualizes the computed Jacobians in a plot (requires ``matplotlib``).
+
+    Returns:
+        A dictionary of Jacobians, where the keys are tuples of input and output indices, and the values are the Jacobian matrices.
+    """
+    if input_output_mask is None:
+        input_output_mask = []
+    arg_names = inspect.signature(func).parameters.keys()
+
+    def resolve_arg(name):
+        if isinstance(name, int):
+            return name
+        return list(arg_names).index(name)
+
+    input_output_mask = [(resolve_arg(input_name), output_index) for input_name, output_index in input_output_mask]
+    input_output_mask = set(input_output_mask)
+
+    jacobians = {}
+
+    outputs = func(*inputs)
+    if metadata is None:
+        metadata = FunctionMetadata()
+    metadata.update_from_function(func, inputs, outputs)
+
+    for input_i, output_i in itertools.product(range(len(inputs)), range(len(outputs))):
+        if len(input_output_mask) > 0 and (input_i, output_i) not in input_output_mask:
+            continue
+        input = inputs[input_i]
+        output = outputs[output_i]
+        if not isinstance(input, wp.array) or not input.requires_grad:
+            continue
+        if not isinstance(output, wp.array) or not output.requires_grad:
+            continue
+
+        flat_input = scalarize_array_1d(input)
+
+        left = wp.clone(output)
+        right = wp.clone(output)
+        left_copy = wp.clone(output)
+        right_copy = wp.clone(output)
+        flat_left = scalarize_array_1d(left)
+        flat_right = scalarize_array_1d(right)
+
+        input_num = flat_input.shape[0]
+        flat_input_copy = wp.clone(flat_input)
+        jacobian = wp.empty((flat_left.size, input.size), dtype=input.dtype, device=input.device)
+        jacobian.fill_(wp.nan)
+
+        jacobian_scalar = scalarize_array_2d(jacobian)
+        jacobian_t = jacobian_scalar.transpose()
+
+        if max_inputs_per_var > 0:
+            input_num = min(input_num, max_inputs_per_var)
+        for i in range(input_num):
+            set_element(flat_input, i, wp.float64(-eps), relative=True)
+            outputs = func(*inputs)
+            left.assign(outputs[output_i])
+
+            set_element(flat_input, i, wp.float64(2 * eps), relative=True)
+            outputs = func(*inputs)
+            right.assign(outputs[output_i])
+
+            # restore input
+            flat_input.assign(flat_input_copy)
+
+            compute_fd(
+                flat_left,
+                flat_right,
+                wp.float64(eps),
+                jacobian_t[i],
+            )
+
+            if i < input_num - 1:
+                # reset output buffers
+                left.assign(left_copy)
+                right.assign(right_copy)
+                flat_left = scalarize_array_1d(left)
+                flat_right = scalarize_array_1d(right)
+
+        jacobians[input_i, output_i] = jacobian
+
+    if plot_jacobians:
+        jacobian_plot(
+            jacobians,
+            metadata,
+            inputs,
+            outputs,
+        )
+
+    return jacobians
+
+
 @wp.kernel(enable_backward=False)
 def set_element_kernel(a: wp.array(dtype=Any), i: int, val: Any, relative: bool):
     if relative:
@@ -1022,3 +1326,9 @@ def print_table(headers, cells):
         for cell, col_width in zip(cell_row, col_widths):
             print(f"{cell:{col_width}}", end=" | ")
         print()
+
+
+def zero_grads(arrays):
+    for array in arrays:
+        if isinstance(array, wp.array) and array.requires_grad:
+            array.grad.zero_()
