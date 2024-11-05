@@ -1010,6 +1010,93 @@ def eval_rigid_contacts(
             wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
 
 
+@wp.kernel
+def eval_rigid_ground_contacts(
+    body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_com: wp.array(dtype=wp.vec3),
+    normal: wp.vec3,
+    shape_materials: ModelShapeMaterials,
+    geo: ModelShapeGeometry,
+    shape_body: wp.array(dtype=int),
+    contact_point0: wp.array(dtype=wp.vec3),
+    contact_shape0: wp.array(dtype=int),
+    force_in_world_frame: bool,
+    # outputs
+    body_f: wp.array(dtype=wp.spatial_vector),
+):
+    tid = wp.tid()
+    shape_a = contact_shape0[tid]
+    ke = shape_materials.ke[shape_a]
+    kd = shape_materials.kd[shape_a]
+    kf = shape_materials.kf[shape_a]
+    ka = shape_materials.ka[shape_a]
+    mu = shape_materials.mu[shape_a]
+    thickness = geo.thickness[shape_a]
+    body_a = shape_body[shape_a]
+
+    # contact normal in world space
+    bx_a = contact_point0[tid]
+    if body_a >= 0:
+        X_wb_a = body_q[body_a]
+        X_com_a = body_com[body_a]
+        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness * normal
+        r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
+
+    d = wp.dot(normal, bx_a)
+    if d >= ka:
+        return
+
+    # compute contact point velocity
+    bv_a = wp.vec3(0.0)
+    body_v_s_a = body_qd[body_a]
+    body_w_a = wp.spatial_top(body_v_s_a)
+    body_v_a = wp.spatial_bottom(body_v_s_a)
+    if force_in_world_frame:
+        bv_a = body_v_a + wp.cross(body_w_a, bx_a)
+    else:
+        bv_a = body_v_a + wp.cross(body_w_a, r_a)
+
+    # relative velocity
+    v = bv_a
+
+    # decompose relative velocity
+    vn = wp.dot(normal, v)
+    vt = v - normal * vn
+
+    # contact elastic
+    fn = d * ke
+
+    # contact damping
+    fd = wp.min(vn, 0.0) * kd * wp.step(d)
+
+    # viscous friction
+    # ft = vt*kf
+
+    # Coulomb friction (box)
+    # lower = mu * d * ke
+    # upper = -lower
+
+    # vx = wp.clamp(wp.dot(wp.vec3(kf, 0.0, 0.0), vt), lower, upper)
+    # vz = wp.clamp(wp.dot(wp.vec3(0.0, 0.0, kf), vt), lower, upper)
+
+    # ft = wp.vec3(vx, 0.0, vz)
+
+    # Coulomb friction (smooth, but gradients are numerically unstable around |vt| = 0)
+    # ft = wp.normalize(vt)*wp.min(kf*wp.length(vt), abs(mu*d*ke))
+    ft = wp.vec3(0.0)
+    if d < 0.0:
+        ft = wp.normalize(vt) * wp.min(kf * wp.length(vt), -mu * (fn + fd))
+
+    f_total = normal * (fn + fd) + ft
+    # f_total = normal * fn
+
+    if body_a >= 0:
+        if force_in_world_frame:
+            wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
+        else:
+            wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
+
 @wp.func
 def eval_joint_force(
     q: float,
@@ -1763,27 +1850,47 @@ def eval_body_contact_forces(model: Model, state: State, particle_f: wp.array):
     if model.rigid_contact_max and (
         model.ground and model.shape_ground_contact_pair_count or model.shape_contact_pair_count
     ):
-        wp.launch(
-            kernel=eval_rigid_contacts,
-            dim=model.rigid_contact_max,
-            inputs=[
-                state.body_q,
-                state.body_qd,
-                model.body_com,
-                model.shape_materials,
-                model.shape_geo,
-                model.shape_body,
-                model.rigid_contact_count,
-                model.rigid_contact_point0,
-                model.rigid_contact_point1,
-                model.rigid_contact_normal,
-                model.rigid_contact_shape0,
-                model.rigid_contact_shape1,
-                False,
-            ],
-            outputs=[state.body_f],
-            device=model.device,
-        )
+        if model.separate_ground_contacts:
+            wp.launch(
+                kernel=eval_rigid_ground_contacts,
+                dim=model.rigid_contact_max,
+                inputs=[
+                    state.body_q,
+                    state.body_qd,
+                    model.body_com,
+                    model.ground_normal,
+                    model.shape_materials,
+                    model.shape_geo,
+                    model.shape_body,
+                    model.rigid_contact_point0,
+                    model.rigid_contact_shape0,
+                    False,
+                ],
+                outputs=[state.body_f],
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                kernel=eval_rigid_contacts,
+                dim=model.rigid_contact_max,
+                inputs=[
+                    state.body_q,
+                    state.body_qd,
+                    model.body_com,
+                    model.shape_materials,
+                    model.shape_geo,
+                    model.shape_body,
+                    model.rigid_contact_count,
+                    model.rigid_contact_point0,
+                    model.rigid_contact_point1,
+                    model.rigid_contact_normal,
+                    model.rigid_contact_shape0,
+                    model.rigid_contact_shape1,
+                    False,
+                ],
+                outputs=[state.body_f],
+                device=model.device,
+            )
 
 
 def eval_body_joint_forces(model: Model, state: State, control: Control, body_f: wp.array):

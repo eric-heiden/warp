@@ -21,6 +21,7 @@ from .integrator_euler import (
     eval_particle_forces,
     eval_particle_ground_contact_forces,
     eval_rigid_contacts,
+    eval_rigid_ground_contacts,
     eval_spring_forces,
     eval_tetrahedral_forces,
     eval_triangle_contact_forces,
@@ -116,11 +117,11 @@ def spatial_transform_inertia(t: wp.transform, I: wp.spatial_matrix):
     q = wp.transform_get_rotation(t_inv)
     p = wp.transform_get_translation(t_inv)
 
-    r1 = wp.quat_rotate(q, wp.vec3(1.0, 0.0, 0.0))
-    r2 = wp.quat_rotate(q, wp.vec3(0.0, 1.0, 0.0))
-    r3 = wp.quat_rotate(q, wp.vec3(0.0, 0.0, 1.0))
-
-    R = wp.mat33(r1, r2, r3)
+    # r1 = wp.quat_rotate(q, wp.vec3(1.0, 0.0, 0.0))
+    # r2 = wp.quat_rotate(q, wp.vec3(0.0, 1.0, 0.0))
+    # r3 = wp.quat_rotate(q, wp.vec3(0.0, 0.0, 1.0))
+    # R = wp.mat33(r1, r2, r3)
+    R = wp.quat_to_matrix(q)  # TODO verify
     S = wp.skew(p) @ R
 
     T = spatial_adjoint(R, S)
@@ -1049,7 +1050,8 @@ def eval_rigid_jacobian(
                 S = joint_S_s[joint_dof_start + dof]
 
                 for k in range(6):
-                    J[J_offset + dense_index(articulation_dof_count, row_start + k, col)] = S[k]
+                    J_index = J_offset + dense_index(articulation_dof_count, row_start + k, col)
+                    J[J_index] = S[k]
 
             j = joint_ancestor[j]
 
@@ -1069,6 +1071,24 @@ def spatial_mass(
         for i in range(6):
             for j in range(6):
                 M[M_start + dense_index(stride, l * 6 + i, l * 6 + j)] = I[i, j]
+
+
+@wp.func_grad(spatial_mass)
+def adj_spatial_mass(
+    body_I_s: wp.array(dtype=wp.spatial_matrix),
+    joint_start: int,
+    joint_count: int,
+    M_start: int,
+    # outputs
+    M: wp.array(dtype=float),
+):
+    stride = joint_count * 6
+    local_m = wp.spatial_matrix()
+    for l in range(joint_count):
+        for i in range(6):
+            for j in range(6):
+                local_m[i, j] = wp.adjoint[M][M_start + dense_index(stride, l * 6 + i, l * 6 + j)]
+        wp.adjoint[body_I_s][joint_start + l] += local_m
 
 
 @wp.kernel
@@ -1128,31 +1148,81 @@ def dense_gemm(
                 C[C_start + i * n + j] = sum
 
 
-# @wp.func_grad(dense_gemm)
-# def adj_dense_gemm(
-#     m: int,
-#     n: int,
-#     p: int,
-#     transpose_A: bool,
-#     transpose_B: bool,
-#     add_to_C: bool,
-#     A_start: int,
-#     B_start: int,
-#     C_start: int,
-#     A: wp.array(dtype=float),
-#     B: wp.array(dtype=float),
-#     # outputs
-#     C: wp.array(dtype=float),
-# ):
-#     add_to_C = True
-#     if transpose_A:
-#         dense_gemm(p, m, n, False, True, add_to_C, A_start, B_start, C_start, B, wp.adjoint[C], wp.adjoint[A])
-#         dense_gemm(p, n, m, False, False, add_to_C, A_start, B_start, C_start, A, wp.adjoint[C], wp.adjoint[B])
-#     else:
-#         dense_gemm(
-#             m, p, n, False, not transpose_B, add_to_C, A_start, B_start, C_start, wp.adjoint[C], B, wp.adjoint[A]
-#         )
-#         dense_gemm(p, n, m, True, False, add_to_C, A_start, B_start, C_start, A, wp.adjoint[C], wp.adjoint[B])
+@wp.func_grad(dense_gemm)
+def adj_dense_gemm(
+    m: int,
+    n: int,
+    p: int,
+    transpose_A: bool,
+    transpose_B: bool,
+    add_to_C: bool,
+    A_start: int,
+    B_start: int,
+    C_start: int,
+    A: wp.array(dtype=float),
+    B: wp.array(dtype=float),
+    # outputs
+    C: wp.array(dtype=float),
+):
+    add_to_C = True
+    if transpose_A:
+        dense_gemm(
+            p,
+            m,
+            n,
+            False,
+            True,
+            add_to_C,
+            B_start,
+            C_start,
+            A_start,
+            B,
+            wp.adjoint[C],
+            wp.adjoint[A],
+        )
+        dense_gemm(
+            p,
+            n,
+            m,
+            False,
+            False,
+            add_to_C,
+            A_start,
+            C_start,
+            B_start,
+            A,
+            wp.adjoint[C],
+            wp.adjoint[B],
+        )
+    else:
+        dense_gemm(
+            m,
+            p,
+            n,
+            False,
+            not transpose_B,
+            add_to_C,
+            C_start,
+            B_start,
+            A_start,
+            wp.adjoint[C],
+            B,
+            wp.adjoint[A],
+        )
+        dense_gemm(
+            p,
+            n,
+            m,
+            True,
+            False,
+            add_to_C,
+            A_start,
+            C_start,
+            B_start,
+            A,
+            wp.adjoint[C],
+            wp.adjoint[B],
+        )
 
 
 @wp.kernel
@@ -1313,6 +1383,7 @@ def adj_dense_solve(
 ):
     if not tmp or not wp.adjoint[x] or not wp.adjoint[A] or not wp.adjoint[L]:
         return
+    # dense_subs(n, L_start, b_start, L, b, x)
     for i in range(n):
         tmp[b_start + i] = 0.0
 
@@ -1321,14 +1392,13 @@ def adj_dense_solve(
     for i in range(n):
         wp.adjoint[b][b_start + i] += tmp[b_start + i]
 
-    # A* = -adj_b*x^T
+    # update adjoint of A since we did not compute it inside adj_dense_cholesky
+    # L* = A* = -adj_b*x^T
     for i in range(n):
         for j in range(n):
-            wp.adjoint[L][L_start + dense_index(n, i, j)] += -tmp[b_start + i] * x[b_start + j]
-
-    for i in range(n):
-        for j in range(n):
-            wp.adjoint[A][L_start + dense_index(n, i, j)] += -tmp[b_start + i] * x[b_start + j]
+            adj_b_x = -tmp[b_start + i] * x[b_start + j]
+            wp.adjoint[L][L_start + dense_index(n, i, j)] += adj_b_x
+            wp.adjoint[A][L_start + dense_index(n, i, j)] += adj_b_x
 
 
 @wp.kernel
@@ -1693,27 +1763,47 @@ class FeatherstoneIntegrator(Integrator):
                 if model.rigid_contact_max and (
                     model.ground and model.shape_ground_contact_pair_count or model.shape_contact_pair_count
                 ):
-                    wp.launch(
-                        kernel=eval_rigid_contacts,
-                        dim=model.rigid_contact_max,
-                        inputs=[
-                            state_in.body_q,
-                            state_aug.body_v_s,
-                            model.body_com,
-                            model.shape_materials,
-                            model.shape_geo,
-                            model.shape_body,
-                            model.rigid_contact_count,
-                            model.rigid_contact_point0,
-                            model.rigid_contact_point1,
-                            model.rigid_contact_normal,
-                            model.rigid_contact_shape0,
-                            model.rigid_contact_shape1,
-                            True,
-                        ],
-                        outputs=[body_f],
-                        device=model.device,
-                    )
+                    if model.separate_ground_contacts:
+                        wp.launch(
+                            kernel=eval_rigid_ground_contacts,
+                            dim=model.rigid_contact_max,
+                            inputs=[
+                                state_in.body_q,
+                                state_aug.body_v_s,
+                                model.body_com,
+                                model.ground_normal,
+                                model.shape_materials,
+                                model.shape_geo,
+                                model.shape_body,
+                                model.rigid_contact_point0,
+                                model.rigid_contact_shape0,
+                                True,
+                            ],
+                            outputs=[body_f],
+                            device=model.device,
+                        )
+                    else:
+                        wp.launch(
+                            kernel=eval_rigid_contacts,
+                            dim=model.rigid_contact_max,
+                            inputs=[
+                                state_in.body_q,
+                                state_aug.body_v_s,
+                                model.body_com,
+                                model.shape_materials,
+                                model.shape_geo,
+                                model.shape_body,
+                                model.rigid_contact_count,
+                                model.rigid_contact_point0,
+                                model.rigid_contact_point1,
+                                model.rigid_contact_normal,
+                                model.rigid_contact_shape0,
+                                model.rigid_contact_shape1,
+                                True,
+                            ],
+                            outputs=[body_f],
+                            device=model.device,
+                        )
 
                     # if model.rigid_contact_count.numpy()[0] > 0:
                     #     print(body_f.numpy())
@@ -1865,7 +1955,7 @@ class FeatherstoneIntegrator(Integrator):
                             self.articulation_H_start,
                             self.articulation_H_rows,
                             self.articulation_dof_start,
-                            self.H,
+                            self.H,  # we only provide this parameter to compute its adjoint in the backward pass
                             self.L,
                             state_aug.joint_tau,
                         ],
