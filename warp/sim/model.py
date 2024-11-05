@@ -930,7 +930,7 @@ class Model:
         self.shape_ground_contact_pairs = wp.array(np.array(ground_contact_pairs), dtype=wp.int32, device=self.device)
         self.shape_ground_contact_pair_count = len(ground_contact_pairs)
 
-    def count_contact_points(self):
+    def count_contact_points(self, only_ground_contacts=False):
         """
         Counts the maximum number of rigid contact points that need to be allocated.
         This function returns two values corresponding to the maximum number of potential contacts
@@ -945,18 +945,19 @@ class Model:
 
         # calculate the potential number of shape pair contact points
         contact_count = wp.zeros(2, dtype=wp.int32, device=self.device)
-        wp.launch(
-            kernel=count_contact_points,
-            dim=self.shape_contact_pair_count,
-            inputs=[
-                self.shape_contact_pairs,
-                self.shape_geo,
-                self.rigid_mesh_contact_max,
-            ],
-            outputs=[contact_count],
-            device=self.device,
-            record_tape=False,
-        )
+        if not only_ground_contacts:
+            wp.launch(
+                kernel=count_contact_points,
+                dim=self.shape_contact_pair_count,
+                inputs=[
+                    self.shape_contact_pairs,
+                    self.shape_geo,
+                    self.rigid_mesh_contact_max,
+                ],
+                outputs=[contact_count],
+                device=self.device,
+                record_tape=False,
+            )
         # count ground contacts
         wp.launch(
             kernel=count_contact_points,
@@ -1124,7 +1125,7 @@ class ModelBuilder:
     default_joint_limit_ke = 100.0
     default_joint_limit_kd = 1.0
 
-    def __init__(self, up_vector=(0.0, 1.0, 0.0), gravity=-9.80665):
+    def __init__(self, up_vector=(0.0, 1.0, 0.0), gravity=-9.80665, separate_ground_contacts=False):
         self.num_envs = 0
 
         # particles
@@ -1268,6 +1269,7 @@ class ModelBuilder:
             "mu": self.default_shape_mu,
             "restitution": self.default_shape_restitution,
         }
+        self.separate_ground_contacts = separate_ground_contacts
 
         # Maximum number of soft contacts that can be registered
         self.soft_contact_max = 64 * 1024
@@ -1517,6 +1519,7 @@ class ModelBuilder:
         self.up_vector = builder.up_vector
         self.gravity = builder.gravity
         self._ground_params = builder._ground_params
+        self.separate_ground_contacts = builder.separate_ground_contacts
 
         if update_num_env_count:
             self.num_envs += 1
@@ -4391,6 +4394,7 @@ class ModelBuilder:
             m.requires_grad = requires_grad
 
             m.ground_plane_params = self._ground_params["plane"]
+            m.separate_ground_contacts = self.separate_ground_contacts
 
             m.num_envs = self.num_envs
 
@@ -4421,7 +4425,9 @@ class ModelBuilder:
             # build list of ids for geometry sources (meshes, sdfs)
             geo_sources = []
             finalized_meshes = {}  # do not duplicate meshes
-            for geo in self.shape_geo_src:
+            import tqdm
+
+            for geo in tqdm.tqdm(self.shape_geo_src, desc="Finalizing geometry sources"):
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if geo:
                     if geo_hash not in finalized_meshes:
@@ -4590,16 +4596,43 @@ class ModelBuilder:
             if m.particle_count:
                 m.allocate_soft_contacts(self.soft_contact_max, requires_grad=requires_grad)
             m.find_shape_contact_pairs()
-            if self.num_rigid_contacts_per_env is None:
-                contact_count, limited_contact_count = m.count_contact_points()
-            else:
-                contact_count = limited_contact_count = self.num_rigid_contacts_per_env * self.num_envs
-            if contact_count:
-                if wp.config.verbose:
-                    print(f"Allocating {contact_count} rigid contacts.")
-                m.allocate_rigid_contacts(
-                    count=contact_count, limited_contact_count=limited_contact_count, requires_grad=requires_grad
+            if m.separate_ground_contacts:
+                if self.num_rigid_contacts_per_env is None:
+                    contact_count, limited_contact_count = m.count_contact_points(only_ground_contacts=True)
+                else:
+                    contact_count = limited_contact_count = self.num_rigid_contacts_per_env * self.num_envs
+                m.rigid_contact_point0 = wp.zeros(limited_contact_count, dtype=wp.vec3, requires_grad=False)
+                m.rigid_contact_shape0 = wp.zeros(limited_contact_count, dtype=wp.int32)
+                count = wp.zeros(1, dtype=wp.int32)
+                from .collide import compute_ground_contacts
+
+                wp.launch(
+                    compute_ground_contacts,
+                    dim=m.shape_count,
+                    inputs=[
+                        m.shape_geo,
+                        m.shape_body,
+                        m.shape_transform,
+                    ],
+                    outputs=[
+                        count,
+                        m.rigid_contact_shape0,
+                        m.rigid_contact_point0,
+                    ],
+                    device=device,
                 )
+                m.rigid_contact_max = int(count.numpy()[0])
+            else:
+                if self.num_rigid_contacts_per_env is None:
+                    contact_count, limited_contact_count = m.count_contact_points()
+                else:
+                    contact_count = limited_contact_count = self.num_rigid_contacts_per_env * self.num_envs
+                if contact_count:
+                    if wp.config.verbose:
+                        print(f"Allocating {contact_count} rigid contacts.")
+                    m.allocate_rigid_contacts(
+                        count=contact_count, limited_contact_count=limited_contact_count, requires_grad=requires_grad
+                    )
             m.rigid_mesh_contact_max = self.rigid_mesh_contact_max
             m.rigid_contact_margin = self.rigid_contact_margin
             m.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
@@ -4610,6 +4643,7 @@ class ModelBuilder:
             m.gravity = np.array(self.up_vector, dtype=wp.float32) * self.gravity
             m.up_axis = self.up_axis
             m.up_vector = np.array(self.up_vector, dtype=wp.float32)
+            m.ground_normal = wp.vec3(*self.up_vector)
 
             m.enable_tri_collisions = False
 
