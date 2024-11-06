@@ -1826,7 +1826,7 @@ class FeatherstoneIntegrator(Integrator):
                                 state_in.body_q,
                                 state_aug.body_v_s,
                                 model.body_com,
-                                model.ground_normal,
+                                model.ground_plane,
                                 model.shape_materials,
                                 model.shape_geo,
                                 model.shape_body,

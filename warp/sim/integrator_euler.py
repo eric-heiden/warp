@@ -1015,7 +1015,7 @@ def eval_rigid_ground_contacts(
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
-    normal: wp.vec3,
+    ground: wp.array(dtype=float),
     shape_materials: ModelShapeMaterials,
     geo: ModelShapeGeometry,
     shape_body: wp.array(dtype=int),
@@ -1034,17 +1034,23 @@ def eval_rigid_ground_contacts(
     mu = shape_materials.mu[shape_a]
     thickness = geo.thickness[shape_a]
     body_a = shape_body[shape_a]
+    if body_a < 0:
+        return
+
+    n = wp.vec3(ground[0], ground[1], ground[2])
 
     # contact normal in world space
     bx_a = contact_point0[tid]
-    if body_a >= 0:
-        X_wb_a = body_q[body_a]
-        X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness * normal
-        r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
+    X_wb_a = body_q[body_a]
+    X_com_a = body_com[body_a]
+    bx_a = wp.transform_point(X_wb_a, bx_a) - thickness * n
+    r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
-    d = wp.dot(normal, bx_a)
-    if d >= ka:
+
+    c = wp.min(wp.dot(n, bx_a) + ground[3], 0.0)
+
+    # d = wp.dot(normal, bx_a)
+    if c >= ka:
         return
 
     # compute contact point velocity
@@ -1061,41 +1067,36 @@ def eval_rigid_ground_contacts(
     v = bv_a
 
     # decompose relative velocity
-    vn = wp.dot(normal, v)
-    vt = v - normal * vn
+    vn = wp.dot(n, v)
+    vt = v - n * vn
+    vs = wp.length(vt)
+
+    if vs > 0.0:
+        vt = vt / vs
 
     # contact elastic
-    fn = d * ke
+    jn = c * ke
+    jd = min(vn, 0.0) * kd
 
-    # contact damping
-    fd = wp.min(vn, 0.0) * kd * wp.step(d)
+    # contact force
+    fn = jn + jd
 
-    # viscous friction
-    # ft = vt*kf
+    # friction force
+    vt = v - n * vn
+    vs = wp.length(vt)
 
-    # Coulomb friction (box)
-    # lower = mu * d * ke
-    # upper = -lower
+    if vs > 0.0:
+        vt = vt / vs
 
-    # vx = wp.clamp(wp.dot(wp.vec3(kf, 0.0, 0.0), vt), lower, upper)
-    # vz = wp.clamp(wp.dot(wp.vec3(0.0, 0.0, kf), vt), lower, upper)
+    # Coulomb condition
+    ft = vt * wp.min(kf * vs, -mu * fn)
 
-    # ft = wp.vec3(vx, 0.0, vz)
+    f_total = n * fn + ft
 
-    # Coulomb friction (smooth, but gradients are numerically unstable around |vt| = 0)
-    # ft = wp.normalize(vt)*wp.min(kf*wp.length(vt), abs(mu*d*ke))
-    ft = wp.vec3(0.0)
-    if d < 0.0:
-        ft = wp.normalize(vt) * wp.min(kf * wp.length(vt), -mu * (fn + fd))
-
-    f_total = normal * (fn + fd) + ft
-    # f_total = normal * fn
-
-    if body_a >= 0:
-        if force_in_world_frame:
-            wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
-        else:
-            wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
+    if force_in_world_frame:
+        wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
+    else:
+        wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
 
 @wp.func
 def eval_joint_force(
@@ -1858,7 +1859,7 @@ def eval_body_contact_forces(model: Model, state: State, particle_f: wp.array):
                     state.body_q,
                     state.body_qd,
                     model.body_com,
-                    model.ground_normal,
+                    model.ground_plane,
                     model.shape_materials,
                     model.shape_geo,
                     model.shape_body,
