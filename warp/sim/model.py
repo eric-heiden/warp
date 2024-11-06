@@ -1520,6 +1520,7 @@ class ModelBuilder:
         self.gravity = builder.gravity
         self._ground_params = builder._ground_params
         self.separate_ground_contacts = builder.separate_ground_contacts
+        self._ground_params = builder._ground_params
 
         if update_num_env_count:
             self.num_envs += 1
