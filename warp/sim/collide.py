@@ -1170,7 +1170,7 @@ def handle_contact_pairs(
         p_a_world = wp.transform_get_translation(X_ws_a)
         p_b_body = closest_point_plane(geo_scale_b[0], geo_scale_b[1], wp.transform_point(X_sw_b, p_a_world))
         p_b_world = wp.transform_point(X_ws_b, p_b_body)
-        print("collision!!!!!!!!!")
+        # print("collision!!!!!!!!!")
 
     elif geo_type_a == wp.sim.GEO_CAPSULE and geo_type_b == wp.sim.GEO_PLANE:
         if point_id < 2:
