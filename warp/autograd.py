@@ -408,6 +408,8 @@ class FunctionMetadata:
         self.input_labels = list(inspect.signature(function).parameters.keys())
         if outputs is None:
             outputs = function(*inputs)
+        if isinstance(outputs, wp.array):
+            outputs = [outputs]
         self.output_labels = [f"output_{i}" for i in range(len(outputs))]
         self.input_strides = []
         self.output_strides = []
@@ -1120,6 +1122,8 @@ def function_jacobian(
     tape = wp.Tape()
     with tape:
         outputs = func(*inputs)
+    if isinstance(outputs, wp.array):
+        outputs = [outputs]
     if metadata is None:
         metadata = FunctionMetadata()
     metadata.update_from_function(func, inputs, outputs)
@@ -1209,6 +1213,8 @@ def function_jacobian_fd(
     jacobians = {}
 
     outputs = func(*inputs)
+    if isinstance(outputs, wp.array):
+        outputs = [outputs]
     if metadata is None:
         metadata = FunctionMetadata()
     metadata.update_from_function(func, inputs, outputs)
@@ -1245,10 +1251,14 @@ def function_jacobian_fd(
         for i in range(input_num):
             set_element(flat_input, i, wp.float64(-eps), relative=True)
             outputs = func(*inputs)
+            if isinstance(outputs, wp.array):
+                outputs = [outputs]
             left.assign(outputs[output_i])
 
             set_element(flat_input, i, wp.float64(2 * eps), relative=True)
             outputs = func(*inputs)
+            if isinstance(outputs, wp.array):
+                outputs = [outputs]
             right.assign(outputs[output_i])
 
             # restore input
