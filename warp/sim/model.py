@@ -941,7 +941,7 @@ class Model:
             - potential_count (int): Potential number of contact points
             - actual_count (int): Actual number of contact points
         """
-        from .collide import count_contact_points
+        from .count_contact_points import count_contact_points
 
         # calculate the potential number of shape pair contact points
         contact_count = wp.zeros(2, dtype=wp.int32, device=self.device)

@@ -148,7 +148,7 @@ struct transform_t
     }    
 };
 
-template<typename Type=float32>
+template<typename Type=float64>
 CUDA_CALLABLE inline transform_t<Type> transform_identity()
 {
     return transform_t<Type>(vec_t<3,Type>(), quat_identity<Type>());

@@ -518,7 +518,7 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
                 expected_elem_type = arg_type._wp_scalar_type_
                 if not (
                     elem_type is expected_elem_type
-                    or (elem_type is float and expected_elem_type is warp.types.float32)
+                    or (elem_type is float and (expected_elem_type is warp.types.float32 or expected_elem_type is warp.types.float64))
                     or (elem_type is int and expected_elem_type is warp.types.int32)
                     or (elem_type is bool and expected_elem_type is warp.types.bool)
                     or (
@@ -558,7 +558,7 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
 
             if not (
                 isinstance(param, arg_type)
-                or (type(param) is float and arg_type is warp.types.float32)  # noqa: E721
+                or (type(param) is float and (arg_type is warp.types.float32) or (arg_type is warp.types.float64))  # noqa: E721
                 or (type(param) is int and arg_type is warp.types.int32)  # noqa: E721
                 or (type(param) is bool and arg_type is warp.types.bool)  # noqa: E721
                 or warp.types.np_dtype_to_warp_type.get(getattr(param, "dtype", None)) is arg_type
@@ -6096,3 +6096,15 @@ def init():
 
     if runtime is None:
         runtime = Runtime()
+
+    warp.types.float32 = warp.float64
+    warp.codegen.float32 = warp.float64
+    warp.float32 = warp.float64
+    warp.vec3 = warp.vec3d
+    warp.mat22 = warp.mat22d
+    warp.mat33 = warp.mat33d
+    warp.spatial_vector = warp.spatial_vectord
+    warp.spatial_matrix = warp.spatial_matrixd
+    warp.transform = warp.transformd
+    warp.quat = warp.quatd
+    warp.vec2 = warp.vec2d

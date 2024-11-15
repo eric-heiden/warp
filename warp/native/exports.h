@@ -936,7 +936,7 @@ WP_API void builtin_cw_div_mat22d_mat22d(mat22d& a, mat22d& b, mat22d* ret) { *r
 WP_API void builtin_cw_div_mat33d_mat33d(mat33d& a, mat33d& b, mat33d* ret) { *ret = wp::cw_div(a, b); }
 WP_API void builtin_cw_div_mat44d_mat44d(mat44d& a, mat44d& b, mat44d* ret) { *ret = wp::cw_div(a, b); }
 WP_API void builtin_cw_div_spatial_matrixd_spatial_matrixd(spatial_matrixd& a, spatial_matrixd& b, spatial_matrixd* ret) { *ret = wp::cw_div(a, b); }
-WP_API void builtin_quat_identity(quatf* ret) { *ret = wp::quat_identity(); }
+WP_API void builtin_quat_identity(quatd* ret) { *ret = wp::quat_identity(); }
 WP_API void builtin_quat_from_axis_angle_vec3h_float16(vec3h& axis, float16 angle, quath* ret) { *ret = wp::quat_from_axis_angle(axis, angle); }
 WP_API void builtin_quat_from_axis_angle_vec3f_float32(vec3f& axis, float32 angle, quatf* ret) { *ret = wp::quat_from_axis_angle(axis, angle); }
 WP_API void builtin_quat_from_axis_angle_vec3d_float64(vec3d& axis, float64 angle, quatd* ret) { *ret = wp::quat_from_axis_angle(axis, angle); }
@@ -961,7 +961,7 @@ WP_API void builtin_quat_slerp_quatd_quatd_float64(quatd& a, quatd& b, float64 t
 WP_API void builtin_quat_to_matrix_quath(quath& quat, mat33h* ret) { *ret = wp::quat_to_matrix(quat); }
 WP_API void builtin_quat_to_matrix_quatf(quatf& quat, mat33f* ret) { *ret = wp::quat_to_matrix(quat); }
 WP_API void builtin_quat_to_matrix_quatd(quatd& quat, mat33d* ret) { *ret = wp::quat_to_matrix(quat); }
-WP_API void builtin_transform_identity(transformf* ret) { *ret = wp::transform_identity(); }
+WP_API void builtin_transform_identity(transformd* ret) { *ret = wp::transform_identity(); }
 WP_API void builtin_transform_get_translation_transformh(transformh& xform, vec3h* ret) { *ret = wp::transform_get_translation(xform); }
 WP_API void builtin_transform_get_translation_transformf(transformf& xform, vec3f* ret) { *ret = wp::transform_get_translation(xform); }
 WP_API void builtin_transform_get_translation_transformd(transformd& xform, vec3d* ret) { *ret = wp::transform_get_translation(xform); }
