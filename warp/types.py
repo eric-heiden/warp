@@ -1310,6 +1310,9 @@ def type_typestr(dtype):
     elif dtype == float16:
         return "<f2"
     elif dtype == float32:
+        # Add size check
+        if ctypes.sizeof(dtype._type_) == 8:
+            return "<f8"
         return "<f4"
     elif dtype == float64:
         return "<f8"
