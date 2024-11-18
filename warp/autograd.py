@@ -195,7 +195,7 @@ def gradcheck(
                 [
                     input_name,
                     output_name,
-                    f"{max_abs_error:.3e} at {arg_max_abs_error}",
+                    f"{max_abs_error:.3e} at {tuple(int(i) for i in arg_max_abs_error)}",
                     f"{cut_jac_ad[arg_max_abs_error]:.3e}",
                     f"{cut_jac_fd[arg_max_abs_error]:.3e}",
                     f"{max_rel_error:.3e}",
