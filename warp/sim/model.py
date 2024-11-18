@@ -4644,7 +4644,6 @@ class ModelBuilder:
             m.gravity = np.array(self.up_vector, dtype=wp.float32) * self.gravity
             m.up_axis = self.up_axis
             m.up_vector = np.array(self.up_vector, dtype=wp.float32)
-            m.ground_normal = wp.vec3(*self.up_vector)
 
             m.enable_tri_collisions = False
 
