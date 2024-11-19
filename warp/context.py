@@ -6150,15 +6150,3 @@ def init():
 
     if runtime is None:
         runtime = Runtime()
-
-    warp.types.float32 = warp.float64
-    warp.codegen.float32 = warp.float64
-    warp.float32 = warp.float64
-    warp.vec3 = warp.vec3d
-    warp.mat22 = warp.mat22d
-    warp.mat33 = warp.mat33d
-    warp.spatial_vector = warp.spatial_vectord
-    warp.spatial_matrix = warp.spatial_matrixd
-    warp.transform = warp.transformd
-    warp.quat = warp.quatd
-    warp.vec2 = warp.vec2d
