@@ -281,6 +281,12 @@ class Function:
                 if overload.generic:
                     continue
 
+                if "dtype" in overload.input_types:
+                    requested_dtype = kwargs.get("dtype", warp.float32)
+                    overload_dtype = overload.input_types["dtype"]
+                    if requested_dtype != overload_dtype:
+                        continue
+
                 success, return_value = call_builtin(overload, *args)
                 if success:
                     return return_value
@@ -347,6 +353,8 @@ class Function:
         # Runtime arguments that are to be passed to the function, not its template signature.
         if self.export_func is not None:
             func_args = self.export_func(self.input_types)
+            if "dtype" in self.input_types:
+                func_args["dtype"] = self.input_types["dtype"]
         else:
             func_args = self.input_types
 
@@ -1161,6 +1169,8 @@ def add_builtin(
     # hard coded types. We do this so you can use hard coded warp types outside kernels:
     if export_func is not None:
         func_arg_types = export_func(input_types)
+        if "dtype" in input_types:
+            func_arg_types["dtype"] = input_types["dtype"]
     else:
         func_arg_types = input_types
 
@@ -6074,15 +6084,59 @@ def export_builtins(file: io.TextIOBase):  # pragma: no cover
             params = ", ".join(func_args.keys())
 
             if args == "":
-                file.write(f"WP_API void {f.mangled_name}({return_type}* ret) {{ *ret = wp::{f.key}({params}); }}\n")
+                file.write(f"WP_API void {f.mangled_name}({return_type}* ret);\n")
             elif return_type == "None":
-                file.write(f"WP_API void {f.mangled_name}({args}) {{ wp::{f.key}({params}); }}\n")
+                file.write(f"WP_API void {f.mangled_name}({args});\n")
             else:
                 file.write(
-                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret) {{ *ret = wp::{f.key}({params}); }}\n"
+                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret);\n"
                 )
 
     file.write('\n}  // extern "C"\n\n')
+
+    for k, g in builtin_functions.items():
+        for f in g.overloads:
+            if not f.export or f.generic:
+                continue
+
+            # only export simple types that don't use arrays
+            # or templated types
+            if not f.is_simple():
+                continue
+
+            try:
+                # todo: construct a default value for each of the functions args
+                # so we can generate the return type for overloaded functions
+                return_type = ctype_ret_str(f.value_func(None, None))
+            except Exception:
+                continue
+
+            if return_type.startswith("Tuple"):
+                continue
+
+            # Runtime arguments that are to be passed to the function, not its template signature.
+            if f.export_func is not None:
+                func_args = f.export_func(f.input_types)
+            else:
+                func_args = f.input_types
+
+            args = ", ".join(f"{ctype_arg_str(v)} {k}" for k, v in func_args.items())
+            params = ", ".join(func_args.keys())
+            if "dtype" in f.input_types:
+                dtype = f.input_types["dtype"]
+                template_params = f"<{dtype.__name__}>"
+            else:
+                template_params = ""
+
+            if args == "":
+                file.write(f"WP_API void {f.mangled_name}({return_type}* ret) {{ *ret = wp::{f.key}{template_params}({params}); }}\n")
+            elif return_type == "None":
+                file.write(f"WP_API void {f.mangled_name}({args}) {{ wp::{f.key}{template_params}({params}); }}\n")
+            else:
+                file.write(
+                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret) {{ *ret = wp::{f.key}{template_params}({params}); }}\n"
+                )
+
     file.write("}  // namespace wp\n")
 
 
