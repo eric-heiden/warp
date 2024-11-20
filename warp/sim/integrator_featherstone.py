@@ -790,7 +790,7 @@ def compute_link_velocity(
     joint_axis_dim: wp.array(dtype=int, ndim=2),
     body_I_m: wp.array(dtype=wp.spatial_matrix),
     body_q: wp.array(dtype=wp.transform),
-    body_q_com: wp.array(dtype=wp.transform),
+    body_X_com: wp.array(dtype=wp.transform),
     joint_X_p: wp.array(dtype=wp.transform),
     joint_X_c: wp.array(dtype=wp.transform),
     gravity: wp.vec3,
@@ -847,7 +847,7 @@ def compute_link_velocity(
     a_s = a_parent_s + spatial_cross(v_s, v_j_s)  # + joint_S_s[i]*self.joint_qdd[i]
 
     # compute body forces
-    X_sm = body_q_com[child]
+    X_sm = body_q[child] * body_X_com[child]
     I_m = body_I_m[child]
 
     # gravity and external forces (expressed in frame aligned with s but centered at body mass)
@@ -884,7 +884,7 @@ def eval_rigid_id(
     joint_axis_dim: wp.array(dtype=int, ndim=2),
     body_I_m: wp.array(dtype=wp.spatial_matrix),
     body_q: wp.array(dtype=wp.transform),
-    body_q_com: wp.array(dtype=wp.transform),
+    body_X_com: wp.array(dtype=wp.transform),
     joint_X_p: wp.array(dtype=wp.transform),
     joint_X_c: wp.array(dtype=wp.transform),
     gravity: wp.vec3,
@@ -917,7 +917,7 @@ def eval_rigid_id(
             joint_axis_dim,
             body_I_m,
             body_q,
-            body_q_com,
+            body_X_com,
             joint_X_p,
             joint_X_c,
             gravity,
@@ -1540,6 +1540,12 @@ class FeatherstoneIntegrator(Integrator):
         self.use_tile_gemm = use_tile_gemm
         self._step = 0
 
+        self.M = None
+        self.J = None
+        self.P = None
+        self.H = None
+        self.L = None
+
         self.compute_articulation_indices(model)
         self.allocate_model_aux_vars(model)
 
@@ -1622,17 +1628,6 @@ class FeatherstoneIntegrator(Integrator):
             self.articulation_coord_start = wp.array(articulation_coord_start, dtype=wp.int32, device=model.device)
 
     def allocate_model_aux_vars(self, model):
-        # allocate mass, Jacobian matrices, and other auxiliary variables pertaining to the model
-        if model.joint_count:
-            # system matrices
-            self.M = wp.zeros((self.M_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
-            self.J = wp.zeros((self.J_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
-            self.P = wp.empty_like(self.J, requires_grad=model.requires_grad)
-            self.H = wp.empty((self.H_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
-
-            # zero since only upper triangle is set which can trigger NaN detection
-            self.L = wp.zeros_like(self.H)
-
         if model.body_count:
             self.body_I_m = wp.empty(
                 (model.body_count,), dtype=wp.spatial_matrix, device=model.device, requires_grad=model.requires_grad
@@ -1654,6 +1649,18 @@ class FeatherstoneIntegrator(Integrator):
                 outputs=[self.body_X_com],
                 device=model.device,
             )
+
+    def allocate_system_vars(self, model):
+        # allocate mass, Jacobian matrices, and other auxiliary variables pertaining to the model
+        if model.joint_count:
+            # system matrices
+            self.M = wp.zeros((self.M_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
+            self.J = wp.zeros((self.J_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
+            self.P = wp.empty_like(self.J, requires_grad=model.requires_grad)
+            self.H = wp.empty((self.H_size,), dtype=wp.float32, device=model.device, requires_grad=model.requires_grad)
+
+            # zero since only upper triangle is set which can trigger NaN detection
+            self.L = wp.zeros_like(self.H)
 
     def allocate_state_aux_vars(self, model, target, requires_grad):
         # allocate auxiliary variables that vary with state
@@ -1704,6 +1711,8 @@ class FeatherstoneIntegrator(Integrator):
 
         if not getattr(state_aug, "_featherstone_augmented", False):
             self.allocate_state_aux_vars(model, state_aug, requires_grad)
+        if requires_grad or self.M is None:
+            self.allocate_system_vars(model)
         if control is None:
             control = model.control(clone_variables=False)
 
@@ -1750,26 +1759,27 @@ class FeatherstoneIntegrator(Integrator):
 
             if model.joint_count:
                 # evaluate body transforms
-                wp.launch(
-                    eval_rigid_fk,
-                    dim=model.articulation_count,
-                    inputs=[
-                        model.articulation_start,
-                        model.joint_type,
-                        model.joint_parent,
-                        model.joint_child,
-                        model.joint_q_start,
-                        state_in.joint_q,
-                        model.joint_X_p,
-                        model.joint_X_c,
-                        self.body_X_com,
-                        model.joint_axis,
-                        model.joint_axis_start,
-                        model.joint_axis_dim,
-                    ],
-                    outputs=[state_in.body_q, state_aug.body_q_com],
-                    device=model.device,
-                )
+                if False:
+                    wp.launch(
+                        eval_rigid_fk,
+                        dim=model.articulation_count,
+                        inputs=[
+                            model.articulation_start,
+                            model.joint_type,
+                            model.joint_parent,
+                            model.joint_child,
+                            model.joint_q_start,
+                            state_in.joint_q,
+                            model.joint_X_p,
+                            model.joint_X_c,
+                            self.body_X_com,
+                            model.joint_axis,
+                            model.joint_axis_start,
+                            model.joint_axis_dim,
+                        ],
+                        outputs=[state_in.body_q, state_aug.body_q_com],
+                        device=model.device,
+                    )
 
                 # print("body_X_sc:")
                 # print(state_in.body_q.numpy())
@@ -1793,7 +1803,7 @@ class FeatherstoneIntegrator(Integrator):
                         model.joint_axis_dim,
                         self.body_I_m,
                         state_in.body_q,
-                        state_aug.body_q_com,
+                        self.body_X_com,
                         model.joint_X_p,
                         model.joint_X_c,
                         model.gravity,
