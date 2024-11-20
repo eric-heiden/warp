@@ -16,7 +16,7 @@ from .collide import triangle_closest_point_barycentric
 from .integrator import Integrator
 from .model import PARTICLE_FLAG_ACTIVE, Control, Model, ModelShapeGeometry, ModelShapeMaterials, State
 from .particles import eval_particle_forces
-from .utils import quat_decompose, quat_twist
+from .utils import quat_decompose, quat_twist, leaky_min, smooth_min
 
 
 @wp.kernel
@@ -724,6 +724,23 @@ def eval_particle_ground_contacts(
     # contact force
     fn = jn + jd
 
+    # vt = v - n * vn
+    # vs = wp.length(vt)
+
+    # if vs > 0.0:
+    #     vt = vt / vs
+
+    # lower = mu * fn
+    # upper = -lower
+
+    # nx = wp.cross(n, wp.vec3(0.0, 0.0, 1.0))  # basis vectors for tangent
+    # nz = wp.cross(n, wp.vec3(1.0, 0.0, 0.0))
+
+    # vx = wp.clamp(wp.dot(nx * kf, v), lower, upper)
+    # vz = wp.clamp(wp.dot(nz * kf, v), lower, upper)
+
+    # ft = (nx * vx + nz * vz) * (-wp.step(c))  # wp.vec3(vx, 0.0, vz)*wp.step(c)
+
     # friction force
     vt = v - n * vn
     vs = wp.length(vt)
@@ -732,10 +749,10 @@ def eval_particle_ground_contacts(
         vt = vt / vs
 
     # Coulomb condition
-    ft = wp.min(vs * kf, mu * wp.abs(fn))
+    ft = wp.min(vs * kf, mu * wp.abs(fn)) * vt
 
     # total force
-    f[tid] = f[tid] - n * fn - vt * ft
+    f[tid] = f[tid] - n * fn - ft
 
 
 @wp.kernel
@@ -990,9 +1007,18 @@ def eval_rigid_contacts(
 
     # Coulomb friction (smooth, but gradients are numerically unstable around |vt| = 0)
     # ft = wp.normalize(vt)*wp.min(kf*wp.length(vt), abs(mu*d*ke))
+    # ft = wp.vec3(0.0)
+    # vtl = 0.0  # wp.length(vt)
+    # if d < 0.0 and vtl > 1e-4:
+    #     ft = wp.normalize(vt) * wp.min(kf * wp.length(vt), -mu * (fn + fd))
+
     ft = wp.vec3(0.0)
+    fr = wp.normalize(vt)
+    # fr = wp.vec3(-1.0, 0.0, 0.0)
     if d < 0.0:
-        ft = wp.normalize(vt) * wp.min(kf * wp.length(vt), -mu * (fn + fd))
+        ft = fr * wp.min(kf * wp.length(vt), -mu * (fn + fd))
+        # ft = fr * smooth_min(kf * wp.length(vt), -mu * (fn + fd), 1e-3)
+
 
     f_total = n * (fn + fd) + ft
     # f_total = n * fn
@@ -1008,6 +1034,17 @@ def eval_rigid_contacts(
             wp.atomic_sub(body_f, body_b, wp.spatial_vector(wp.cross(bx_b, f_total), f_total))
         else:
             wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
+
+
+@wp.func
+def smooth_norm(v: wp.vec3):
+    # compute Huber norm
+    # return wp.sqrt(wp.dot(v, v) + 1.0) - 1.0
+    delta = 0.1
+    a = wp.dot(v, v)
+
+    # Pseudo Huber Loss
+    return delta * wp.sqrt(1.0 + a / (delta * delta))
 
 
 @wp.kernel
@@ -1069,27 +1106,37 @@ def eval_rigid_ground_contacts(
     # decompose relative velocity
     vn = wp.dot(n, v)
     vt = v - n * vn
-    vs = wp.length(vt)
+    # vs = wp.length(vt)
+    vs = smooth_norm(vt)
 
-    if vs > 0.0:
-        vt = vt / vs
+    # if vs > 0.0:
+    #     vt = vt / vs
 
     # contact elastic
     jn = c * ke
     jd = min(vn, 0.0) * kd
+    # jd = vn * kd
 
     # contact force
     fn = jn + jd
 
-    # friction force
-    vt = v - n * vn
-    vs = wp.length(vt)
-
-    if vs > 0.0:
-        vt = vt / vs
-
     # Coulomb condition
-    ft = vt * wp.min(kf * vs, -mu * fn)
+    ft = wp.vec3(0.0, 0.0, 0.0)
+    # if vs > -100.0:
+    ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
+    # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
+    # ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 1e-2)
+    # else:
+    #     lower = mu * fn
+    #     upper = -lower
+
+    #     nx = wp.cross(n, wp.vec3(0.0, 0.0, 1.0))  # basis vectors for tangent
+    #     nz = wp.cross(n, wp.vec3(1.0, 0.0, 0.0))
+
+    #     vx = wp.clamp(wp.dot(nx * kf, vt), lower, upper)
+    #     vz = wp.clamp(wp.dot(nz * kf, vt), lower, upper)
+
+    #     ft = (nx * vx + nz * vz) * (-wp.step(c))  # wp.vec3(vx, 0.0, vz)*wp.step(c)
 
     f_total = n * fn + ft
 
