@@ -17,6 +17,11 @@ import warp as wp
 import warp.sim
 import warp.sim.render
 
+wp.config.verify_cuda = True
+# wp.config.verify_fp = True
+
+from tqdm import trange
+
 
 class Example:
     def __init__(self, stage_path="example_rigid_soft_contact.usd"):
@@ -33,9 +38,11 @@ class Example:
         self.profiler = {}
 
         builder = wp.sim.ModelBuilder()
-        builder.default_particle_radius = 0.01
 
-        builder.add_soft_grid(
+        partial_builder = wp.sim.ModelBuilder()
+        partial_builder.default_particle_radius = 0.01
+
+        partial_builder.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
@@ -51,8 +58,21 @@ class Example:
             k_damp=0.0,
         )
 
-        b = builder.add_body(origin=wp.transform((0.5, 2.5, 0.5), wp.quat_identity()))
-        builder.add_shape_sphere(body=b, radius=0.75, density=100.0)
+        b = partial_builder.add_body(origin=wp.transform((0.5, 2.5, 0.5), wp.quat_identity()))
+        partial_builder.add_shape_sphere(body=b, radius=0.75, density=100.0)
+
+        num_envs = 50
+
+        root_envs = int(num_envs ** 0.5)
+        for i in range(num_envs):
+            builder.add_builder(
+                partial_builder,
+                xform=wp.transform(
+                    wp.vec3((i // root_envs) * 4.0 - root_envs * 2.0, 0.0, (i % root_envs) * 4.0 - root_envs * 2.0), wp.quat_identity()
+                ),
+            )
+
+        builder.soft_contact_max = 16 * 1024 * num_envs
 
         self.model = builder.finalize()
         self.model.ground = True
@@ -70,7 +90,7 @@ class Example:
         else:
             self.renderer = None
 
-        self.use_cuda_graph = wp.get_device().is_cuda
+        self.use_cuda_graph = False  # wp.get_device().is_cuda
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.simulate()
@@ -89,7 +109,7 @@ class Example:
             (self.state_0, self.state_1) = (self.state_1, self.state_0)
 
     def step(self):
-        with wp.ScopedTimer("step", dict=self.profiler):
+        with wp.ScopedTimer("step", dict=self.profiler, active=False):
             if self.use_cuda_graph:
                 wp.capture_launch(self.graph)
             else:
@@ -100,7 +120,7 @@ class Example:
         if self.renderer is None:
             return
 
-        with wp.ScopedTimer("render"):
+        with wp.ScopedTimer("render", active=False):
             self.renderer.begin_frame(self.sim_time)
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
@@ -117,14 +137,14 @@ if __name__ == "__main__":
         default="example_rigid_soft_contact.usd",
         help="Path to the output USD file.",
     )
-    parser.add_argument("--num_frames", type=int, default=300, help="Total number of frames.")
+    parser.add_argument("--num_frames", type=int, default=25, help="Total number of frames.")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
         example = Example(stage_path=args.stage_path)
 
-        for _ in range(args.num_frames):
+        for _ in trange(args.num_frames):
             example.step()
             example.render()
 
