@@ -606,6 +606,8 @@ def create_soft_contacts(
     margin: float,
     soft_contact_max: int,
     shape_count: int,
+    particle_collision_group: wp.array(dtype=int),
+    shape_collision_group: wp.array(dtype=int),
     # outputs
     soft_contact_count: wp.array(dtype=int),
     soft_contact_particle: wp.array(dtype=int),
@@ -618,6 +620,13 @@ def create_soft_contacts(
     tid = wp.tid()
     particle_index, shape_index = tid // shape_count, tid % shape_count
     if (particle_flags[particle_index] & PARTICLE_FLAG_ACTIVE) == 0:
+        return
+    if particle_index >= particle_collision_group.shape[0]:
+        wp.printf("Exception: particle_index >= particle_collision_group.shape[0]\n")
+    if shape_index >= shape_collision_group.shape[0]:
+        wp.printf("Exception: shape_index >= shape_collision_group.shape[0]\n")
+
+    if particle_collision_group[particle_index] != shape_collision_group[shape_index] and shape_collision_group[shape_index] != -1 and particle_collision_group[particle_index] != -1:
         return
 
     rigid_index = shape_body[shape_index]
@@ -716,6 +725,8 @@ def create_soft_contacts(
             soft_contact_body_vel[index] = body_vel
             soft_contact_particle[index] = particle_index
             soft_contact_normal[index] = world_normal
+        else:
+            wp.printf("soft_contact_max exceeded: %d >= %d\n", index, soft_contact_max)
 
 
 @wp.kernel(enable_backward=False)
@@ -1546,6 +1557,8 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
                     model.soft_contact_margin,
                     model.soft_contact_max,
                     model.shape_count - 1,
+                    model.particle_collision_group,
+                    model.shape_collision_group,
                 ],
                 outputs=[
                     model.soft_contact_count,
@@ -1558,6 +1571,8 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
                 ],
                 device=model.device,
             )
+
+            return
 
         if model.shape_contact_pair_count or model.ground and model.shape_ground_contact_pair_count:
             # clear old count

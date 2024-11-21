@@ -670,6 +670,7 @@ class Model:
         self.particle_adhesion = 0.0
         self.particle_grid = None
         self.particle_flags = None
+        self.particle_collision_group = None
         self.particle_max_velocity = 1e5
 
         self.shape_transform = None
@@ -1134,6 +1135,8 @@ class ModelBuilder:
         self.particle_mass = []
         self.particle_radius = []
         self.particle_flags = []
+        self.particle_collision_group = []
+        self.particle_collision_group_map = {}
         self.particle_max_velocity = 1e5
         # list of np.array
         self.particle_coloring = []
@@ -1433,9 +1436,13 @@ class ModelBuilder:
         # apply collision group
         if separate_collision_group:
             self.shape_collision_group.extend([self.last_collision_group + 1 for _ in builder.shape_collision_group])
+            self.particle_collision_group.extend([self.last_collision_group + 1 for _ in builder.particle_collision_group])
         else:
             self.shape_collision_group.extend(
                 [(g + self.last_collision_group if g > -1 else -1) for g in builder.shape_collision_group]
+            )
+            self.particle_collision_group.extend(
+                [(g + self.last_collision_group if g > -1 else -1) for g in builder.particle_collision_group]
             )
         shape_count = self.shape_count
         for i, j in builder.shape_collision_filter_pairs:
@@ -1448,6 +1455,15 @@ class ModelBuilder:
             if group not in self.shape_collision_group_map:
                 self.shape_collision_group_map[group] = []
             self.shape_collision_group_map[group].extend([s + shape_count for s in shapes])
+        particle_count = self.particle_count
+        for group, particles in builder.particle_collision_group_map.items():
+            if separate_collision_group:
+                group = self.last_collision_group + 1
+            else:
+                group = group + self.last_collision_group if group > -1 else -1
+            if group not in self.particle_collision_group_map:
+                self.particle_collision_group_map[group] = []
+            self.particle_collision_group_map[group].extend([s + particle_count for s in particles])
 
         # update last collision group counter
         if separate_collision_group:
@@ -3429,7 +3445,13 @@ class ModelBuilder:
 
     # particles
     def add_particle(
-        self, pos: Vec3, vel: Vec3, mass: float, radius: float = None, flags: wp.uint32 = PARTICLE_FLAG_ACTIVE
+        self,
+        pos: Vec3,
+        vel: Vec3,
+        mass: float,
+        radius: float = None,
+        flags: wp.uint32 = PARTICLE_FLAG_ACTIVE,
+        collision_group: int = -1,
     ) -> int:
         """Adds a single particle to the model
 
@@ -3439,6 +3461,7 @@ class ModelBuilder:
             mass: The mass of the particle
             radius: The radius of the particle used in collision handling. If None, the radius is set to the default value (:attr:`default_particle_radius`).
             flags: The flags that control the dynamical behavior of the particle, see PARTICLE_FLAG_* constants
+            collision_group: The collision group of the particle
 
         Note:
             Set the mass equal to zero to create a 'kinematic' particle that does is not subject to dynamics.
@@ -3454,7 +3477,14 @@ class ModelBuilder:
         self.particle_radius.append(radius)
         self.particle_flags.append(flags)
 
-        return len(self.particle_q) - 1
+        particle_id = self.particle_count - 1
+
+        self.particle_collision_group.append(collision_group)
+        if collision_group not in self.particle_collision_group_map:
+            self.particle_collision_group_map[collision_group] = []
+        self.particle_collision_group_map[collision_group].append(particle_id)
+
+        return particle_id
 
     def add_spring(self, i: int, j, ke: float, kd: float, control: float):
         """Adds a spring between two particles in the system
@@ -4123,6 +4153,7 @@ class ModelBuilder:
         jitter: float,
         radius_mean: float = default_particle_radius,
         radius_std: float = 0.0,
+        collision_group: int = -1,
     ):
         rng = np.random.default_rng(42)
         for z in range(dim_z):
@@ -4137,7 +4168,7 @@ class ModelBuilder:
                         r = radius_mean + rng.standard_normal() * radius_std
                     else:
                         r = radius_mean
-                    self.add_particle(p, vel, m, r)
+                    self.add_particle(p, vel, m, r, collision_group=collision_group)
 
     def add_soft_grid(
         self,
@@ -4163,6 +4194,7 @@ class ModelBuilder:
         tri_kd: float = default_tri_kd,
         tri_drag: float = default_tri_drag,
         tri_lift: float = default_tri_lift,
+        collision_group: int = -1,
     ):
         """Helper to create a rectangular tetrahedral FEM grid
 
@@ -4188,6 +4220,7 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
+            collision_group: The collision group of the particles
         """
 
         start_vertex = len(self.particle_q)
@@ -4214,7 +4247,7 @@ class ModelBuilder:
 
                     p = wp.quat_rotate(rot, v) + pos
 
-                    self.add_particle(p, vel, m)
+                    self.add_particle(p, vel, m, collision_group=collision_group)
 
         # dict of open faces
         faces = {}
@@ -4468,6 +4501,7 @@ class ModelBuilder:
             m.particle_inv_mass = wp.array(particle_inv_mass, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_radius = wp.array(self.particle_radius, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_flags = wp.array([flag_to_int(f) for f in self.particle_flags], dtype=wp.uint32)
+            m.particle_collision_group = wp.array(self.particle_collision_group, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
 
@@ -4517,7 +4551,8 @@ class ModelBuilder:
             )
 
             m.shape_collision_filter_pairs = self.shape_collision_filter_pairs
-            m.shape_collision_group = self.shape_collision_group
+            # m.shape_collision_group = self.shape_collision_group
+            m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
             m.shape_collision_group_map = self.shape_collision_group_map
             m.shape_collision_radius = wp.array(
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad
