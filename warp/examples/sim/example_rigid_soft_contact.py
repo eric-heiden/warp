@@ -17,7 +17,7 @@ import warp as wp
 import warp.sim
 import warp.sim.render
 
-wp.config.verify_cuda = True
+# wp.config.verify_cuda = True
 # wp.config.verify_fp = True
 
 from tqdm import trange
@@ -74,7 +74,7 @@ class Example:
 
         builder.soft_contact_max = 16 * 1024 * num_envs
 
-        self.model = builder.finalize()
+        self.model = builder.finalize(requires_grad=True)
         self.model.ground = True
         self.model.soft_contact_ke = 1.0e3
         self.model.soft_contact_kd = 0.0
@@ -90,7 +90,7 @@ class Example:
         else:
             self.renderer = None
 
-        self.use_cuda_graph = False  # wp.get_device().is_cuda
+        self.use_cuda_graph = wp.get_device().is_cuda
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.simulate()
@@ -137,7 +137,7 @@ if __name__ == "__main__":
         default="example_rigid_soft_contact.usd",
         help="Path to the output USD file.",
     )
-    parser.add_argument("--num_frames", type=int, default=25, help="Total number of frames.")
+    parser.add_argument("--num_frames", type=int, default=100, help="Total number of frames.")
 
     args = parser.parse_known_args()[0]
 
