@@ -106,6 +106,7 @@ class Function:
         variadic=False,
         initializer_list_func=None,
         export=False,
+        export_only=False,
         doc="",
         group="",
         hidden=False,
@@ -141,6 +142,7 @@ class Function:
         self.lto_dispatch_func = lto_dispatch_func
         self.input_types = {}
         self.export = export
+        self.export_only = export_only
         self.doc = doc
         self.group = group
         self.module = module
@@ -1089,6 +1091,7 @@ def add_builtin(
     variadic=False,
     initializer_list_func=None,
     export=True,
+    export_only=False,
     group="Other",
     hidden=False,
     skip_replay=False,
@@ -1135,6 +1138,9 @@ def add_builtin(
         export (bool): Whether the function is to be exposed to the Python
             interpreter so that it becomes available from within the `warp`
             module.
+        export_only (bool): Whether this function overload is only used for Python-side 
+            calls via the export mechanism. When True, the overload will be skipped 
+            during kernel overload resolution
         group (str): Classification used for the documentation.
         hidden (bool): Whether to add that function into the documentation.
         skip_replay (bool): Whether operation will be performed during
@@ -1169,7 +1175,8 @@ def add_builtin(
     # hard coded types. We do this so you can use hard coded warp types outside kernels:
     if export_func is not None:
         func_arg_types = export_func(input_types)
-        if "dtype" in input_types:
+        # For functions with dtype, create concrete overloads only for export
+        if "dtype" in input_types and export:
             func_arg_types["dtype"] = input_types["dtype"]
     else:
         func_arg_types = input_types
@@ -1274,6 +1281,7 @@ def add_builtin(
                     variadic=variadic,
                     initializer_list_func=initializer_list_func,
                     export=export,
+                    export_only="dtype" in input_types,
                     group=group,
                     hidden=True,
                     skip_replay=skip_replay,
@@ -1295,6 +1303,7 @@ def add_builtin(
         variadic=variadic,
         initializer_list_func=initializer_list_func,
         export=export,
+        export_only=export_only,
         doc=doc,
         group=group,
         hidden=hidden,

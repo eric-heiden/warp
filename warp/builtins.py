@@ -1274,9 +1274,9 @@ add_builtin(
 def quat_identity_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
     if arg_types is None:
         # return quaternion(dtype=Float)
-        return quatd
+        return quaternion(dtype=warp.float32)
 
-    dtype = arg_types.get("dtype", float64)
+    dtype = arg_types.get("dtype", warp.float32)
     return quaternion(dtype=dtype)
 
 
@@ -1434,9 +1434,9 @@ def transform_identity_value_func(arg_types: Mapping[str, type], arg_values: Map
     # if arg_types is None then we are in 'export' mode
     if arg_types is None:
         # return transformation(dtype=Float)
-        return transformd
+        return transformation(dtype=warp.float32)
 
-    dtype = arg_types.get("dtype", float64)
+    dtype = arg_types.get("dtype", warp.float32)
     return transformation(dtype=dtype)
 
 

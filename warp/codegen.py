@@ -1187,6 +1187,9 @@ class Adjoint:
             # if func is overloaded then perform overload resolution here
             # we validate argument types before they go to generated native code
             for f in func.overloads:
+                # skip export-only overloads
+                if f.export_only:
+                    continue
                 # skip type checking for variadic functions
                 if not f.variadic:
                     # check argument counts match are compatible (may be some default args)
