@@ -499,6 +499,7 @@ class Model:
         particle_adhesion (array): Particle adhesion strength, shape [particle_count], float
         particle_grid (HashGrid): HashGrid instance used for accelerated simulation of particle interactions
         particle_flags (array): Particle enabled state, shape [particle_count], bool
+        particle_collision_group (list): Collision group of each particle, shape [particle_count], int
         particle_max_velocity (float): Maximum particle velocity (to prevent instability)
 
         shape_transform (array): Rigid shape transforms, shape [shape_count, 7], float
