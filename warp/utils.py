@@ -1212,6 +1212,10 @@ def update_type(type_):
             ndim = type_.ndim
             return wp.types.array(dtype=dtype, ndim=ndim)
         return type_
+
+    # Handle structs
+    if isinstance(type_, wp.codegen.Struct):
+        return type_.module.structs[type_.key]
     
     # Handle scalar warp types
     if hasattr(type_, '__module__') and type_.__module__ == 'warp.types':
