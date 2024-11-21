@@ -621,10 +621,6 @@ def create_soft_contacts(
     particle_index, shape_index = tid // shape_count, tid % shape_count
     if (particle_flags[particle_index] & PARTICLE_FLAG_ACTIVE) == 0:
         return
-    if particle_index >= particle_collision_group.shape[0]:
-        wp.printf("Exception: particle_index >= particle_collision_group.shape[0]\n")
-    if shape_index >= shape_collision_group.shape[0]:
-        wp.printf("Exception: shape_index >= shape_collision_group.shape[0]\n")
 
     if particle_collision_group[particle_index] != shape_collision_group[shape_index] and shape_collision_group[shape_index] != -1 and particle_collision_group[particle_index] != -1:
         return
@@ -728,8 +724,6 @@ def create_soft_contacts(
             soft_contact_body_vel[index] = body_vel
             soft_contact_particle[index] = particle_index
             soft_contact_normal[index] = world_normal
-        else:
-            wp.printf("soft_contact_max exceeded: %d >= %d\n", index, soft_contact_max)
 
 
 @wp.kernel(enable_backward=False)
@@ -1574,8 +1568,6 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
                 ],
                 device=model.device,
             )
-
-            return
 
         if model.shape_contact_pair_count or model.ground and model.shape_ground_contact_pair_count:
             # clear old count
