@@ -1003,6 +1003,7 @@ class Adjoint:
                 e = ex(";".join([msg] + [str(a) for a in data.args])).with_traceback(traceback)
             finally:
                 adj.skip_build = True
+                adj.builder = None
                 raise e
 
         if builder is not None:
@@ -1011,6 +1012,9 @@ class Adjoint:
                     builder.build_struct_recursive(a.type)
                 elif isinstance(a.type, warp.types.array) and isinstance(a.type.dtype, Struct):
                     builder.build_struct_recursive(a.type.dtype)
+
+            # release builder reference for GC
+            adj.builder = None
 
     # code generation methods
     def format_template(adj, template, input_vars, output_var):
@@ -1205,6 +1209,9 @@ class Adjoint:
             # if func is overloaded then perform overload resolution here
             # we validate argument types before they go to generated native code
             for f in func.overloads:
+                # skip export-only overloads
+                if f.export_only:
+                    continue
                 # skip type checking for variadic functions
                 if not f.variadic:
                     # check argument counts match are compatible (may be some default args)
@@ -2603,7 +2610,10 @@ class Adjoint:
                     if warp.config.verify_autograd_array_access:
                         target.mark_write(kernel_name=kernel_name, filename=filename, lineno=lineno)
                 else:
-                    print(f"Warning: in-place op {node.op} is not differentiable")
+                    if warp.config.verbose:
+                        print(f"Warning: in-place op {node.op} is not differentiable")
+                    make_new_assign_statement()
+                    return
 
             # TODO
             elif type_is_vector(target_type) or type_is_quaternion(target_type) or type_is_matrix(target_type):

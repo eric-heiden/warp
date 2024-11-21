@@ -70,11 +70,11 @@ linux-aarch64 build:
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/main/PostMerge/99/libmathdx_build_aarch64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_aarch64_rockylinux8_cuda12.0.0_release.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.0.1-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
@@ -96,11 +96,11 @@ linux-x86_64 build:
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/main/PostMerge/99/libmathdx_build_x86_64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_x86_64_rockylinux8_cuda12.0.0_release.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.0.1-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
@@ -116,6 +116,16 @@ windows-x86_64 build:
     - .runner-build-windows-x86_64
   before_script:
     - powershell -command "Get-Volume | Format-Table -AutoSize"
+    - |
+      $headers = @{
+          "Authorization" = "Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("warp-cicd:${env:LIBMATHDX_REGISTRY_TOKEN}")))"
+      }
+      $url = "${CI_API_V4_URL}/projects/141992/packages/generic/libmathdx/0-1-0-2/libmathdx-0.1.0-win64.zip"
+      $output = "libmathdx.zip"
+      Invoke-WebRequest -Uri $url -Headers $headers -OutFile $output -ErrorAction Stop
+    - Expand-Archive -Path libmathdx.zip -DestinationPath _build/target-deps -Force
+    - Get-ChildItem -Path "${env:CI_PROJECT_DIR}\_build\target-deps"
+    - $env:LIBMATHDX_HOME = "${env:CI_PROJECT_DIR}\_build\target-deps\libmathdx-0.1.0-win64"
   script:
     - ./tools/ci/building/build-windows-x86_64/build.bat
 
@@ -445,6 +455,26 @@ windows-x86_64 docs:
   after_script:
     - echo "View the website at https://$CI_PROJECT_ROOT_NAMESPACE.$CI_PAGES_DOMAIN/-/$CI_PROJECT_NAME/-/jobs/$CI_JOB_ID/artifacts/public/index.html"
 
+# This job tests code snippets in the documentation
+doctest:
+  stage: test
+  image: python:3.11-slim
+  needs: [linux-x86_64 build]
+  extends:
+    - .omni_nvks_gpu
+  before_script:
+    - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KSet up docs environment"
+    - df -h
+    - apt-get update && apt-get install make --no-install-recommends -y
+    # Move compiled binaries out of platform-specific directory
+    - mv warp/bin/linux-x86_64/warp.so warp/bin/
+    - mv warp/bin/linux-x86_64/warp-clang.so warp/bin/
+    - python -m pip install --upgrade pip
+    - python -m pip install -r docs/requirements.txt
+    - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
+  script:
+    - sphinx-build -b doctest docs docs/_build/doctest
+
 # ==============================================================================
 # Child pipelines
 #
@@ -623,7 +653,7 @@ publish wheels to testpypi registry:
   extends:
     - .runner-utility-linux-x86_64
   rules:
-    - if: $CI_COMMIT_BRANCH =~ /release-.*/
+    - if: $CI_COMMIT_BRANCH =~ /release-.*/ || $CI_COMMIT_TAG
       when: manual
       allow_failure: true
   environment:
@@ -642,7 +672,7 @@ publish wheels to pypi registry:
   extends:
     - .runner-utility-linux-x86_64
   rules:
-    - if: $CI_COMMIT_BRANCH =~ /release-.*/
+    - if: $CI_COMMIT_BRANCH =~ /release-.*/ || $CI_COMMIT_TAG
       when: manual
       allow_failure: true
   environment:
@@ -661,7 +691,7 @@ publish wheels to gitlab pypi registry:
   extends:
     - .runner-utility-linux-x86_64
   rules:
-    - if: $CI_COMMIT_BRANCH =~ /^release-.*/
+    - if: $CI_COMMIT_BRANCH =~ /^release-.*/ || $CI_COMMIT_TAG
       when: manual
       allow_failure: true
   before_script:

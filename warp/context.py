@@ -107,6 +107,7 @@ class Function:
         variadic=False,
         initializer_list_func=None,
         export=False,
+        export_only=False,
         doc="",
         group="",
         hidden=False,
@@ -142,6 +143,7 @@ class Function:
         self.lto_dispatch_func = lto_dispatch_func
         self.input_types = {}
         self.export = export
+        self.export_only = export_only
         self.doc = doc
         self.group = group
         self.module = module
@@ -282,6 +284,12 @@ class Function:
                 if overload.generic:
                     continue
 
+                if "dtype" in overload.input_types:
+                    requested_dtype = kwargs.get("dtype", warp.float32)
+                    overload_dtype = overload.input_types["dtype"]
+                    if requested_dtype != overload_dtype:
+                        continue
+
                 success, return_value = call_builtin(overload, *args)
                 if success:
                     return return_value
@@ -348,6 +356,8 @@ class Function:
         # Runtime arguments that are to be passed to the function, not its template signature.
         if self.export_func is not None:
             func_args = self.export_func(self.input_types)
+            if "dtype" in self.input_types:
+                func_args["dtype"] = self.input_types["dtype"]
         else:
             func_args = self.input_types
 
@@ -519,7 +529,7 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
                 expected_elem_type = arg_type._wp_scalar_type_
                 if not (
                     elem_type is expected_elem_type
-                    or (elem_type is float and expected_elem_type is warp.types.float32)
+                    or (elem_type is float and (expected_elem_type is warp.types.float32 or expected_elem_type is warp.types.float64))
                     or (elem_type is int and expected_elem_type is warp.types.int32)
                     or (elem_type is bool and expected_elem_type is warp.types.bool)
                     or (
@@ -559,7 +569,7 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
 
             if not (
                 isinstance(param, arg_type)
-                or (type(param) is float and arg_type is warp.types.float32)  # noqa: E721
+                or (type(param) is float and (arg_type is warp.types.float32) or (arg_type is warp.types.float64))  # noqa: E721
                 or (type(param) is int and arg_type is warp.types.int32)  # noqa: E721
                 or (type(param) is bool and arg_type is warp.types.bool)  # noqa: E721
                 or warp.types.np_dtype_to_warp_type.get(getattr(param, "dtype", None)) is arg_type
@@ -1085,6 +1095,7 @@ def add_builtin(
     variadic=False,
     initializer_list_func=None,
     export=True,
+    export_only=False,
     group="Other",
     hidden=False,
     skip_replay=False,
@@ -1131,6 +1142,9 @@ def add_builtin(
         export (bool): Whether the function is to be exposed to the Python
             interpreter so that it becomes available from within the `warp`
             module.
+        export_only (bool): Whether this function overload is only used for Python-side 
+            calls via the export mechanism. When True, the overload will be skipped 
+            during kernel overload resolution
         group (str): Classification used for the documentation.
         hidden (bool): Whether to add that function into the documentation.
         skip_replay (bool): Whether operation will be performed during
@@ -1165,6 +1179,9 @@ def add_builtin(
     # hard coded types. We do this so you can use hard coded warp types outside kernels:
     if export_func is not None:
         func_arg_types = export_func(input_types)
+        # For functions with dtype, create concrete overloads only for export
+        if "dtype" in input_types and export:
+            func_arg_types["dtype"] = input_types["dtype"]
     else:
         func_arg_types = input_types
 
@@ -1268,6 +1285,7 @@ def add_builtin(
                     variadic=variadic,
                     initializer_list_func=initializer_list_func,
                     export=export,
+                    export_only="dtype" in input_types,
                     group=group,
                     hidden=True,
                     skip_replay=skip_replay,
@@ -1289,6 +1307,7 @@ def add_builtin(
         variadic=variadic,
         initializer_list_func=initializer_list_func,
         export=export,
+        export_only=export_only,
         doc=doc,
         group=group,
         hidden=hidden,
@@ -1710,7 +1729,10 @@ class ModuleExec:
 
     # lookup and cache kernel entry points
     def get_kernel_hooks(self, kernel):
-        hooks = self.kernel_hooks.get(kernel)
+        # Use kernel.adj as a unique key for cache lookups instead of the kernel itself.
+        # This avoids holding a reference to the kernel and is faster than using
+        # a WeakKeyDictionary with kernels as keys.
+        hooks = self.kernel_hooks.get(kernel.adj)
         if hooks is not None:
             return hooks
 
@@ -1760,7 +1782,8 @@ class ModuleExec:
                 func(runtime.llvm.lookup(self.handle.encode("utf-8"), (name + "_cpu_backward").encode("utf-8"))) or None
             )
 
-            hooks = KernelHooks(forward, backward)
+        hooks = KernelHooks(forward, backward)
+        self.kernel_hooks[kernel.adj] = hooks
 
         self.kernel_hooks[kernel] = hooks
         return hooks
@@ -1772,7 +1795,8 @@ class ModuleExec:
 # build cache
 class Module:
     def __init__(self, name, loader):
-        self.name = name
+        self.name = name if name is not None else "None"
+
         self.loader = loader
 
         # lookup the latest versions of kernels, functions, and structs by key
@@ -1780,12 +1804,14 @@ class Module:
         self.functions = {}  # (key: function)
         self.structs = {}  # (key: struct)
 
-        # Set of all "live" kernels in this module.
+        # Set of all "live" kernels in this module, i.e., kernels that still have references.
+        # We keep a weak reference to every kernel ever created in this module and rely on Python GC
+        # to release kernels that no longer have any references (in user code or internal bookkeeping).
         # The difference between `live_kernels` and `kernels` is that `live_kernels` may contain
         # multiple kernels with the same key (which is essential to support closures), while `kernels`
         # only holds the latest kernel for each key.  When the module is built, we compute the hash
         # of each kernel in `live_kernels` and filter out duplicates for codegen.
-        self.live_kernels = weakref.WeakSet()
+        self._live_kernels = weakref.WeakSet()
 
         # executable modules currently loaded
         self.execs = {}  # (device.context: ModuleExec)
@@ -1834,7 +1860,7 @@ class Module:
         self.kernels[kernel.key] = kernel
 
         # track all kernel objects, even if they are duplicates
-        self.live_kernels.add(kernel)
+        self._live_kernels.add(kernel)
 
         self.find_references(kernel.adj)
 
@@ -1899,6 +1925,19 @@ class Module:
 
         # for a reload of module on next launch
         self.mark_modified()
+
+    @property
+    def live_kernels(self):
+        # Return a list of kernels that still have references.
+        # We return a regular list instead of the WeakSet to avoid undesirable issues
+        # if kernels are garbage collected before the caller is done using this list.
+        # Note that we should avoid retaining strong references to kernels unnecessarily
+        # so that Python GC can release kernels that no longer have user references.
+        # It is tempting to call gc.collect() here to force garbage collection,
+        # but this can have undesirable consequences (e.g., GC during graph capture),
+        # so we should avoid it as a general rule.  Instead, we rely on Python's
+        # reference counting GC to collect kernels that have gone out of scope.
+        return list(self._live_kernels)
 
     # find kernel corresponding to a Python function
     def find_kernel(self, func):
@@ -6123,15 +6162,59 @@ def export_builtins(file: io.TextIOBase):  # pragma: no cover
             params = ", ".join(func_args.keys())
 
             if args == "":
-                file.write(f"WP_API void {f.mangled_name}({return_type}* ret) {{ *ret = wp::{f.key}({params}); }}\n")
+                file.write(f"WP_API void {f.mangled_name}({return_type}* ret);\n")
             elif return_type == "None":
-                file.write(f"WP_API void {f.mangled_name}({args}) {{ wp::{f.key}({params}); }}\n")
+                file.write(f"WP_API void {f.mangled_name}({args});\n")
             else:
                 file.write(
-                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret) {{ *ret = wp::{f.key}({params}); }}\n"
+                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret);\n"
                 )
 
     file.write('\n}  // extern "C"\n\n')
+
+    for k, g in builtin_functions.items():
+        for f in g.overloads:
+            if not f.export or f.generic:
+                continue
+
+            # only export simple types that don't use arrays
+            # or templated types
+            if not f.is_simple():
+                continue
+
+            try:
+                # todo: construct a default value for each of the functions args
+                # so we can generate the return type for overloaded functions
+                return_type = ctype_ret_str(f.value_func(None, None))
+            except Exception:
+                continue
+
+            if return_type.startswith("Tuple"):
+                continue
+
+            # Runtime arguments that are to be passed to the function, not its template signature.
+            if f.export_func is not None:
+                func_args = f.export_func(f.input_types)
+            else:
+                func_args = f.input_types
+
+            args = ", ".join(f"{ctype_arg_str(v)} {k}" for k, v in func_args.items())
+            params = ", ".join(func_args.keys())
+            if "dtype" in f.input_types:
+                dtype = f.input_types["dtype"]
+                template_params = f"<{dtype.__name__}>"
+            else:
+                template_params = ""
+
+            if args == "":
+                file.write(f"WP_API void {f.mangled_name}({return_type}* ret) {{ *ret = wp::{f.key}{template_params}({params}); }}\n")
+            elif return_type == "None":
+                file.write(f"WP_API void {f.mangled_name}({args}) {{ wp::{f.key}{template_params}({params}); }}\n")
+            else:
+                file.write(
+                    f"WP_API void {f.mangled_name}({args}, {return_type}* ret) {{ *ret = wp::{f.key}{template_params}({params}); }}\n"
+                )
+
     file.write("}  // namespace wp\n")
 
 

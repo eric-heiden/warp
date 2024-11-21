@@ -1304,9 +1304,10 @@ def set_element(a: wp.array(dtype=Any), i: int, val: Any, relative: bool = False
 
 
 @wp.kernel(enable_backward=False)
-def compute_fd_kernel(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: Any, fd: wp.array(dtype=Any)):
+def compute_fd_kernel(left: wp.array(dtype=float), right: wp.array(dtype=float), eps: float, fd: wp.array(dtype=float)):
     tid = wp.tid()
-    fd[tid] = wp.float32((wp.float64(right[tid]) - wp.float64(left[tid])) / (wp.float64(2.0) * eps))
+    fd[tid] = (right[tid] - left[tid]) / (2.0 * eps)
+    #fd[tid] = wp.float32((wp.float64(right[tid]) - wp.float64(left[tid])) / (wp.float64(2.0) * eps))
 
 
 def compute_fd(left: wp.array(dtype=Any), right: wp.array(dtype=Any), eps: float, fd: wp.array(dtype=Any)):

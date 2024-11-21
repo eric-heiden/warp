@@ -129,7 +129,8 @@ e.g. to pass a 2d array to a kernel the number of dims is specified using the ``
     @wp.kernel
     def test(input: wp.array(dtype=float, ndim=2)):
 
-Type-hint helpers are provided for common array sizes, e.g.: ``array2d()``, ``array3d()``, which are equivalent to calling ``array(..., ndim=2)```, etc. To index a multi-dimensional array use a the following kernel syntax::
+Type-hint helpers are provided for common array sizes, e.g.: ``array2d()``, ``array3d()``, which are equivalent to calling ``array(..., ndim=2)```, etc.
+To index a multi-dimensional array, use the following kernel syntax::
 
     # returns a float from the 2d array
     value = input[i,j]
@@ -567,10 +568,12 @@ An array of structs can also be initialized from a list of struct objects::
 Example: Using a struct in gradient computation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. code:: python
+.. testcode::
 
     import numpy as np
+
     import warp as wp
+
 
     @wp.struct
     class TestStruct:
@@ -578,11 +581,13 @@ Example: Using a struct in gradient computation
         a: wp.array(dtype=wp.vec3)
         b: wp.array(dtype=wp.vec3)
 
+
     @wp.kernel
     def test_kernel(s: TestStruct):
         tid = wp.tid()
 
         s.b[tid] = s.a[tid] + s.x
+
 
     @wp.kernel
     def loss_kernel(s: TestStruct, loss: wp.array(dtype=float)):
@@ -590,6 +595,7 @@ Example: Using a struct in gradient computation
 
         v = s.b[tid]
         wp.atomic_add(loss, 0, float(tid + 1) * (v[0] + 2.0 * v[1] + 3.0 * v[2]))
+
 
     # create struct
     ts = TestStruct()
@@ -611,6 +617,11 @@ Example: Using a struct in gradient computation
     print(loss)
     print(ts.a)
 
+.. testoutput::
+
+    [120.]
+    [[1. 2. 3.]
+     [4. 5. 6.]]
 
 Type Conversions
 ################

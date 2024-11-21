@@ -941,7 +941,7 @@ class Model:
             - potential_count (int): Potential number of contact points
             - actual_count (int): Actual number of contact points
         """
-        from .collide import count_contact_points
+        from .count_contact_points import count_contact_points
 
         # calculate the potential number of shape pair contact points
         contact_count = wp.zeros(2, dtype=wp.int32, device=self.device)
@@ -4064,7 +4064,7 @@ class ModelBuilder:
         radius_mean: float = default_particle_radius,
         radius_std: float = 0.0,
     ):
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(42)
         for z in range(dim_z):
             for y in range(dim_y):
                 for x in range(dim_x):
@@ -4074,7 +4074,7 @@ class ModelBuilder:
                     p = wp.quat_rotate(rot, v) + pos + wp.vec3(rng.random(3) * jitter)
 
                     if radius_std > 0.0:
-                        r = radius_mean + np.random.randn() * radius_std
+                        r = radius_mean + rng.standard_normal() * radius_std
                     else:
                         r = radius_mean
                     self.add_particle(p, vel, m, r)
