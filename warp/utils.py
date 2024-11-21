@@ -12,6 +12,7 @@ import sys
 import time
 import warnings
 from typing import Any, Optional
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -1038,3 +1039,184 @@ def timing_print(results, indent=""):
     print(f"{indent}----------------+---------+{activity_dashes}")
     for device, agg in device_totals.items():
         print(f"{indent}{agg.elapsed :12.6f} ms | {agg.count :7d} | {device}")
+
+@contextmanager
+def coerce_float64_types():
+    # Dictionary of original types to store and restore
+    original_types = {
+        "float32": wp.float32,
+        "vec2": wp.vec2,
+        "vec3": wp.vec3,
+        "mat22": wp.mat22,
+        "mat33": wp.mat33,
+        "spatial_vector": wp.spatial_vector,
+        "spatial_matrix": wp.spatial_matrix,
+        "transform": wp.transform,
+        "quat": wp.quat,
+        "vec2f": wp.vec2f,
+        "vec3f": wp.vec3f,
+        "mat22f": wp.mat22f,
+        "mat33f": wp.mat33f,
+        "spatial_vectorf": wp.spatial_vectorf,
+        "spatial_matrixf": wp.spatial_matrixf,
+        "transformf": wp.transformf,
+        "quatf": wp.quatf
+    }
+
+    # Dictionary mapping original types to their float64 versions
+    float64_types = {
+        "float32": wp.float64,
+        "vec2": wp.vec2d,
+        "vec3": wp.vec3d,
+        "mat22": wp.mat22d,
+        "mat33": wp.mat33d,
+        "spatial_vector": wp.spatial_vectord,
+        "spatial_matrix": wp.spatial_matrixd,
+        "transform": wp.transformd,
+        "quat": wp.quatd,
+        "vec2f": wp.vec2d,
+        "vec3f": wp.vec3d,
+        "mat22f": wp.mat22d,
+        "mat33f": wp.mat33d,
+        "spatial_vectorf": wp.spatial_vectord,
+        "spatial_matrixf": wp.spatial_matrixd,
+        "transformf": wp.transformd,
+        "quatf": wp.quatd
+    }
+
+    try:
+        # Redefine all types to use float64 versions
+        for name, new_type in float64_types.items():
+            # Update in wp.types
+            setattr(wp.types, name, new_type)
+            # Update in wp directly
+            setattr(wp, name, new_type)
+
+        # Special cases for codegen and context
+        wp.codegen.float32 = wp.float64
+        wp.context.float32 = wp.float64
+
+        # Re-create all Struct/Kernel/Function objects using float64 types
+        recreate_warp_objects(save_annotations=True)
+
+        yield
+    finally:
+        # Restore original types
+        for name, original_type in original_types.items():
+            # Restore in wp.types
+            setattr(wp.types, name, original_type)
+            # Restore in wp directly
+            setattr(wp, name, original_type)
+
+        # Restore special cases
+        wp.codegen.float32 = original_types["float32"]
+        wp.context.float32 = original_types["float32"]
+
+        # Re-create all Struct/Kernel/Function objects using original types
+        recreate_warp_objects(restore_annotations=True)
+
+def recreate_warp_objects(save_annotations=False, restore_annotations=False):
+    """Create fresh instances of all Warp objects using current type definitions.
+    Only updates the primary registration in module.structs/kernels/functions."""
+    for module in wp.context.user_modules.values():
+        # Reinit Structs
+        struct_keys = list(module.structs.keys())
+        for key in struct_keys:
+            if key == "ModelShapeGeometry":
+                x=2
+            old_struct = module.structs[key]
+            if save_annotations:
+                old_struct.cls.__old_annotations__ = old_struct.cls.__annotations__.copy()
+            if restore_annotations and hasattr(old_struct.cls, "__old_annotations__"):
+                old_struct.cls.__annotations__ = old_struct.cls.__old_annotations__
+            else:
+                new_annotations = {
+                    name: update_type(type_) 
+                    for name, type_ in old_struct.cls.__annotations__.items()
+                }
+                old_struct.cls.__annotations__ = new_annotations
+            new_struct = wp.codegen.Struct(old_struct.cls, key, module)
+            module.structs[key] = new_struct
+            setattr(sys.modules[module.name], key, new_struct)
+
+            for m in sys.modules.values():
+                if m and hasattr(module, "__dict__"):
+                    for name, value in m.__dict__.items():
+                        if (isinstance(value, wp.codegen.Struct) and 
+                            value.cls is old_struct.cls):
+                            setattr(m, name, new_struct)
+
+        # Reinit Functions
+        function_keys = list(module.functions.keys())
+        for key in function_keys:
+            old_function = module.functions[key]
+            if save_annotations:
+                old_function.func.__old_annotations__ = old_function.func.__annotations__.copy()
+            if restore_annotations and hasattr(old_function.func, "__old_annotations__"):
+                old_function.func.__annotations__ = old_function.func.__old_annotations__
+            else:
+                new_annotations = {
+                    name: update_type(type_) 
+                    for name, type_ in old_function.func.__annotations__.items()
+                }
+                old_function.func.__annotations__ = new_annotations
+            new_function = wp.context.func(old_function.func)
+            module.functions[key] = new_function
+            setattr(sys.modules[module.name], key, new_function)
+
+            for m in sys.modules.values():
+                if m and hasattr(module, "__dict__"):
+                    for name, value in m.__dict__.items():
+                        if (isinstance(value, wp.context.Function) and 
+                            value.func is old_function.func):
+                            setattr(m, name, new_function)
+
+        # Reinit Kernels
+        kernel_keys = list(module.kernels.keys())
+        for key in kernel_keys:
+            old_kernel = module.kernels[key]
+            if save_annotations:
+                old_kernel.func.__old_annotations__ = old_kernel.func.__annotations__.copy()
+            if restore_annotations and hasattr(old_kernel.func, "__old_annotations__"):
+                old_kernel.func.__annotations__ = old_kernel.func.__old_annotations__
+            else:
+                new_annotations = {
+                    name: update_type(type_) 
+                    for name, type_ in old_kernel.func.__annotations__.items()
+                }
+                old_kernel.func.__annotations__ = new_annotations
+            new_kernel = wp.context.Kernel(
+                func=old_kernel.func,
+                key=old_kernel.key,
+                module=old_kernel.module,
+                options=old_kernel.options,
+                code_transformers=old_kernel.adj.transformers
+            )
+            module.kernels[key] = new_kernel
+            setattr(sys.modules[module.name], key, new_kernel)
+            for m in sys.modules.values():
+                if m and hasattr(module, "__dict__"):
+                    for name, value in m.__dict__.items():
+                        if (isinstance(value, wp.context.Kernel) and 
+                            value.func is old_kernel.func):
+                            setattr(m, name, new_kernel)
+
+def update_type(type_):
+    """Update a type annotation to reflect any redefined warp types."""
+    
+    # Handle warp array types
+    if isinstance(type_, wp.types.array):
+        # only modify if dtype is a warp type
+        if hasattr(type_.dtype, '__module__') and type_.dtype.__module__ == 'warp.types':
+            dtype = getattr(wp.types, type_.dtype.__name__)
+            ndim = type_.ndim
+            return wp.types.array(dtype=dtype, ndim=ndim)
+        return type_
+    
+    # Handle scalar warp types
+    if hasattr(type_, '__module__') and type_.__module__ == 'warp.types':
+        return getattr(wp.types, type_.__name__)
+    
+    # Pass through all other types unchanged
+    return type_
+
