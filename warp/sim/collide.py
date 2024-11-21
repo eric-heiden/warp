@@ -622,7 +622,11 @@ def create_soft_contacts(
     if (particle_flags[particle_index] & PARTICLE_FLAG_ACTIVE) == 0:
         return
 
-    if particle_collision_group[particle_index] != shape_collision_group[shape_index] and shape_collision_group[shape_index] != -1 and particle_collision_group[particle_index] != -1:
+    if (
+        particle_collision_group[particle_index] != shape_collision_group[shape_index]
+        and shape_collision_group[shape_index] != -1
+        and particle_collision_group[particle_index] != -1
+    ):
         return
 
     rigid_index = shape_body[shape_index]

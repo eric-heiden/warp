@@ -1437,7 +1437,9 @@ class ModelBuilder:
         # apply collision group
         if separate_collision_group:
             self.shape_collision_group.extend([self.last_collision_group + 1 for _ in builder.shape_collision_group])
-            self.particle_collision_group.extend([self.last_collision_group + 1 for _ in builder.particle_collision_group])
+            self.particle_collision_group.extend(
+                [self.last_collision_group + 1 for _ in builder.particle_collision_group]
+            )
         else:
             self.shape_collision_group.extend(
                 [(g + self.last_collision_group if g > -1 else -1) for g in builder.shape_collision_group]
