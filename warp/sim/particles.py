@@ -41,6 +41,7 @@ def eval_particle_forces_kernel(
     particle_v: wp.array(dtype=wp.vec3),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.uint32),
+    particle_collision_group: wp.array(dtype=int),
     k_contact: float,
     k_damp: float,
     k_friction: float,
@@ -73,7 +74,15 @@ def eval_particle_forces_kernel(
     count = int(0)
 
     while wp.hash_grid_query_next(query, index):
-        if (particle_flags[index] & PARTICLE_FLAG_ACTIVE) != 0 and index != i:
+        if (
+            (particle_flags[index] & PARTICLE_FLAG_ACTIVE) != 0
+            and index != i
+            and (
+                particle_collision_group[i] == -1
+                or particle_collision_group[index] == -1
+                or particle_collision_group[i] == particle_collision_group[index]
+            )
+        ):
             # compute distance to point
             n = x - particle_x[index]
             d = wp.length(n)
@@ -101,6 +110,7 @@ def eval_particle_forces(model, state, forces):
                 state.particle_qd,
                 model.particle_radius,
                 model.particle_flags,
+                model.particle_collision_group,
                 model.particle_ke,
                 model.particle_kd,
                 model.particle_kf,
