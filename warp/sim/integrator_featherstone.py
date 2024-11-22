@@ -1257,6 +1257,38 @@ def create_inertia_matrix_kernel(num_joints, num_dofs):
     return eval_dense_gemm_tile
 
 
+def create_inertia_matrix_kernel(num_joints, num_dofs):
+    @wp.kernel
+    def eval_dense_gemm_tile(
+        J_arr: wp.array3d(dtype=float), M_arr: wp.array3d(dtype=float), H_arr: wp.array3d(dtype=float)
+    ):
+        articulation = wp.tid()
+
+        J = wp.tile_load(J_arr[articulation], 0, 0, m=wp.static(6 * num_joints), n=num_dofs)
+        P = wp.tile_zeros(m=wp.static(6 * num_joints), n=num_dofs, dtype=float)
+
+        # compute P = M*J where M is a 6x6 block diagonal mass matrix
+        for i in range(int(num_joints)):
+            # 6x6 block matrices are on the diagonal
+            M_body = wp.tile_load(M_arr[articulation], i, i, m=6, n=6)
+
+            # load a 6xN row from the Jacobian
+            J_body = wp.tile_view(J, i * 6, 0, m=6, n=num_dofs)
+
+            # compute weighted row
+            P_body = wp.tile_matmul(M_body, J_body)
+
+            # assign to the P slice
+            wp.tile_assign(P, i * 6, 0, P_body)
+
+        # compute H = J^T*P
+        H = wp.tile_matmul(wp.tile_transpose(J), P)
+
+        wp.tile_store(H_arr[articulation], 0, 0, H)
+
+    return eval_dense_gemm_tile
+
+
 @wp.kernel
 def eval_dense_gemm_batched(
     m: wp.array(dtype=int),

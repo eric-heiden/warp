@@ -7,7 +7,7 @@
 
 from typing import Optional
 
-version: str = "1.4.2"
+version: str = "1.5.0"
 """Warp version string"""
 
 verify_fp: bool = False
@@ -16,7 +16,7 @@ Has performance implications.
 """
 
 verify_cuda: bool = False
-"""If `True`, Warp will check for CUDA errors after every launch and memory operation.
+"""If `True`, Warp will check for CUDA errors after every launch operation.
 CUDA error verification cannot be used during graph capture. Has performance implications.
 """
 

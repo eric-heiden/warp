@@ -13,11 +13,6 @@ import warp as wp
 from warp.tests.unittest_utils import *
 
 
-import numpy as np
-import warp as wp
-import os
-
-
 # checks that we can configure shared memory to the expected size
 def test_tile_shared_mem_size(test, device):
     DIM_M = 32
@@ -107,9 +102,11 @@ def test_tile_shared_mem_graph(test, device):
 
     out = wp.empty((DIM_M, DIM_N), dtype=float, device=device)
 
-    wp.capture_begin(force_module_load=True)
+    wp.load_module(device=device)
+
+    wp.capture_begin(device, force_module_load=False)
     wp.launch_tiled(compute, dim=[1], inputs=[out], block_dim=BLOCK_DIM, device=device)
-    graph = wp.capture_end()
+    graph = wp.capture_end(device)
 
     wp.capture_launch(graph)
 

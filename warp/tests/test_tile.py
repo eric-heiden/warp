@@ -524,26 +524,23 @@ def test_tile_broadcast_grad(test, device):
     assert_np_equal(a.grad.numpy(), np.ones(5) * 5.0)
 
 
-
 TILE_VIEW_M = 16
 TILE_VIEW_N = 128
 
+
 @wp.kernel
 def test_tile_view_kernel(src: wp.array2d(dtype=float), dst: wp.array2d(dtype=float)):
-
     # load whole source into local memory
     a = wp.tile_load(src, 0, 0, TILE_VIEW_M, TILE_VIEW_N)
 
     # copy the source array row by row
     for i in range(TILE_VIEW_M):
-        
         # create a view on original array and store
         row = a[i]
         wp.tile_store(dst, i, 0, row)
 
 
 def test_tile_view(test, device):
-
     rng = np.random.default_rng(42)
 
     a = wp.array(rng.random((TILE_VIEW_M, TILE_VIEW_N), dtype=np.float32), requires_grad=True, device=device)
@@ -553,7 +550,6 @@ def test_tile_view(test, device):
         wp.launch_tiled(test_tile_view_kernel, dim=[1], inputs=[a, b], block_dim=32, device=device)
 
     assert_np_equal(b.numpy(), a.numpy())
-    
     b.grad = wp.ones_like(b, device=device)
     tape.backward()
 
@@ -562,14 +558,12 @@ def test_tile_view(test, device):
 
 @wp.kernel
 def test_tile_assign_kernel(src: wp.array2d(dtype=float), dst: wp.array2d(dtype=float)):
-
     # load whole source into local memory
     a = wp.tile_load(src, 0, 0, m=TILE_VIEW_M, n=TILE_VIEW_N)
     b = wp.tile_zeros(dtype=float, m=TILE_VIEW_M, n=TILE_VIEW_N)
 
     # copy the source array row by row
     for i in range(TILE_VIEW_M):
-        
         # create views onto source and dest rows
         row_src = a[i]
         row_dst = b[i]
@@ -581,7 +575,6 @@ def test_tile_assign_kernel(src: wp.array2d(dtype=float), dst: wp.array2d(dtype=
 
 
 def test_tile_assign(test, device):
-
     rng = np.random.default_rng(42)
 
     a = wp.array(rng.random((TILE_VIEW_M, TILE_VIEW_N), dtype=np.float32), requires_grad=True, device=device)
@@ -591,7 +584,6 @@ def test_tile_assign(test, device):
         wp.launch_tiled(test_tile_assign_kernel, dim=[1], inputs=[a, b], block_dim=32, device=device)
 
     assert_np_equal(b.numpy(), a.numpy())
-    
     b.grad = wp.ones_like(b, device=device)
     tape.backward()
 

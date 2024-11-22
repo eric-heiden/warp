@@ -469,7 +469,13 @@ auto tile_register_like()
     return tile_register_t<T, Tile::M, Tile::N>(T(0.0));
 }
 
+inline CUDA_CALLABLE int tile_align(int num_bytes)
+{
+    // note this much match value in Python types.py
+    const int alignment = 16;
 
+    return ((num_bytes + alignment - 1) / alignment) * alignment;
+}
 
 inline CUDA_CALLABLE void* tile_alloc_shared(int num_bytes, bool init=false)
 {
@@ -488,7 +494,7 @@ inline CUDA_CALLABLE void* tile_alloc_shared(int num_bytes, bool init=false)
         const int offset = smem_base[threadIdx.x];
         
         // one entry per-thread so no need for synchronization
-        smem_base[threadIdx.x] += num_bytes;
+        smem_base[threadIdx.x] += tile_align(num_bytes);
 
         extern __shared__ char dynamic_smem_base[];
         return &(dynamic_smem_base[offset]);

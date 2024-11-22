@@ -1,8 +1,8 @@
-import time
-from typing import Any
+from itertools import product
 
-import torch as tc
 import numpy as np
+import torch as tc
+
 import warp as wp
 
 tc.backends.cuda.matmul.allow_tf32 = False  # Disable TF32 for matrix multiplications
@@ -34,14 +34,14 @@ def create_mlp_kernel(m, n, k):
 
 def benchmark_torch(A, B, warm_up, iterations):
     # warm-up
-    for i in range(warm_up):
+    for _ in range(warm_up):
         tc.matmul(A, B)
 
     timers = {}
     tc.cuda.synchronize()
 
     with wp.ScopedTimer("torch", print=False, dict=timers, synchronize=True):
-        for i in range(iterations):
+        for _ in range(iterations):
             tc.matmul(A, B)
 
         tc.cuda.synchronize()
@@ -64,7 +64,7 @@ def benchmark_warp(A, B, config, warm_up, iterations):
     output = wp.zeros((M, N), dtype=float)
 
     # warm-up
-    for i in range(warm_up):
+    for _ in range(warm_up):
         wp.launch_tiled(
             kernel=mlp, dim=[M // TILE_M, N // TILE_N], inputs=[A, B, K // TILE_K, output], block_dim=BLOCK_DIM
         )
@@ -76,7 +76,7 @@ def benchmark_warp(A, B, config, warm_up, iterations):
     # benchmark
     timers = {}
     with wp.ScopedTimer("warp", print=False, dict=timers, synchronize=True):
-        for i in range(iterations):
+        for _ in range(iterations):
             wp.launch_tiled(
                 kernel=mlp, dim=[M // TILE_M, N // TILE_N], inputs=[A, B, K // TILE_K, output], block_dim=BLOCK_DIM
             )
@@ -84,17 +84,10 @@ def benchmark_warp(A, B, config, warm_up, iterations):
     return timers["warp"][0]
 
 
-tile_m = [16, 32, 64, 128]
-tile_n = [16, 32, 64, 64]
+tile_m = [8, 16, 32, 64]
+tile_n = [8, 16, 32, 64]
 tile_k = [8, 16, 64]
 block = [32, 64, 128]
-
-# Good settings for register GEMM (WP_USE_REGISTER_GEMM in tile.h)
-tile_m = [64]
-tile_n = [64]
-tile_k = [8]
-block = [256]
-
 
 M = 1024
 N = 1024
@@ -108,8 +101,6 @@ warm_up = 10
 
 time_torch = benchmark_torch(A, B, warm_up, iterations)
 print(f"Torch: {time_torch}")
-
-from itertools import product
 
 configs = list(product(tile_m, tile_n, tile_k, block))
 

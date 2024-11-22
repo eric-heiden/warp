@@ -298,7 +298,7 @@ def tridiagonal_symmetric_eigenvalues_qr(D: Any, L: Any, Q: Any, tol: Any):
                 shift = _wilkinson_shift(D[end - 1], D[end], L[end - 1], tol)
 
                 # start with eliminating lower diag of first column of shifted matrix
-                # (i.e. first step of excplit QR factorization)
+                # (i.e. first step of explicit QR factorization)
                 # Then all further steps eliminate the buldge (second diag) of the non-shifted matrix
                 x = D[start] - shift
                 y = L[start]
@@ -372,9 +372,16 @@ def array_axpy(x: wp.array, y: wp.array, alpha: float = 1.0, beta: float = 1.0):
     if x.shape != y.shape or x.device != y.device:
         raise ValueError("x and y arrays must have the same shape and device")
 
-    wp.launch(kernel=_array_axpy_kernel, dim=x.shape, device=x.device, inputs=[x, y, alpha, beta])
+    # array_axpy requires a custom adjoint; unfortunately we cannot use `wp.func_grad`
+    # as generic functions are not supported yet. Instead we use a non-differentiable kernel
+    # and record a custom adjoint function on the tape.
 
-    if (x.requires_grad or y.requires_grad) and wp.context.runtime.tape is not None:
+    # temporarily disable tape to avoid printing warning that kernel is not differentiable
+    (tape, wp.context.runtime.tape) = (wp.context.runtime.tape, None)
+    wp.launch(kernel=_array_axpy_kernel, dim=x.shape, device=x.device, inputs=[x, y, alpha, beta])
+    wp.context.runtime.tape = tape
+
+    if tape is not None and (x.requires_grad or y.requires_grad):
 
         def backward_axpy():
             # adj_x += adj_y * alpha
@@ -383,7 +390,7 @@ def array_axpy(x: wp.array, y: wp.array, alpha: float = 1.0, beta: float = 1.0):
             if beta != 1.0:
                 array_axpy(x=y.grad, y=y.grad, alpha=0.0, beta=beta)
 
-        wp.context.runtime.tape.record_func(backward_axpy, arrays=[x, y])
+        tape.record_func(backward_axpy, arrays=[x, y])
 
 
 @wp.kernel(enable_backward=False)

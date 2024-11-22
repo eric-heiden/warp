@@ -1085,8 +1085,8 @@ class OpenGLRenderer:
         self.update_projection_matrix()
 
         self._camera_front = self._camera_front.normalize()
-        self._pitch = np.rad2deg(np.asin(self._camera_front.y))
-        self._yaw = -np.rad2deg(np.acos(self._camera_front.x / np.cos(np.deg2rad(self._pitch))))
+        self._pitch = np.rad2deg(np.arcsin(self._camera_front.y))
+        self._yaw = -np.rad2deg(np.arccos(self._camera_front.x / np.cos(np.deg2rad(self._pitch))))
 
         self._frame_dt = 1.0 / fps
         self.time = 0.0
@@ -2371,8 +2371,8 @@ Instances: {len(self._instances)}"""
                 shape,
                 new_tf,
                 scale,
-                color1 or old_color1,
-                color2 or old_color2,
+                old_color1 if color1 is None else color1,
+                old_color2 if color2 is None else color2,
                 visible,
             )
             self._update_shape_instances = True
@@ -2892,21 +2892,19 @@ Instances: {len(self._instances)}"""
             name: A name for the USD prim on the stage
             smooth_shading: Whether to average face normals at each vertex or introduce additional vertices for each face
         """
-        if colors is None:
-            colors = np.ones((len(points), 3), dtype=np.float32)
-        else:
+        if colors is not None:
             colors = np.array(colors, dtype=np.float32)
         points = np.array(points, dtype=np.float32) * np.array(scale, dtype=np.float32)
         indices = np.array(indices, dtype=np.int32).reshape((-1, 3))
         if name in self._instances:
-            self.update_shape_instance(name, pos, rot)
+            self.update_shape_instance(name, pos, rot, color1=colors)
             shape = self._instances[name][2]
             self.update_shape_vertices(shape, points)
             return
-        geo_hash = hash((points.tobytes(), indices.tobytes(), colors.tobytes()))
+        geo_hash = hash((points.tobytes(), indices.tobytes()))
         if geo_hash in self._shape_geo_hash:
             shape = self._shape_geo_hash[geo_hash]
-            if self.update_shape_instance(name, pos, rot):
+            if self.update_shape_instance(name, pos, rot, color1=colors):
                 return shape
         else:
             if smooth_shading:
@@ -2941,7 +2939,7 @@ Instances: {len(self._instances)}"""
             shape = self.register_shape(geo_hash, gfx_vertices, gfx_indices)
         if not is_template:
             body = self._resolve_body_id(parent_body)
-            self.add_shape_instance(name, shape, body, pos, rot)
+            self.add_shape_instance(name, shape, body, pos, rot, color1=colors)
         return shape
 
     def render_arrow(

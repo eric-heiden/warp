@@ -15,6 +15,7 @@ import numpy as np
 
 import warp as wp
 
+from .graph_coloring import ColoringAlgorithm, color_trimesh, combine_independent_particle_coloring
 from .inertia import (
     compute_box_inertia,
     compute_capsule_inertia,
@@ -498,6 +499,7 @@ class Model:
         particle_adhesion (array): Particle adhesion strength, shape [particle_count], float
         particle_grid (HashGrid): HashGrid instance used for accelerated simulation of particle interactions
         particle_flags (array): Particle enabled state, shape [particle_count], bool
+        particle_collision_group (list): Collision group of each particle, shape [particle_count], int
         particle_max_velocity (float): Maximum particle velocity (to prevent instability)
 
         shape_transform (array): Rigid shape transforms, shape [shape_count, 7], float
@@ -669,6 +671,7 @@ class Model:
         self.particle_adhesion = 0.0
         self.particle_grid = None
         self.particle_flags = None
+        self.particle_collision_group = None
         self.particle_max_velocity = 1e5
 
         self.shape_transform = None
@@ -891,7 +894,7 @@ class Model:
             target.soft_contact_body_pos = wp.zeros(count, dtype=wp.vec3, requires_grad=requires_grad)
             target.soft_contact_body_vel = wp.zeros(count, dtype=wp.vec3, requires_grad=requires_grad)
             target.soft_contact_normal = wp.zeros(count, dtype=wp.vec3, requires_grad=requires_grad)
-            target.soft_contact_tids = wp.zeros(count, dtype=int)
+            target.soft_contact_tids = wp.zeros(self.particle_count * (self.shape_count - 1), dtype=int)
 
     def allocate_soft_contacts(self, count, requires_grad=False):
         self._allocate_soft_contacts(self, count, requires_grad)
@@ -1134,7 +1137,11 @@ class ModelBuilder:
         self.particle_mass = []
         self.particle_radius = []
         self.particle_flags = []
+        self.particle_collision_group = []
+        self.particle_collision_group_map = {}
         self.particle_max_velocity = 1e5
+        # list of np.array
+        self.particle_coloring = []
 
         # shapes (each shape has an entry in these arrays)
         # transform from shape to body
@@ -1374,6 +1381,11 @@ class ModelBuilder:
         if builder.tet_count:
             self.tet_indices.extend((np.array(builder.tet_indices, dtype=np.int32) + start_particle_idx).tolist())
 
+        builder_coloring_translated = [group + start_particle_idx for group in builder.particle_coloring]
+        self.particle_coloring = combine_independent_particle_coloring(
+            self.particle_coloring, builder_coloring_translated
+        )
+
         start_body_idx = self.body_count
         start_shape_idx = self.shape_count
         for s, b in enumerate(builder.shape_body):
@@ -1427,9 +1439,15 @@ class ModelBuilder:
         # apply collision group
         if separate_collision_group:
             self.shape_collision_group.extend([self.last_collision_group + 1 for _ in builder.shape_collision_group])
+            self.particle_collision_group.extend(
+                [self.last_collision_group + 1 for _ in builder.particle_collision_group]
+            )
         else:
             self.shape_collision_group.extend(
                 [(g + self.last_collision_group if g > -1 else -1) for g in builder.shape_collision_group]
+            )
+            self.particle_collision_group.extend(
+                [(g + self.last_collision_group if g > -1 else -1) for g in builder.particle_collision_group]
             )
         shape_count = self.shape_count
         for i, j in builder.shape_collision_filter_pairs:
@@ -1442,6 +1460,15 @@ class ModelBuilder:
             if group not in self.shape_collision_group_map:
                 self.shape_collision_group_map[group] = []
             self.shape_collision_group_map[group].extend([s + shape_count for s in shapes])
+        particle_count = self.particle_count
+        for group, particles in builder.particle_collision_group_map.items():
+            if separate_collision_group:
+                group = self.last_collision_group + 1
+            else:
+                group = group + self.last_collision_group if group > -1 else -1
+            if group not in self.particle_collision_group_map:
+                self.particle_collision_group_map[group] = []
+            self.particle_collision_group_map[group].extend([s + particle_count for s in particles])
 
         # update last collision group counter
         if separate_collision_group:
@@ -3425,7 +3452,13 @@ class ModelBuilder:
 
     # particles
     def add_particle(
-        self, pos: Vec3, vel: Vec3, mass: float, radius: float = None, flags: wp.uint32 = PARTICLE_FLAG_ACTIVE
+        self,
+        pos: Vec3,
+        vel: Vec3,
+        mass: float,
+        radius: float = None,
+        flags: wp.uint32 = PARTICLE_FLAG_ACTIVE,
+        collision_group: int = -1,
     ) -> int:
         """Adds a single particle to the model
 
@@ -3435,6 +3468,7 @@ class ModelBuilder:
             mass: The mass of the particle
             radius: The radius of the particle used in collision handling. If None, the radius is set to the default value (:attr:`default_particle_radius`).
             flags: The flags that control the dynamical behavior of the particle, see PARTICLE_FLAG_* constants
+            collision_group: The collision group of the particle
 
         Note:
             Set the mass equal to zero to create a 'kinematic' particle that does is not subject to dynamics.
@@ -3450,7 +3484,14 @@ class ModelBuilder:
         self.particle_radius.append(radius)
         self.particle_flags.append(flags)
 
-        return len(self.particle_q) - 1
+        particle_id = self.particle_count - 1
+
+        self.particle_collision_group.append(collision_group)
+        if collision_group not in self.particle_collision_group_map:
+            self.particle_collision_group_map[collision_group] = []
+        self.particle_collision_group_map[collision_group].append(particle_id)
+
+        return particle_id
 
     def add_spring(self, i: int, j, ke: float, kd: float, control: float):
         """Adds a spring between two particles in the system
@@ -3830,6 +3871,8 @@ class ModelBuilder:
         add_springs: bool = False,
         spring_ke: float = default_spring_ke,
         spring_kd: float = default_spring_kd,
+        color_particles=False,
+        color_groups=None,
     ):
         """Helper to create a regular planar cloth grid
 
@@ -3850,7 +3893,12 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
-
+            color_particles: Whether to color particles based on their connectivity. When using `IntegratorVBD`, this
+                option must be turned on.
+            input_color_groups: A list of `np.array` objects with `dtype`=int. The length of the list is the number of colors
+                and each `np.array` contains the indices of vertices with this color. Users can provide custom coloring by setting
+                this argument. If color_particles is set to `True` and this argument is `None`, the function will apply a built-in
+                coloring algorithm to generate particle colors.
         """
 
         def grid_index(x, y, dim_x):
@@ -3943,6 +3991,29 @@ class ModelBuilder:
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0)
 
+        if color_particles:
+            if color_groups is None:
+                # ignore bending energy if it is too small
+                include_bending = edge_ke > min(tri_ke, tri_ka) * 0.01
+                edge_indices = np.fromiter(
+                    (x for e in adj.edges.values() for x in (e.o0, e.o1, e.v0, e.v1)),
+                    int,
+                ).reshape(-1, 4)
+                num_particles = (dim_x + 1) * (dim_y + 1)
+
+                coloring_algorithm = ColoringAlgorithm.GRAPH_COLOR_MCS
+
+                edge_indices_translated = edge_indices - start_vertex
+                edge_indices_translated[np.where(edge_indices == -1)] = -1
+                color_groups = color_trimesh(
+                    num_particles, edge_indices_translated, include_bending, algorithm=coloring_algorithm
+                )
+
+            # translate the indices in input_color_groups
+            color_groups = [np.array(group) + start_vertex for group in color_groups]
+
+            self.particle_coloring = combine_independent_particle_coloring(self.particle_coloring, color_groups)
+
     def add_cloth_mesh(
         self,
         pos: Vec3,
@@ -3964,6 +4035,8 @@ class ModelBuilder:
         add_springs: bool = False,
         spring_ke: float = default_spring_ke,
         spring_kd: float = default_spring_kd,
+        color_particles=False,
+        color_groups=None,
     ):
         """Helper to create a cloth model from a regular triangle mesh
 
@@ -3979,7 +4052,12 @@ class ModelBuilder:
             density: The density per-area of the mesh
             edge_callback: A user callback when an edge is created
             face_callback: A user callback when a face is created
-
+            color_particles: Whether to color particles based on their connectivity. When using `IntegratorVBD`, this
+                option must be turned on.
+            color_groups: A list of `np.array` objects with `dtype`=int. The length of the list is the number of colors
+                and each `np.array` contains the indices of vertices with this color. Users can provide custom coloring by setting
+                this argument. If color_particles is set to `True` and this argument is `None`, the function will apply a built-in
+                coloring algorithm to generate particle colors.
         Note:
 
             The mesh should be two manifold.
@@ -4020,22 +4098,22 @@ class ModelBuilder:
 
         adj = wp.utils.MeshAdjacency(self.tri_indices[start_tri:end_tri], end_tri - start_tri)
 
-        edgeinds = np.fromiter(
+        edge_indices = np.fromiter(
             (x for e in adj.edges.values() for x in (e.o0, e.o1, e.v0, e.v1)),
             int,
         ).reshape(-1, 4)
         self.add_edges(
-            edgeinds[:, 0],
-            edgeinds[:, 1],
-            edgeinds[:, 2],
-            edgeinds[:, 3],
-            edge_ke=[edge_ke] * len(edgeinds),
-            edge_kd=[edge_kd] * len(edgeinds),
+            edge_indices[:, 0],
+            edge_indices[:, 1],
+            edge_indices[:, 2],
+            edge_indices[:, 3],
+            edge_ke=[edge_ke] * len(edge_indices),
+            edge_kd=[edge_kd] * len(edge_indices),
         )
 
         if add_springs:
             spring_indices = set()
-            for i, j, k, l in edgeinds:
+            for i, j, k, l in edge_indices:
                 spring_indices.add((min(i, j), max(i, j)))
                 spring_indices.add((min(i, k), max(i, k)))
                 spring_indices.add((min(i, l), max(i, l)))
@@ -4047,6 +4125,25 @@ class ModelBuilder:
 
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0)
+
+        if color_particles:
+            if color_groups is None:
+                # ignore bending energy if it is too small
+                include_bending = edge_ke > min(tri_ke, tri_ka) * 0.01
+
+                num_particles = len(vertices)
+                coloring_algorithm = ColoringAlgorithm.GRAPH_COLOR_MCS
+
+                edge_indices_translated = edge_indices - start_vertex
+                edge_indices_translated[np.where(edge_indices == -1)] = -1
+                color_groups = color_trimesh(
+                    num_particles, edge_indices_translated, include_bending, algorithm=coloring_algorithm
+                )
+
+            # translate the indices in input_color_groups
+            color_groups = [np.array(group) + start_vertex for group in color_groups]
+
+            self.particle_coloring = combine_independent_particle_coloring(self.particle_coloring, color_groups)
 
     def add_particle_grid(
         self,
@@ -4063,6 +4160,7 @@ class ModelBuilder:
         jitter: float,
         radius_mean: float = default_particle_radius,
         radius_std: float = 0.0,
+        collision_group: int = -1,
     ):
         rng = np.random.default_rng(42)
         for z in range(dim_z):
@@ -4077,7 +4175,7 @@ class ModelBuilder:
                         r = radius_mean + rng.standard_normal() * radius_std
                     else:
                         r = radius_mean
-                    self.add_particle(p, vel, m, r)
+                    self.add_particle(p, vel, m, r, collision_group=collision_group)
 
     def add_soft_grid(
         self,
@@ -4103,6 +4201,7 @@ class ModelBuilder:
         tri_kd: float = default_tri_kd,
         tri_drag: float = default_tri_drag,
         tri_lift: float = default_tri_lift,
+        collision_group: int = -1,
     ):
         """Helper to create a rectangular tetrahedral FEM grid
 
@@ -4128,6 +4227,7 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
+            collision_group: The collision group of the particles
         """
 
         start_vertex = len(self.particle_q)
@@ -4154,7 +4254,7 @@ class ModelBuilder:
 
                     p = wp.quat_rotate(rot, v) + pos
 
-                    self.add_particle(p, vel, m)
+                    self.add_particle(p, vel, m, collision_group=collision_group)
 
         # dict of open faces
         faces = {}
@@ -4409,8 +4509,11 @@ class ModelBuilder:
             m.particle_inv_mass = wp.array(particle_inv_mass, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_radius = wp.array(self.particle_radius, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_flags = wp.array([flag_to_int(f) for f in self.particle_flags], dtype=wp.uint32)
+            m.particle_collision_group = wp.array(self.particle_collision_group, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
+
+            m.particle_coloring = [wp.array(group, dtype=int) for group in self.particle_coloring]
 
             # hash-grid for particle interactions
             m.particle_grid = wp.HashGrid(128, 128, 128)
@@ -4458,7 +4561,8 @@ class ModelBuilder:
             )
 
             m.shape_collision_filter_pairs = self.shape_collision_filter_pairs
-            m.shape_collision_group = self.shape_collision_group
+            # m.shape_collision_group = self.shape_collision_group
+            m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
             m.shape_collision_group_map = self.shape_collision_group_map
             m.shape_collision_radius = wp.array(
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad

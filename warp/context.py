@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import io
 import itertools
+import json
 import operator
 import os
 import platform
@@ -22,7 +23,7 @@ import weakref
 import json
 from copy import copy as shallowcopy
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -986,8 +987,17 @@ def struct(c):
     return s
 
 
-# overload a kernel with the given argument types
-def overload(kernel, arg_types=None):
+def overload(kernel, arg_types=Union[None, Dict[str, Any], List[Any]]):
+    """Overload a generic kernel with the given argument types.
+
+    Can be called directly or used as a function decorator.
+
+    Args:
+        kernel: The generic kernel to be instantiated with concrete types.
+        arg_types: A list of concrete argument types for the kernel or a
+            dictionary specifying generic argument names as keys and concrete
+            types as variables.
+    """
     if isinstance(kernel, Kernel):
         # handle cases where user calls us directly, e.g. wp.overload(kernel, [args...])
 
@@ -1764,7 +1774,7 @@ class ModuleExec:
             options = dict(kernel.module.options)
             options.update(kernel.options)
 
-            if options["enable_backward"] != False and not runtime.core.cuda_configure_kernel_shared_memory(
+            if options["enable_backward"] and not runtime.core.cuda_configure_kernel_shared_memory(
                 backward_kernel, backward_smem_bytes
             ):
                 print(
@@ -1785,8 +1795,6 @@ class ModuleExec:
             hooks = KernelHooks(forward, backward)
 
         self.kernel_hooks[kernel.adj] = hooks
-
-        self.kernel_hooks[kernel] = hooks
         return hooks
 
 
@@ -2849,21 +2857,16 @@ class Graph:
 
 class Runtime:
     def __init__(self):
-        if sys.version_info < (3, 7):
-            raise RuntimeError("Warp requires Python 3.7 as a minimum")
+        if sys.version_info < (3, 8):
+            raise RuntimeError("Warp requires Python 3.8 as a minimum")
         if sys.version_info < (3, 9):
             warp.utils.warn(f"Python 3.9 or newer is recommended for running Warp, detected {sys.version_info}")
 
         bin_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bin")
 
         if os.name == "nt":
-            if sys.version_info >= (3, 8):
-                # Python >= 3.8 this method to add dll search paths
-                os.add_dll_directory(bin_path)
-
-            else:
-                # Python < 3.8 we add dll directory to path
-                os.environ["PATH"] = bin_path + os.pathsep + os.environ["PATH"]
+            # Python >= 3.8 this method to add dll search paths
+            os.add_dll_directory(bin_path)
 
             warp_lib = os.path.join(bin_path, "warp.dll")
             llvm_lib = os.path.join(bin_path, "warp-clang.dll")
@@ -3563,6 +3566,23 @@ class Runtime:
             self.core.cuda_timing_end.argtypes = []
             self.core.cuda_timing_end.restype = None
 
+            self.core.graph_coloring.argtypes = [
+                ctypes.c_int,
+                warp.types.array_t,
+                ctypes.c_int,
+                warp.types.array_t,
+            ]
+            self.core.graph_coloring.restype = ctypes.c_int
+
+            self.core.balance_coloring.argtypes = [
+                ctypes.c_int,
+                warp.types.array_t,
+                ctypes.c_int,
+                ctypes.c_float,
+                warp.types.array_t,
+            ]
+            self.core.balance_coloring.restype = ctypes.c_float
+
             self.core.init.restype = ctypes.c_int
 
         except AttributeError as e:
@@ -3788,10 +3808,7 @@ class Runtime:
 
     def load_dll(self, dll_path):
         try:
-            if sys.version_info >= (3, 8):
-                dll = ctypes.CDLL(dll_path, winmode=0)
-            else:
-                dll = ctypes.CDLL(dll_path)
+            dll = ctypes.CDLL(dll_path, winmode=0)
         except OSError as e:
             if "GLIBCXX" in str(e):
                 raise RuntimeError(
@@ -3932,7 +3949,7 @@ def is_cuda_available() -> bool:
     return get_cuda_device_count() > 0
 
 
-def is_device_available(device):
+def is_device_available(device: Device) -> bool:
     return device in get_devices()
 
 
@@ -3992,7 +4009,7 @@ def get_cuda_devices() -> List[Device]:
 
 
 def get_preferred_device() -> Device:
-    """Returns the preferred compute device, CUDA if available and CPU otherwise."""
+    """Returns the preferred compute device, ``cuda:0`` if available and ``cpu`` otherwise."""
 
     init()
 
@@ -4132,7 +4149,7 @@ def set_mempool_release_threshold(device: Devicelike, threshold: Union[int, floa
 
 
 def get_mempool_release_threshold(device: Devicelike) -> int:
-    """Get the CUDA memory pool release threshold on the device."""
+    """Get the CUDA memory pool release threshold on the device in bytes."""
 
     init()
 
@@ -4151,7 +4168,7 @@ def is_peer_access_supported(target_device: Devicelike, peer_device: Devicelike)
     """Check if `peer_device` can directly access the memory of `target_device` on this system.
 
     This applies to memory allocated using default CUDA allocators.  For memory allocated using
-    CUDA pooled allocators, use `is_mempool_access_supported()`.
+    CUDA pooled allocators, use :func:`is_mempool_access_supported()`.
 
     Returns:
         A Boolean value indicating if this peer access is supported by the system.
@@ -4172,7 +4189,7 @@ def is_peer_access_enabled(target_device: Devicelike, peer_device: Devicelike) -
     """Check if `peer_device` can currently access the memory of `target_device`.
 
     This applies to memory allocated using default CUDA allocators.  For memory allocated using
-    CUDA pooled allocators, use `is_mempool_access_enabled()`.
+    CUDA pooled allocators, use :func:`is_mempool_access_enabled()`.
 
     Returns:
         A Boolean value indicating if this peer access is currently enabled.
@@ -4196,7 +4213,7 @@ def set_peer_access_enabled(target_device: Devicelike, peer_device: Devicelike, 
     a negative impact on memory consumption and allocation performance.
 
     This applies to memory allocated using default CUDA allocators.  For memory allocated using
-    CUDA pooled allocators, use `set_mempool_access_enabled()`.
+    CUDA pooled allocators, use :func:`set_mempool_access_enabled()`.
     """
 
     init()
@@ -4224,7 +4241,8 @@ def set_peer_access_enabled(target_device: Devicelike, peer_device: Devicelike, 
 def is_mempool_access_supported(target_device: Devicelike, peer_device: Devicelike) -> bool:
     """Check if `peer_device` can directly access the memory pool of `target_device`.
 
-    If mempool access is possible, it can be managed using `set_mempool_access_enabled()` and `is_mempool_access_enabled()`.
+    If mempool access is possible, it can be managed using :func:`set_mempool_access_enabled()`
+    and :func:`is_mempool_access_enabled()`.
 
     Returns:
         A Boolean value indicating if this memory pool access is supported by the system.
@@ -4242,7 +4260,7 @@ def is_mempool_access_enabled(target_device: Devicelike, peer_device: Devicelike
     """Check if `peer_device` can currently access the memory pool of `target_device`.
 
     This applies to memory allocated using CUDA pooled allocators.  For memory allocated using
-    default CUDA allocators, use `is_peer_access_enabled()`.
+    default CUDA allocators, use :func:`is_peer_access_enabled()`.
 
     Returns:
         A Boolean value indicating if this peer access is currently enabled.
@@ -4263,7 +4281,7 @@ def set_mempool_access_enabled(target_device: Devicelike, peer_device: Devicelik
     """Enable or disable access from `peer_device` to the memory pool of `target_device`.
 
     This applies to memory allocated using CUDA pooled allocators.  For memory allocated using
-    default CUDA allocators, use `set_peer_access_enabled()`.
+    default CUDA allocators, use :func:`set_peer_access_enabled()`.
     """
 
     init()
@@ -5189,7 +5207,12 @@ def launch(
             kernel = kernel.add_overload(fwd_types)
 
         # delay load modules, including new overload if needed
-        module_exec = kernel.module.load(device, block_dim)
+        try:
+            module_exec = kernel.module.load(device, block_dim)
+        except Exception:
+            kernel.adj.skip_build = True
+            raise
+
         if not module_exec:
             return
 
@@ -5333,6 +5356,14 @@ def launch_tiled(*args, **kwargs):
     """
 
     # promote dim to a list in case it was passed as a scalar or tuple
+    if "dim" not in kwargs:
+        raise RuntimeError("Launch dimensions 'dim' argument should be passed via. keyword args for wp.launch_tiled()")
+
+    if "block_dim" not in kwargs:
+        raise RuntimeError(
+            "Launch block dimension 'block_dim' argument should be passed via. keyword args for wp.launch_tiled()"
+        )
+
     dim = kwargs["dim"]
     if not isinstance(dim, list):
         dim = list(dim) if isinstance(dim, tuple) else [dim]
@@ -5865,16 +5896,6 @@ def type_str(t):
         return "Any"
     elif t == Callable:
         return "Callable"
-    elif t == Tuple[int]:
-        return "Tuple[int]"
-    elif t == Tuple[int, int]:
-        return "Tuple[int, int]"
-    elif t == Tuple[int, int, int]:
-        return "Tuple[int, int, int]"
-    elif t == Tuple[int, int, int, int]:
-        return "Tuple[int, int, int, int]"
-    elif t == Tuple[int, ...]:
-        return "Tuple[int, ...]"
     elif isinstance(t, int):
         return str(t)
     elif isinstance(t, List):
@@ -5909,9 +5930,11 @@ def type_str(t):
             return f"Transformation[{type_str(t._wp_scalar_type_)}]"
 
         raise TypeError("Invalid vector or matrix dimensions")
-    elif typing.get_origin(t) in (List, Mapping, Sequence, Union, Tuple):
-        args_repr = ", ".join(type_str(x) for x in typing.get_args(t))
-        return f"{t.__name__}[{args_repr}]"
+    elif warp.codegen.get_type_origin(t) in (list, tuple):
+        args_repr = ", ".join(type_str(x) for x in warp.codegen.get_type_args(t))
+        return f"{t._name}[{args_repr}]"
+    elif t is Ellipsis:
+        return "..."
     elif warp.types.is_tile(t):
         return "Tile"
 

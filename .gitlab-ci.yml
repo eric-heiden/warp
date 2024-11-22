@@ -46,7 +46,6 @@ variables:
       - "3.10.13+nv3"
       - "3.9.18+nv1"
       - "3.8.18+nv1"
-      - "3.7.17+nv1"
     description: "The default Python version used in the main testing jobs."
 
 stages:
@@ -270,7 +269,7 @@ linux-x86_64 test:
     - $PYTHON -m venv _venv
     - source _venv/bin/activate
     - python -m pip install --upgrade pip
-    - python -m pip install --upgrade usd-core coverage[toml]
+    - python -m pip install --upgrade usd-core coverage[toml] blosc
     - python -m pip install --upgrade torch --extra-index-url https://download.pytorch.org/whl/cu121
     - python -m pip install -U "jax[cuda12]"
     - python -m pip install -e .
@@ -296,7 +295,7 @@ windows-x86_64 test:
     - '& $env:CI_PROJECT_DIR\_build\target-deps\python\python.exe -m venv _venv'
     - .\_venv\Scripts\Activate.ps1
     - python -m pip install --upgrade pip
-    - python -m pip install --upgrade usd-core coverage[toml] numpy
+    - python -m pip install --upgrade usd-core coverage[toml] numpy blosc
     - python -m pip install --upgrade torch --extra-index-url https://download.pytorch.org/whl/cu121
     - python -m pip install -e .
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
@@ -500,17 +499,6 @@ trigger python 3.X test pipelines:
     GIT_STRATEGY: none
   script:
     - echo "Run this job to test additional Python versions."
-
-
-python 3.7 test:
-  stage: child pipelines
-  needs: [trigger python 3.X test pipelines]
-  trigger:
-    include: /.gitlab/ci/additional-tests.yml
-  extends:
-    - .trigger_common
-  variables:
-    DEFAULT_PYTHON: "3.7.17+nv1"
 
 python 3.8 test:
   stage: child pipelines

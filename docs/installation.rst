@@ -25,11 +25,11 @@ the ``pip install`` command, e.g.
    * - Platform
      - Install Command
    * - Linux aarch64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-manylinux2014_aarch64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.5.0/warp_lang-1.5.0+cu11-py3-none-manylinux2014_aarch64.whl``
    * - Linux x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-manylinux2014_x86_64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.5.0/warp_lang-1.5.0+cu11-py3-none-manylinux2014_x86_64.whl``
    * - Windows x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-win_amd64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.5.0/warp_lang-1.5.0+cu11-py3-none-win_amd64.whl``
 
 The ``--force-reinstall`` option may need to be used to overwrite a previous installation.
 
@@ -67,7 +67,7 @@ To remedy the situation there are a few options:
 Dependencies
 ------------
 
-Warp supports Python versions 3.7 onwards, with 3.9 or newer recommended for full functionality. Note that :ref:`some optional dependencies may not support the latest version of Python<conda>`.
+Warp supports Python versions 3.8 onwards, with 3.9 or newer recommended for full functionality. Note that :ref:`some optional dependencies may not support the latest version of Python<conda>`.
 
 `NumPy <https://numpy.org>`_ must be installed.
 
