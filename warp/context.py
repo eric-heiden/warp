@@ -1782,7 +1782,8 @@ class ModuleExec:
                 func(runtime.llvm.lookup(self.handle.encode("utf-8"), (name + "_cpu_backward").encode("utf-8"))) or None
             )
 
-        hooks = KernelHooks(forward, backward)
+            hooks = KernelHooks(forward, backward)
+
         self.kernel_hooks[kernel.adj] = hooks
 
         self.kernel_hooks[kernel] = hooks
