@@ -1549,9 +1549,9 @@ class FeatherstoneIntegrator(Integrator):
         self.compute_articulation_indices(model)
         self.allocate_model_aux_vars(model)
 
-        if self.use_tile_gemm:
+        if self.use_tile_gemm and model.joint_count > 0:
             # create a custom kernel to evaluate the system matrix for this type
-            self.eval_inertia_matrix_kernel = create_inertia_matrix_kernel(int(self.joint_count), int(self.dof_count))
+            self.eval_inertia_matrix_kernel = create_inertia_matrix_kernel(int(model.joint_count), int(model.joint_dof_count))
 
             # ensure matrix is reloaded since otherwise an unload can happen during graph capture
             # todo: should not be necessary?
