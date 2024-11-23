@@ -872,6 +872,16 @@ def eval_particle_contacts(
             wp.atomic_add(body_f, body_index, wp.spatial_vector(wp.cross(r, f_total), f_total))
 
 
+@wp.func
+def smooth_norm(v: wp.vec3):
+    # compute Huber norm
+    delta = 0.1
+    a = wp.dot(v, v)
+
+    # Pseudo Huber Loss
+    return delta * wp.sqrt(1.0 + a / (delta * delta))
+
+
 @wp.kernel
 def eval_rigid_contacts(
     body_q: wp.array(dtype=wp.transform),
@@ -1012,16 +1022,38 @@ def eval_rigid_contacts(
     # if d < 0.0 and vtl > 1e-4:
     #     ft = wp.normalize(vt) * wp.min(kf * wp.length(vt), -mu * (fn + fd))
 
-    ft = wp.vec3(0.0)
-    fr = wp.normalize(vt)
-    # fr = wp.vec3(-1.0, 0.0, 0.0)
-    if d < 0.0:
-        ft = fr * wp.min(kf * wp.length(vt), -mu * (fn + fd))
-        # ft = fr * smooth_min(kf * wp.length(vt), -mu * (fn + fd), 1e-3)
+    # ft = wp.vec3(0.0)
+    # fr = wp.normalize(vt)
+    # ft = fr * wp.min(kf * smooth_norm(vt), -mu * fn)
+    # if d < 0.0:
+    #     # ft = fr * wp.min(kf * smooth_norm(vt), -mu * (fn + fd))
+    #     ft = fr * smooth_min(kf * smooth_norm(vt), -mu * (fn + fd), 1e-3)
+    vs = smooth_norm(vt)
 
+    # if vs > 0.0:
+    #     vt = vt / vs
+
+    # contact elastic
+    jn = d * ke
+    jd = min(vn, 0.0) * kd
+    # jd = smooth_min(vn, 0.0, 1e-2) * kd
+    # jd = vn * kd
+
+    # contact force
+    fn = jn + jd
+
+    # Coulomb condition
+    # ft = wp.vec3(0.0, 0.0, 0.0)
+    # if vs > -100.0:
+    # ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
+    # ft = wp.normalize(vt) * kf * vs
+    # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
+
+    # Equation 18 from ADD
+    ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
 
     f_total = n * (fn + fd) + ft
-    # f_total = n * fn
+    # f_total = n * fn + ft
 
     if body_a >= 0:
         if force_in_world_frame:
@@ -1036,15 +1068,6 @@ def eval_rigid_contacts(
             wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
 
 
-@wp.func
-def smooth_norm(v: wp.vec3):
-    # compute Huber norm
-    # return wp.sqrt(wp.dot(v, v) + 1.0) - 1.0
-    delta = 0.1
-    a = wp.dot(v, v)
-
-    # Pseudo Huber Loss
-    return delta * wp.sqrt(1.0 + a / (delta * delta))
 
 
 @wp.kernel
@@ -1115,6 +1138,7 @@ def eval_rigid_ground_contacts(
     # contact elastic
     jn = c * ke
     jd = min(vn, 0.0) * kd
+    # jd = smooth_min(vn, 0.0, 1e-2) * kd
     # jd = vn * kd
 
     # contact force
@@ -1123,20 +1147,24 @@ def eval_rigid_ground_contacts(
     # Coulomb condition
     ft = wp.vec3(0.0, 0.0, 0.0)
     # if vs > -100.0:
-    ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
+    # ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
+    # ft = wp.normalize(vt) * kf * vs
     # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
+
+    # Equation 18 from ADD
+    ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
     # ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 1e-2)
     # else:
-    #     lower = mu * fn
-    #     upper = -lower
+    # lower = mu * fn
+    # upper = -lower
 
-    #     nx = wp.cross(n, wp.vec3(0.0, 0.0, 1.0))  # basis vectors for tangent
-    #     nz = wp.cross(n, wp.vec3(1.0, 0.0, 0.0))
+    # nx = wp.cross(n, wp.vec3(0.0, 0.0, 1.0))  # basis vectors for tangent
+    # nz = wp.cross(n, wp.vec3(1.0, 0.0, 0.0))
 
-    #     vx = wp.clamp(wp.dot(nx * kf, vt), lower, upper)
-    #     vz = wp.clamp(wp.dot(nz * kf, vt), lower, upper)
+    # vx = wp.clamp(wp.dot(nx * kf, vt), lower, upper)
+    # vz = wp.clamp(wp.dot(nz * kf, vt), lower, upper)
 
-    #     ft = (nx * vx + nz * vz) * (-wp.step(c))  # wp.vec3(vx, 0.0, vz)*wp.step(c)
+    # ft = (nx * vx + nz * vz) * (-wp.step(c))  # wp.vec3(vx, 0.0, vz)*wp.step(c)
 
     f_total = n * fn + ft
 
@@ -2053,7 +2081,7 @@ def compute_forces(model: Model, state: State, control: Control, particle_f: wp.
     eval_body_joint_forces(model, state, control, body_f)
 
     # particle-particle interactions
-    eval_particle_forces(model, state, particle_f)
+    # eval_particle_forces(model, state, particle_f)
 
     # particle ground contacts
     eval_particle_ground_contact_forces(model, state, particle_f)
