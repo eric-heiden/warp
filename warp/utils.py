@@ -977,7 +977,7 @@ def timing_end(synchronize=True):
         filter = r.filter
         elapsed = r.elapsed
 
-        name = r.name.decode()
+        name = r.name.decode(errors="ignore")
         if filter == TIMING_KERNEL:
             if name.endswith("forward"):
                 # strip trailing "_cuda_kernel_forward"
