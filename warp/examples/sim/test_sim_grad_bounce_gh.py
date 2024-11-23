@@ -5,6 +5,8 @@ import warp.optim
 import warp.sim.render
 import matplotlib.pyplot as plt
 
+from warp.utils import coerce_float64_types
+
 USD_FILE = "./ball_bounce_simple.usd"
 
 
@@ -15,9 +17,10 @@ def ball_world_model(gravity: bool = True) -> wp.sim.Model:
         builder = wp.sim.ModelBuilder(gravity=0.0, up_vector=wp.vec3(0, 0, 1), separate_ground_contacts=True)
 
     b = builder.add_body(origin=wp.transform((0.5, 0.0, 1.0), wp.quat_identity()), name="ball")
-    builder.add_shape_sphere(body=b, radius=0.1, density=100.0, ke=2000.0, kd=0.0, kf=200.0, mu=0.2, thickness=0.01)
-    builder.set_ground_plane(ke=1000, kd=0.0, kf=0.0, mu=0.2)
+    builder.add_shape_sphere(body=b, radius=0.1, density=100.0, ke=2000.0, kd=10.0, kf=200.0, mu=0.2, thickness=0.01)
+    builder.set_ground_plane(ke=10, kd=10, kf=0.0, mu=0.2)
     model = builder.finalize(requires_grad=True)
+    model.rigid_contact_margin = 10.0
 
     return model
 
@@ -44,7 +47,7 @@ class BallBounceOptim:
         # Simulation and rendering parameters
         self.fps = 30
         self.num_frames = 60
-        self.sim_substeps = 10
+        self.sim_substeps = 20
         self.frame_dt = 1.0 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_duration = self.num_frames * self.frame_dt
@@ -55,6 +58,7 @@ class BallBounceOptim:
 
         self.integrator = wp.sim.SemiImplicitIntegrator()
         # self.integrator = wp.sim.FeatherstoneIntegrator(self.model)
+        self.renderer = None
         # self.renderer = wp.sim.render.SimRendererOpenGL(self.model, USD_FILE, scaling=1.0)
 
         self.loss = wp.array([0], dtype=wp.float32, requires_grad=True)
@@ -91,9 +95,10 @@ class BallBounceOptim:
             self.integrator.simulate(self.model, curr_state, next_state, self.sim_dt)
             wp.launch(kernel=update_trajectory_kernel, dim=1, inputs=[self.trajectory, curr_state.body_q, i, 0])
 
-            # self.renderer.begin_frame(self.time[i])
-            # self.renderer.render(curr_state)
-            # self.renderer.end_frame()
+            if self.renderer:
+                self.renderer.begin_frame(self.time[i])
+                self.renderer.render(curr_state)
+                self.renderer.end_frame()
 
     def step(self, force: wp.array):
         self.tape = wp.Tape()
@@ -168,4 +173,6 @@ def ball_bounce_optimization():
 
 
 if __name__ == "__main__":
-    ball_bounce_optimization()
+    # ball_bounce_optimization()
+    with coerce_float64_types():
+        ball_bounce_optimization()
