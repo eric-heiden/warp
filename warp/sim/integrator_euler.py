@@ -1151,12 +1151,27 @@ def eval_rigid_ground_contacts(
     # ft = wp.normalize(vt) * kf * vs
     # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
 
+    # if wp.length_sq(vt) > 0.0:
+
     # Equation 18 from ADD
-    ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
-    # ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 1e-2)
+    # ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
+    ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 1e-2)
+    # ft = wp.normalize(vt) * min(kf * vs, -mu * fn)
     # else:
     # lower = mu * fn
     # upper = -lower
+    if False:
+        eps = 0.5  # velocity magnitude bound below which sliding velocities are treated as static
+        h = 1.0 / 30.0 / 20.0  # time step
+        # Eq. 13 from IPC paper
+        # if vs < h * eps:
+        #     f1 = -vs*vs / (eps*eps*h*h) + 2.0 * vs / (eps*h)
+        # else:
+        #     f1 = 1.0
+        f1 = 1.0
+        ft = -mu * fn * f1 * wp.normalize(vt)
+
+    # wp.printf("ft: %f %f %f\n", ft[0], ft[1], ft[2])
 
     # nx = wp.cross(n, wp.vec3(0.0, 0.0, 1.0))  # basis vectors for tangent
     # nz = wp.cross(n, wp.vec3(1.0, 0.0, 0.0))

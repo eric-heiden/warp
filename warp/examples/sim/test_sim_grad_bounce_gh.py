@@ -65,7 +65,7 @@ class BallBounceOptim:
         self.states = [self.model.state() for _ in range(self.sim_steps + 1)]
         self.target_states = [self.model.state() for _ in range(self.sim_steps + 1)]
 
-        self.target_force = wp.array([0.0, 0.0, 0.0, 100.0, 0.0, 0.0], dtype=wp.spatial_vectorf)
+        self.target_force = wp.array([0.0, 0.0, 0.0, 0.0, 100.0, 0.0], dtype=wp.spatial_vectorf)
 
         self.trajectory = wp.empty(len(self.time), dtype=wp.vec3, requires_grad=True)
         self.target_trajectory = wp.empty(len(self.time), dtype=wp.vec3)
@@ -111,9 +111,9 @@ class BallBounceOptim:
                 inputs=[self.trajectory, self.target_trajectory, self.loss],
             )
         self.tape.backward(self.loss)
-        force_grad = force.grad.numpy()[0, 3]
+        force_grad = force.grad.numpy()[0, 4]
         self.tape.zero()
-        print(f"Gradient: {force_grad}")
+        print(f"Gradient: {force_grad}\t\tLoss: {self.loss.numpy()[0]}")
 
         return self.loss.numpy()[0], force_grad
 
@@ -124,7 +124,7 @@ class BallBounceOptim:
 
         for i, fx in enumerate(forces):
             print(f"Iteration {i}")
-            force = wp.array([[0.0, 0.0, 0.0, fx, 0.0, 0.0]], dtype=wp.spatial_vectorf, requires_grad=True)
+            force = wp.array([[0.0, 0.0, 0.0, 0.0, fx, 0.0]], dtype=wp.spatial_vectorf, requires_grad=True)
             losses[i], grads[i] = self.step(force)
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -136,7 +136,7 @@ class BallBounceOptim:
         ax1.set_title("Loss vs Force")
         ax1.legend()
 
-        # Make sure that that grads are not too large
+        # Make sure the grads are not too large
         grads = np.clip(grads, -1e4, 1e4)
 
         # Plot the gradient curve
@@ -173,6 +173,6 @@ def ball_bounce_optimization():
 
 
 if __name__ == "__main__":
-    # ball_bounce_optimization()
-    with coerce_float64_types():
-        ball_bounce_optimization()
+    ball_bounce_optimization()
+    # with coerce_float64_types():
+    #     ball_bounce_optimization()
