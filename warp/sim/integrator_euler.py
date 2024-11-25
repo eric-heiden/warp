@@ -921,45 +921,54 @@ def eval_rigid_contacts(
         return
     body_a = -1
     body_b = -1
-    if shape_a >= 0:
-        mat_nonzero += 1
-        ke += shape_materials.ke[shape_a]
-        kd += shape_materials.kd[shape_a]
-        kf += shape_materials.kf[shape_a]
-        ka += shape_materials.ka[shape_a]
-        mu += shape_materials.mu[shape_a]
-        thickness_a = geo.thickness[shape_a]
-        body_a = shape_body[shape_a]
+    # if shape_a >= 0:
+    #     mat_nonzero += 1
+    #     ke += shape_materials.ke[shape_a]
+    #     kd += shape_materials.kd[shape_a]
+    #     kf += shape_materials.kf[shape_a]
+    #     ka += shape_materials.ka[shape_a]
+    #     mu += shape_materials.mu[shape_a]
+    #     thickness_a = geo.thickness[shape_a]
+    #     body_a = shape_body[shape_a]
     if shape_b >= 0:
-        mat_nonzero += 1
-        ke += shape_materials.ke[shape_b]
-        kd += shape_materials.kd[shape_b]
-        kf += shape_materials.kf[shape_b]
-        ka += shape_materials.ka[shape_b]
-        mu += shape_materials.mu[shape_b]
+    #     mat_nonzero += 1
+    #     ke += shape_materials.ke[shape_b]
+    #     kd += shape_materials.kd[shape_b]
+    #     kf += shape_materials.kf[shape_b]
+    #     ka += shape_materials.ka[shape_b]
+    #     mu += shape_materials.mu[shape_b]
         thickness_b = geo.thickness[shape_b]
         body_b = shape_body[shape_b]
-    if mat_nonzero > 0:
-        ke /= float(mat_nonzero)
-        kd /= float(mat_nonzero)
-        kf /= float(mat_nonzero)
-        ka /= float(mat_nonzero)
-        mu /= float(mat_nonzero)
+    # if mat_nonzero > 0:
+    #     ke /= float(mat_nonzero)
+    #     kd /= float(mat_nonzero)
+    #     kf /= float(mat_nonzero)
+    #     ka /= float(mat_nonzero)
+    #     mu /= float(mat_nonzero)
+    ke = shape_materials.ke[shape_a]
+    kd = shape_materials.kd[shape_a]
+    kf = shape_materials.kf[shape_a]
+    ka = shape_materials.ka[shape_a]
+    mu = shape_materials.mu[shape_a]
+    thickness_a = geo.thickness[shape_a]
+    body_a = shape_body[shape_a]
 
     # contact normal in world space
     n = contact_normal[tid]
+
+    # n = wp.vec3(0.0, 0.0, 1.0)
     bx_a = contact_point0[tid]
     bx_b = contact_point1[tid]
     if body_a >= 0:
         X_wb_a = body_q[body_a]
         X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness_a * n
+        bx_a = wp.transform_point(X_wb_a, bx_a) #- thickness_a * n
         r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
     if body_b >= 0:
         X_wb_b = body_q[body_b]
         X_com_b = body_com[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) + thickness_b * n
+        bx_b = wp.transform_point(X_wb_b, bx_b) #+ thickness_b * n
         r_b = bx_b - wp.transform_point(X_wb_b, X_com_b)
 
     d = wp.dot(n, bx_a - bx_b)
@@ -996,12 +1005,13 @@ def eval_rigid_contacts(
     # decompose relative velocity
     vn = wp.dot(n, v)
     vt = v - n * vn
+    # wp.printf("v: %f %f %f   vt: %f %f %f\n", v[0], v[1], v[2], vt[0], vt[1], vt[2])
 
     # contact elastic
     fn = d * ke
 
     # contact damping
-    fd = wp.min(vn, 0.0) * kd * wp.step(d)
+    # fd = wp.min(vn, 0.0) * kd * wp.step(d)
 
     # viscous friction
     # ft = vt*kf
@@ -1030,6 +1040,8 @@ def eval_rigid_contacts(
     #     ft = fr * smooth_min(kf * smooth_norm(vt), -mu * (fn + fd), 1e-3)
     vs = smooth_norm(vt)
 
+    wp.printf("vs: %f\n", vs)
+
     # if vs > 0.0:
     #     vt = vt / vs
 
@@ -1043,17 +1055,28 @@ def eval_rigid_contacts(
     fn = jn + jd
 
     # Coulomb condition
-    # ft = wp.vec3(0.0, 0.0, 0.0)
+    ft = wp.vec3(0.0, 0.0, 0.0)
     # if vs > -100.0:
     # ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
     # ft = wp.normalize(vt) * kf * vs
-    # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
+    ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
+
+    # eps = 1.0  # velocity magnitude bound below which sliding velocities are treated as static
+    # h = 1.0 / 30.0 #/ 20.0  # time step
+    # # Eq. 13 from IPC (Li et al. 2020) https://ipc-sim.github.io/file/IPC-paper-fullRes.pdf
+    # if vs < h * eps:
+    #     f1 = -vs*vs / (eps*eps*h*h) + 2.0 * vs / (eps*h)
+    # else:
+    #     f1 = 1.0
+
+    # f1 = 1.0
+    # ft = -mu * fn * f1 * wp.normalize(vt)
 
     # Equation 18 from ADD
-    ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
+    # ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
 
-    f_total = n * (fn + fd) + ft
-    # f_total = n * fn + ft
+    # f_total = n * (fn + fd) #+ ft
+    f_total = n * fn + ft
 
     if body_a >= 0:
         if force_in_world_frame:
@@ -1066,8 +1089,6 @@ def eval_rigid_contacts(
             wp.atomic_sub(body_f, body_b, wp.spatial_vector(wp.cross(bx_b, f_total), f_total))
         else:
             wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
-
-
 
 
 @wp.kernel
@@ -1105,7 +1126,6 @@ def eval_rigid_ground_contacts(
     X_com_a = body_com[body_a]
     bx_a = wp.transform_point(X_wb_a, bx_a) - thickness * n
     r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
-
 
     c = wp.min(wp.dot(n, bx_a) + ground[3], 0.0)
 
@@ -1147,29 +1167,27 @@ def eval_rigid_ground_contacts(
     # Coulomb condition
     ft = wp.vec3(0.0, 0.0, 0.0)
     # if vs > -100.0:
-    # ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
+    wp.printf("v: %f %f %f    vt: %f %f %f\n", v[0], v[1], v[2], vt[0], vt[1], vt[2])
+    ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
     # ft = wp.normalize(vt) * kf * vs
     # ft = wp.normalize(vt) * leaky_min(kf * vs, -mu * fn)
 
-    # if wp.length_sq(vt) > 0.0:
-
     # Equation 18 from ADD
     # ft = mu * fn * wp.tanh(kf * vs / (mu * fn)) * wp.normalize(vt)
-    ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 1e-2)
+    # ft = wp.normalize(vt) * smooth_min(kf * vs, -mu * fn, 0.5)
     # ft = wp.normalize(vt) * min(kf * vs, -mu * fn)
+
+    # eps = 1.0  # velocity magnitude bound below which sliding velocities are treated as static
+    # h = 1.0 / 30.0 #/ 20.0  # time step
+    # # Eq. 13 from IPC (Li et al. 2020) https://ipc-sim.github.io/file/IPC-paper-fullRes.pdf
+    # if vs < h * eps:
+    #     f1 = -vs*vs / (eps*eps*h*h) + 2.0 * vs / (eps*h)
     # else:
-    # lower = mu * fn
-    # upper = -lower
-    if False:
-        eps = 0.5  # velocity magnitude bound below which sliding velocities are treated as static
-        h = 1.0 / 30.0 / 20.0  # time step
-        # Eq. 13 from IPC paper
-        # if vs < h * eps:
-        #     f1 = -vs*vs / (eps*eps*h*h) + 2.0 * vs / (eps*h)
-        # else:
-        #     f1 = 1.0
-        f1 = 1.0
-        ft = -mu * fn * f1 * wp.normalize(vt)
+    #     f1 = 1.0
+
+    # # f1 = 1.0
+    # ft = -mu * fn * f1 * wp.normalize(vt)
+    # # ft = min(kf * vs, -mu * fn) * f1 * wp.normalize(vt)
 
     # wp.printf("ft: %f %f %f\n", ft[0], ft[1], ft[2])
 
@@ -1187,6 +1205,7 @@ def eval_rigid_ground_contacts(
         wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
     else:
         wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
+
 
 @wp.func
 def eval_joint_force(

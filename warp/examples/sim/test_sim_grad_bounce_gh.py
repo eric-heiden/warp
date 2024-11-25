@@ -12,9 +12,9 @@ USD_FILE = "./ball_bounce_simple.usd"
 
 def ball_world_model(gravity: bool = True) -> wp.sim.Model:
     if gravity:
-        builder = wp.sim.ModelBuilder(up_vector=wp.vec3(0, 0, 1), separate_ground_contacts=True)
+        builder = wp.sim.ModelBuilder(up_vector=wp.vec3(0, 0, 1), separate_ground_contacts=False)
     else:
-        builder = wp.sim.ModelBuilder(gravity=0.0, up_vector=wp.vec3(0, 0, 1), separate_ground_contacts=True)
+        builder = wp.sim.ModelBuilder(gravity=0.0, up_vector=wp.vec3(0, 0, 1), separate_ground_contacts=False)
 
     b = builder.add_body(origin=wp.transform((0.5, 0.0, 1.0), wp.quat_identity()), name="ball")
     builder.add_shape_sphere(body=b, radius=0.1, density=100.0, ke=2000.0, kd=10.0, kf=200.0, mu=0.2, thickness=0.01)
@@ -119,6 +119,8 @@ class BallBounceOptim:
 
     def plot_loss(self):
         forces = np.linspace(0, 200, 100)
+        # forces = np.linspace(0, 200, 20)
+        forces=[0.0, 0.01, 200]
         losses = np.zeros_like(forces)
         grads = np.zeros_like(forces)
 
