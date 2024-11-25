@@ -4,9 +4,13 @@
 
 ### Added
 
+- Document `array` attributes ([GH-364](https://github.com/NVIDIA/warp/issues/364)).
+
 ### Changed
 
 ### Fixed
+
+- Fix gradient propagation for in-place addition/subtraction operations on custom vector type arrays.
 
 ## [1.5.0] - 2024-12-01
 
@@ -25,6 +29,7 @@
 - warp.sim: Added a graph coloring module that supports converting trimesh into a vertex graph and applying coloring.
   The `wp.sim.ModelBuilder` now includes options to apply graph coloring in the `add_cloth_mesh` and `add_cloth_grid` functions.
 - warp.sim: Added `collision_group` handling to particle-shape contacts.
+  The `wp.sim.ModelBuilder` now includes methods to color particles for use with `wp.sim.VBDIntegrator()`, users should call `builder.color()` before finalizing assets.
 
 ### Changed
 

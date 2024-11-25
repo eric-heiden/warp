@@ -3458,7 +3458,6 @@ class ModelBuilder:
         mass: float,
         radius: float = None,
         flags: wp.uint32 = PARTICLE_FLAG_ACTIVE,
-        collision_group: int = -1,
     ) -> int:
         """Adds a single particle to the model
 
@@ -3485,11 +3484,6 @@ class ModelBuilder:
         self.particle_flags.append(flags)
 
         particle_id = self.particle_count - 1
-
-        self.particle_collision_group.append(collision_group)
-        if collision_group not in self.particle_collision_group_map:
-            self.particle_collision_group_map[collision_group] = []
-        self.particle_collision_group_map[collision_group].append(particle_id)
 
         return particle_id
 
@@ -3871,8 +3865,6 @@ class ModelBuilder:
         add_springs: bool = False,
         spring_ke: float = default_spring_ke,
         spring_kd: float = default_spring_kd,
-        color_particles=False,
-        color_groups=None,
     ):
         """Helper to create a regular planar cloth grid
 
@@ -3893,12 +3885,6 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
-            color_particles: Whether to color particles based on their connectivity. When using `IntegratorVBD`, this
-                option must be turned on.
-            input_color_groups: A list of `np.array` objects with `dtype`=int. The length of the list is the number of colors
-                and each `np.array` contains the indices of vertices with this color. Users can provide custom coloring by setting
-                this argument. If color_particles is set to `True` and this argument is `None`, the function will apply a built-in
-                coloring algorithm to generate particle colors.
         """
 
         def grid_index(x, y, dim_x):
@@ -3991,29 +3977,6 @@ class ModelBuilder:
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0)
 
-        if color_particles:
-            if color_groups is None:
-                # ignore bending energy if it is too small
-                include_bending = edge_ke > min(tri_ke, tri_ka) * 0.01
-                edge_indices = np.fromiter(
-                    (x for e in adj.edges.values() for x in (e.o0, e.o1, e.v0, e.v1)),
-                    int,
-                ).reshape(-1, 4)
-                num_particles = (dim_x + 1) * (dim_y + 1)
-
-                coloring_algorithm = ColoringAlgorithm.GRAPH_COLOR_MCS
-
-                edge_indices_translated = edge_indices - start_vertex
-                edge_indices_translated[np.where(edge_indices == -1)] = -1
-                color_groups = color_trimesh(
-                    num_particles, edge_indices_translated, include_bending, algorithm=coloring_algorithm
-                )
-
-            # translate the indices in input_color_groups
-            color_groups = [np.array(group) + start_vertex for group in color_groups]
-
-            self.particle_coloring = combine_independent_particle_coloring(self.particle_coloring, color_groups)
-
     def add_cloth_mesh(
         self,
         pos: Vec3,
@@ -4035,8 +3998,6 @@ class ModelBuilder:
         add_springs: bool = False,
         spring_ke: float = default_spring_ke,
         spring_kd: float = default_spring_kd,
-        color_particles=False,
-        color_groups=None,
     ):
         """Helper to create a cloth model from a regular triangle mesh
 
@@ -4052,12 +4013,6 @@ class ModelBuilder:
             density: The density per-area of the mesh
             edge_callback: A user callback when an edge is created
             face_callback: A user callback when a face is created
-            color_particles: Whether to color particles based on their connectivity. When using `IntegratorVBD`, this
-                option must be turned on.
-            color_groups: A list of `np.array` objects with `dtype`=int. The length of the list is the number of colors
-                and each `np.array` contains the indices of vertices with this color. Users can provide custom coloring by setting
-                this argument. If color_particles is set to `True` and this argument is `None`, the function will apply a built-in
-                coloring algorithm to generate particle colors.
         Note:
 
             The mesh should be two manifold.
@@ -4125,25 +4080,6 @@ class ModelBuilder:
 
             for i, j in spring_indices:
                 self.add_spring(i, j, spring_ke, spring_kd, control=0.0)
-
-        if color_particles:
-            if color_groups is None:
-                # ignore bending energy if it is too small
-                include_bending = edge_ke > min(tri_ke, tri_ka) * 0.01
-
-                num_particles = len(vertices)
-                coloring_algorithm = ColoringAlgorithm.GRAPH_COLOR_MCS
-
-                edge_indices_translated = edge_indices - start_vertex
-                edge_indices_translated[np.where(edge_indices == -1)] = -1
-                color_groups = color_trimesh(
-                    num_particles, edge_indices_translated, include_bending, algorithm=coloring_algorithm
-                )
-
-            # translate the indices in input_color_groups
-            color_groups = [np.array(group) + start_vertex for group in color_groups]
-
-            self.particle_coloring = combine_independent_particle_coloring(self.particle_coloring, color_groups)
 
     def add_particle_grid(
         self,
@@ -4459,6 +4395,61 @@ class ModelBuilder:
         # disable ground collisions as they will be treated separately
         for i in range(self.shape_count - 1):
             self.shape_collision_filter_pairs.add((i, ground_id))
+
+    def set_coloring(self, particle_coloring):
+        """
+        Set coloring information with user-provided coloring.
+
+        Args:
+            particle_coloring: A list of list or `np.array` with `dtype`=`int`. The length of the list is the number of colors
+             and each list or `np.array` contains the indices of vertices with this color.
+        """
+        particle_coloring = [
+            color_group if isinstance(color_group, np.ndarray) else np.array(color_group)
+            for color_group in particle_coloring
+        ]
+        self.particle_coloring = particle_coloring
+
+    def color(
+        self,
+        include_bending=False,
+        balance_colors=True,
+        target_max_min_color_ratio=1.1,
+        coloring_algorithm=ColoringAlgorithm.MCS,
+    ):
+        """
+        Run coloring algorithm to generate coloring information.
+
+        Args:
+            include_bending_energy: Whether to consider bending energy for trimeshes in the coloring process. If set to `True`, the generated
+                graph will contain all the edges connecting o1 and o2; otherwise, the graph will be equivalent to the trimesh.
+            balance_colors: Whether to apply the color balancing algorithm to balance the size of each color
+            target_max_min_color_ratio: the color balancing algorithm will stop when the ratio between the largest color and
+                the smallest color reaches this value
+            algorithm: Value should an enum type of ColoringAlgorithm, otherwise it will raise an error. ColoringAlgorithm.mcs means using the MCS coloring algorithm,
+                while ColoringAlgorithm.ordered_greedy means using the degree-ordered greedy algorithm. The MCS algorithm typically generates 30% to 50% fewer colors
+                compared to the ordered greedy algorithm, while maintaining the same linear complexity. Although MCS has a constant overhead that makes it about twice
+                as slow as the greedy algorithm, it produces significantly better coloring results. We recommend using MCS, especially if coloring is only part of the
+                preprocessing stage.e.
+
+        Note:
+
+            References to the coloring algorithm:
+            MCS: Pereira, F. M. Q., & Palsberg, J. (2005, November). Register allocation via coloring of chordal graphs. In Asian Symposium on Programming Languages and Systems (pp. 315-329). Berlin, Heidelberg: Springer Berlin Heidelberg.
+            Ordered Greedy: Ton-That, Q. M., Kry, P. G., & Andrews, S. (2023). Parallel block Neo-Hookean XPBD using graph clustering. Computers & Graphics, 110, 1-10.
+
+        """
+        # ignore bending energy if it is too small
+        edge_indices = np.array(self.edge_indices)
+
+        self.particle_coloring = color_trimesh(
+            len(self.particle_q),
+            edge_indices,
+            include_bending,
+            algorithm=coloring_algorithm,
+            balance_colors=balance_colors,
+            target_max_min_color_ratio=target_max_min_color_ratio,
+        )
 
     def finalize(self, device=None, requires_grad=False) -> Model:
         """Convert this builder object to a concrete model for simulation.
