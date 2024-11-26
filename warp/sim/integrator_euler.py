@@ -876,7 +876,7 @@ def eval_particle_contacts(
 def smooth_norm(v: wp.vec3):
     # compute Huber norm
     a = wp.dot(v, v)
-    if wp.sqrt(a) <= 1.0:
+    if a <= 1.0:
         return 0.5 * a
     return wp.sqrt(a) - 0.5
 
@@ -1038,7 +1038,8 @@ def eval_rigid_contacts(
 
     # contact elastic
     jn = d * ke
-    jd = min(vn, 0.0) * kd
+    # jd = min(vn, 0.0) * kd
+    jd = wp.min(vn, 0.0) * kd * wp.step(d)
     # jd = smooth_min(vn, 0.0, 1e-2) * kd
     # jd = vn * kd
 
