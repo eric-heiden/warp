@@ -3313,3 +3313,6 @@ void cuda_timing_end(timing_result_t* results, int size)
 
 //#include "spline.inl"
 //#include "volume.inl"
+
+
+#include "collision/engine_collision_convex.cu.cc"
