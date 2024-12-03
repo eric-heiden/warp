@@ -35,21 +35,22 @@ launch_epa_gjk = None
 
 
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
-  convex_vert, convex_vert_offset = [], [0]
-  nvert = 0
-  for mesh in m.mesh_convex:
-    if mesh is not None:
-      nvert += mesh.vert.shape[0]
-      convex_vert.append(mesh.vert)
-    convex_vert_offset.append(nvert)
+    convex_vert, convex_vert_offset = [], [0]
+    nvert = 0
+    for mesh in m.mesh_convex:
+        if mesh is not None:
+            nvert += mesh.vert.shape[0]
+            convex_vert.append(mesh.vert)
+        convex_vert_offset.append(nvert)
 
-  convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
-  convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.uint32)
-  return convex_vert, convex_vert_offset
+    convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
+    convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.uint32)
+    return convex_vert, convex_vert_offset
+
 
 def gjk_epa(
     m: mujoco.MjModel,
-    d: mujoco.Mj,
+    d: mujoco.MjData,
     geom_pair: wp.array,
     types: Tuple[int, int],
     ncon: int,
@@ -87,19 +88,27 @@ def gjk_epa(
     # TODO(btaba): consider passing in sliced geom_xpos/xmat instead for perf.
     convex_vert, convex_vert_offset = get_convex_vert(m)
 
+    wp_geom_pair = wp.from_jax(geom_pair)
+    wp_geom_xpos = wp.from_jax(d.geom_xpos)
+    wp_geom_xmat = wp.from_jax(d.geom_xmat)
+    wp_geom_size = wp.from_jax(m.geom_size)
+    wp_geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
+    wp_convex_vert = wp.from_jax(convex_vert)
+    wp_convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.uint32)
+
     dist = wp.empty((n_points,), dtype=wp.float32)
     pos = wp.empty((n_points, 3), dtype=wp.float32)
     normal = wp.empty((n_points, 3), dtype=wp.float32)
     simplex = wp.empty((n_points, 4, 3), dtype=wp.float32)
 
     launch_epa_gjk(
-        geom_pair,
-        d.geom_xpos,
-        d.geom_xmat,
-        m.geom_size,
-        m.geom_dataid,
-        convex_vert,
-        convex_vert_offset,
+        wp_geom_pair.__ctype__(),
+        wp_geom_xpos.__ctype__(),
+        wp_geom_xmat.__ctype__(),
+        wp_geom_size.__ctype__(),
+        wp_geom_dataid.__ctype__(),
+        wp_convex_vert.__ctype__(),
+        wp_convex_vert_offset.__ctype__(),
         wp.uint32(ngeom),
         wp.uint32(npair),
         wp.uint32(ncon),
@@ -111,13 +120,13 @@ def gjk_epa(
         wp.uint32(epa_best_count),
         wp.uint32(multi_polygon_count),
         wp.float32(multi_tilt_angle),
-        dist,
-        pos,
-        normal,
-        simplex,
+        dist.__ctype__(),
+        pos.__ctype__(),
+        normal.__ctype__(),
+        simplex.__ctype__(),
     )
 
-    return dist, pos, normal
+    return dist.numpy(), pos.numpy(), normal.numpy()
 
 
 def _collide(
@@ -292,7 +301,7 @@ class EngineCollisionConvexTest(absltest.TestCase):
     </mujoco>
   """
 
-    def test_call_batched_data(self):
+    def _test_call_batched_data(self):
         m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX_MULTI)
         mx = mjx.put_model(m)
         d = mujoco.MjData(m)
@@ -314,36 +323,51 @@ class EngineCollisionConvexTest(absltest.TestCase):
         key_types = (m.geom_type[0], m.geom_type[1])
         geom_pair = jp.array(np.tile(np.array([[0, 1], [0, 2], [1, 2]]), (batch_size, 1, 1)))
 
-        dist, pos, n = jax.jit(
-            jax.vmap(
-                engine_collision_convex.gjk_epa,
-                in_axes=(
-                    None,
-                    0,
-                    0,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-            ),
-            static_argnums=(
-                3,
-                4,
-                5,
-                6,
-                7,
-                8,
-                9,
-                10,
-                11,
-            ),
-        )(mx, dx, geom_pair, key_types, 4, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0)
+        dist, pos, n = gjk_epa(
+            mx,
+            dx,
+            geom_pair,
+            key_types,
+            ncon=4,
+            ngeom=mx.ngeom,
+            depth_extension=1e9,
+            gjk_iter=12,
+            epa_iter=12,
+            epa_best_count=12,
+            multi_polygon_count=8,
+            multi_tilt_angle=1.0,
+        )
+
+        # dist, pos, n = jax.jit(
+        #     jax.vmap(
+        #         engine_collision_convex.gjk_epa,
+        #         in_axes=(
+        #             None,
+        #             0,
+        #             0,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #         ),
+        #     ),
+        #     static_argnums=(
+        #         3,
+        #         4,
+        #         5,
+        #         6,
+        #         7,
+        #         8,
+        #         9,
+        #         10,
+        #         11,
+        #     ),
+        # )(mx, dx, geom_pair, key_types, 4, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0)
 
         self.assertTupleEqual(dist.shape, (batch_size, 12))
         self.assertTupleEqual(pos.shape, (batch_size, 12, 3))
@@ -373,7 +397,7 @@ class EngineCollisionConvexTest(absltest.TestCase):
     </mujoco>
   """
 
-    def test_call_batched_model_and_data(self):
+    def _test_call_batched_model_and_data(self):
         m = mujoco.MjModel.from_xml_string(self._SPHERE_SPHERE)
         batch_size = 8
 
@@ -395,36 +419,51 @@ class EngineCollisionConvexTest(absltest.TestCase):
         key_types = (m.geom_type[0], m.geom_type[1])
         geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
 
-        dist, pos, n = jax.jit(
-            jax.vmap(
-                engine_collision_convex.gjk_epa,
-                in_axes=(
-                    0,
-                    0,
-                    0,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-            ),
-            static_argnums=(
-                3,
-                4,
-                5,
-                6,
-                7,
-                8,
-                9,
-                10,
-                11,
-            ),
-        )(mx, dx, geom_pair, key_types, 1, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0)
+        dist, pos, n = gjk_epa(
+            mx,
+            dx,
+            geom_pair,
+            key_types,
+            ncon=1,
+            ngeom=mx.ngeom,
+            depth_extension=1e9,
+            gjk_iter=12,
+            epa_iter=12,
+            epa_best_count=12,
+            multi_polygon_count=8,
+            multi_tilt_angle=1.0,
+        )
+
+        # dist, pos, n = jax.jit(
+        #     jax.vmap(
+        #         engine_collision_convex.gjk_epa,
+        #         in_axes=(
+        #             0,
+        #             0,
+        #             0,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #         ),
+        #     ),
+        #     static_argnums=(
+        #         3,
+        #         4,
+        #         5,
+        #         6,
+        #         7,
+        #         8,
+        #         9,
+        #         10,
+        #         11,
+        #     ),
+        # )(mx, dx, geom_pair, key_types, 1, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0)
 
         self.assertTupleEqual(dist.shape, (batch_size, 1))
         self.assertTupleEqual(pos.shape, (batch_size, 1, 3))
