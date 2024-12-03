@@ -345,5 +345,31 @@ extern "C"
     // graph coloring
     WP_API int graph_coloring(int num_nodes, wp::array_t<int> edges, int algorithm, wp::array_t<int> node_colors);
     WP_API float balance_coloring(int num_nodes, wp::array_t<int> edges, int num_colors, float target_max_min_ratio, wp::array_t<int> node_colors);
+
+    // MJX CUDA collision pipeline
+    WP_API void epa_gjk_device(
+        wp::array_t<wp::int32> geom_pair,
+        wp::array_t<wp::float32> geom_xpos,
+        wp::array_t<wp::float32> geom_xmat,
+        wp::array_t<wp::float32> geom_size,
+        wp::array_t<wp::int32> geom_dataid,
+        wp::array_t<wp::float32> convex_vert,
+        wp::array_t<wp::uint32> convex_vert_offset,
+        wp::uint32 ngeom,
+        wp::uint32 npair,
+        wp::uint32 ncon,
+        wp::uint32 geom_type0,
+        wp::uint32 geom_type1,
+        wp::float32 depth_extension,
+        wp::uint32 gjk_iteration_count,
+        wp::uint32 epa_iteration_count,
+        wp::uint32 epa_best_count,
+        wp::uint32 multi_polygon_count,
+        wp::float32 multi_tilt_angle,
+        // outputs
+        wp::array_t<wp::float32> dist,
+        wp::array_t<wp::float32> pos,
+        wp::array_t<wp::float32> normal,
+        wp::array_t<wp::float32> simplex);
         
 } // extern "C"
