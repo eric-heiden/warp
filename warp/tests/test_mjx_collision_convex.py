@@ -126,7 +126,7 @@ def gjk_epa(
         simplex.__ctype__(),
     )
 
-    return dist.numpy(), pos.numpy(), normal.numpy()
+    return dist.numpy(), pos.numpy(), normal.numpy()[:1]
 
 
 def _collide(
@@ -134,17 +134,17 @@ def _collide(
     assets: Optional[Dict[str, str]] = None,
     geoms: Tuple[int, int] = (0, 1),
     ncon: int = 4,
-) -> Tuple[mujoco.MjData, Tuple[wp.array, wp.array, wp.array]]:
+) -> Tuple[mujoco.MjData, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     m = mujoco.MjModel.from_xml_string(mjcf, assets or {})
+    mx = mjx.put_model(m)
     d = mujoco.MjData(m)
+    dx = mjx.put_data(m, d)
+    kinematics_jit_fn = jax.jit(mjx.kinematics)
+    dx = kinematics_jit_fn(mx, dx)
 
     key_types = (m.geom_type[geoms[0]], m.geom_type[geoms[1]])
     mujoco.mj_step(m, d)
 
-    kinematics_jit_fn = jax.jit(mjx.kinematics)
-    mx = mjx.put_model(m)
-    dx = mjx.put_data(m, d)
-    dx = kinematics_jit_fn(mx, dx)
     dist, pos, n = gjk_epa(
         mx,
         dx,
