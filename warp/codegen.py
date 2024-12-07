@@ -1307,7 +1307,7 @@ class Adjoint:
         bound_args = bound_args.arguments
 
         # if it is a user-function then build it recursively
-        if not func.is_builtin() and func not in adj.builder.functions:
+        if not func.is_builtin() and adj.builder is not None and func not in adj.builder.functions:
             adj.builder.build_function(func)
             # add custom grad, replay functions to the list of functions
             # to be built later (invalid code could be generated if we built them now)
