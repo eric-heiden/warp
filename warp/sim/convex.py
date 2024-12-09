@@ -11,6 +11,8 @@ from mujoco.mjx._src.types import Data, Model
 import warp as wp
 import warp.sim
 
+wp.config.verify_cuda = True
+
 wp.set_module_options({"enable_backward": False})
 
 mjxGEOM_PLANE = 0
@@ -22,6 +24,8 @@ mjxGEOM_CYLINDER = 5
 mjxGEOM_BOX = 6
 mjxGEOM_CONVEX = 7
 mjxGEOM_size = 8
+
+FLOAT_MIN = -1e30
 
 maxContactPointsMap = [
     # PLANE  HFIELD SPHERE CAPSULE ELLIPSOID CYLINDER BOX  CONVEX
@@ -90,14 +94,15 @@ class GeomType_CONVEX:
 def get_info(t):
     @wp.func
     def _get_info(
-        gid: wp.uint32,
+        gid: int,
         dataid: int,
         geom_xpos: wp.array(dtype=wp.vec3),
         geom_xmat: wp.array(dtype=wp.mat33),
         size: wp.vec3,
-        convex_vert_offset: wp.array(dtype=wp.uint32),
+        convex_vert_offset: wp.array(dtype=int),
     ):
         pos = geom_xpos[gid]
+        # rot = wp.transpose(geom_xmat[gid])
         rot = geom_xmat[gid]
         if wp.static(t == mjxGEOM_SPHERE):
             sphere = GeomType_SPHERE()
@@ -128,7 +133,7 @@ def gjk_support_plane(
     dir: wp.vec3,
     convex_vert: wp.array(dtype=wp.vec3),
 ):
-    local_dir = info.rot @ dir
+    local_dir = wp.transpose(info.rot) @ dir
     norm = wp.sqrt(local_dir[0] * local_dir[0] + local_dir[1] * local_dir[1])
     if norm > 0.0:
         nx = local_dir[0] / norm
@@ -164,7 +169,7 @@ def gjk_support_box(
     dir: wp.vec3,
     convex_vert: wp.array(dtype=wp.vec3),
 ):
-    local_dir = info.rot @ dir
+    local_dir = wp.transpose(info.rot) @ dir
     res = wp.cw_mul(sign(local_dir), info.size)
     support_pt = info.rot @ res + info.pos
     return wp.dot(support_pt, dir), support_pt
@@ -234,17 +239,17 @@ mat43 = wp.types.matrix(shape=(4, 3), dtype=float)
 def _gjk(type1, type2):
     @wp.func
     def __gjk(
-        env_id: wp.uint32,
-        model_id: wp.uint32,
-        g1: wp.uint32,
-        g2: wp.uint32,
-        ngeom: wp.uint32,
+        env_id: int,
+        model_id: int,
+        g1: int,
+        g2: int,
+        ngeom: int,
         geom_xpos: wp.array(dtype=wp.vec3),
         geom_xmat: wp.array(dtype=wp.mat33),
         geom_size: wp.array(dtype=wp.vec3),
         geom_dataid: wp.array(dtype=wp.int32),
         convex_vert: wp.array(dtype=wp.vec3),
-        convex_vert_offset: wp.array(dtype=wp.uint32),
+        convex_vert_offset: wp.array(dtype=int),
         gjk_iteration_count: int,
     ):
         dataid1 = -1
@@ -331,7 +336,7 @@ def _gjk(type1, type2):
 
             # Add new support point to the simplex.
             dist, simplex_i = wp.static(gjk_support(type1, type2))(info1, info2, plane[index], convex_vert)
-            simplex[i] = simplex_i
+            simplex[index] = simplex_i
             if dist < depth:
                 depth = dist
                 normal = plane[index]
@@ -353,22 +358,22 @@ def _gjk(type1, type2):
 def gjk_dense(type1, type2):
     @wp.kernel
     def _gjk_dense(
-        npair: wp.uint32,
-        nenv: wp.uint32,
-        ngeom: wp.uint32,
-        nmodel: wp.uint32,
-        geom_pair: wp.array(dtype=wp.uint32, ndim=2),
+        npair: int,
+        nenv: int,
+        ngeom: int,
+        nmodel: int,
+        geom_pair: wp.array(dtype=int, ndim=2),
         geom_xpos: wp.array(dtype=wp.vec3),
         geom_xmat: wp.array(dtype=wp.mat33),
         geom_size: wp.array(dtype=wp.vec3),
         geom_dataid: wp.array(dtype=wp.int32),
         convex_vert: wp.array(dtype=wp.vec3),
-        convex_vert_offset: wp.array(dtype=wp.uint32),
+        convex_vert_offset: wp.array(dtype=int),
         gjk_iteration_count: int,
         contact_normal: wp.array(dtype=wp.vec3),
-        d_simplex: wp.array(dtype=mat43),
+        contact_simplex: wp.array(dtype=mat43),
     ):
-        tid = wp.uint32(wp.tid())
+        tid = wp.tid()
         if tid >= npair * nenv:
             return
 
@@ -394,12 +399,12 @@ def gjk_dense(type1, type2):
             convex_vert_offset,
             gjk_iteration_count,
         )
-        d_simplex[tid] = simplex
+        contact_simplex[tid] = simplex
 
         # Align to 16 byte boundary.
-        # d_simplex[tid * 3 + 0] = simplex_f4[0]
-        # d_simplex[tid * 3 + 1] = simplex_f4[1]
-        # d_simplex[tid * 3 + 2] = simplex_f4[2]
+        # contact_simplex[tid * 3 + 0] = simplex_f4[0]
+        # contact_simplex[tid * 3 + 1] = simplex_f4[1]
+        # contact_simplex[tid * 3 + 2] = simplex_f4[2]
 
         if contact_normal:
             contact_normal[tid] = normal
@@ -407,24 +412,275 @@ def gjk_dense(type1, type2):
     return _gjk_dense
 
 
+# computes contact normal and depth
+def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, exactNegDistance=True):
+    # mat3c3 = wp.types.matrix(shape=(epa_iteration_count + 1, max_epa_best_count * 3, 3), dtype=float)
+    matc3 = wp.types.matrix(shape=(max_epa_best_count, 3), dtype=float)
+    vecc3 = wp.types.vector(max_epa_best_count * 3, dtype=float)
+
+    @wp.func
+    def __epa(
+        tid: int,
+        env_id: int,
+        model_id: int,
+        g1: int,
+        g2: int,
+        ngeom: int,
+        geom_xpos: wp.array(dtype=wp.vec3),
+        geom_xmat: wp.array(dtype=wp.mat33),
+        geom_size: wp.array(dtype=wp.vec3),
+        geom_dataid: wp.array(dtype=wp.int32),
+        convex_vert: wp.array(dtype=wp.vec3),
+        convex_vert_offset: wp.array(dtype=int),
+        depth_extension: float,
+        epa_best_count: int,
+        simplex: mat43,
+        # outputs
+        tris: wp.array(dtype=wp.vec3, ndim=2),
+        contact_normal: wp.array(dtype=wp.vec3),
+    ):
+        dataid1 = -1
+        dataid2 = -1
+        if geom_dataid:
+            dataid1 = geom_dataid[g1]
+            dataid2 = geom_dataid[g2]
+
+        size1 = geom_size[model_id * ngeom + g1]
+        size2 = geom_size[model_id * ngeom + g2]
+        tg1 = env_id * ngeom + g1
+        tg2 = env_id * ngeom + g2
+        info1 = wp.static(get_info(type1))(tg1, dataid1, geom_xpos, geom_xmat, size1, convex_vert_offset)
+        info2 = wp.static(get_info(type2))(tg2, dataid2, geom_xpos, geom_xmat, size2, convex_vert_offset)
+
+        normal = contact_normal[tid]
+
+        # Get the support. If less than 0, objects are not intersecting.
+        depth, simplex0 = wp.static(gjk_support(type1, type2))(info1, info2, normal, convex_vert)
+
+        if depth < -depth_extension:
+            # Objects are not intersecting, and we do not obtain the closest points as
+            # specified by depth_extension.
+            return wp.nan
+
+        if wp.static(exactNegDistance):
+            # Check closest points to all edges of the simplex, rather than just the
+            # face normals. This gives the exact depth/normal for the non-intersecting
+            # case.
+            for i in range(6):
+                if i < 3:
+                    i1 = 0
+                    i2 = i + 1
+                elif i < 5:
+                    i1 = 1
+                    i2 = i - 1
+                else:
+                    i1 = 2
+                    i2 = 3
+                si1 = simplex[i1]
+                si2 = simplex[i2]
+                if si1[0] != si2[0] or si1[1] != si2[1] or si1[2] != si2[2]:
+                    v = si1 - si2
+                    alpha = wp.dot(si1, v) / wp.dot(v, v)
+                    # p0 is the closest segment point to the origin.
+                    p0 = wp.clamp(alpha, 0.0, 1.0) * v - si1
+                    p0, pf = gjk_normalize(p0)
+                    if pf:
+                        depth2, _ = wp.static(gjk_support(type1, type2))(info1, info2, p0, convex_vert)
+                        if depth2 < depth:
+                            depth = depth2
+                            normal = p0
+
+        # TODO do we need to allocate p?
+        p = matc3()  # supporting points for each triangle.
+        # Distance to the origin for candidate triangles.
+        dists = vecc3()
+
+        tris[0, 0] = simplex[2]
+        tris[0, 1] = simplex[1]
+        tris[0, 2] = simplex[3]
+
+        tris[0, 3] = simplex[0]
+        tris[0, 4] = simplex[2]
+        tris[0, 5] = simplex[3]
+
+        tris[0, 6] = simplex[1]
+        tris[0, 7] = simplex[0]
+        tris[0, 8] = simplex[3]
+
+        tris[0, 9] = simplex[0]
+        tris[0, 10] = simplex[1]
+        tris[0, 11] = simplex[2]
+
+        count = 4
+        for q in range(wp.static(epa_iteration_count)):
+            for i in range(count):
+                # Loop through all triangles, and obtain distances to the origin for each
+                # new triangle candidate.
+                ti = 3 * i
+                n = wp.cross(tris[0, ti + 2] - tris[0, ti + 0], tris[0, ti + 1] - tris[0, ti + 0])
+
+                n, nf = gjk_normalize(n)
+                if not nf:
+                    for j in range(3):
+                        dists[i * 3 + j] = 2e30
+                    continue
+
+                dist, pi = wp.static(gjk_support(type1, type2))(info1, info2, n, convex_vert)
+                p[i] = pi
+                if dist < depth:
+                    depth = dist
+                    normal = n
+                # Loop through all edges, and get distance using support point p[i].
+                for j in range(3):
+                    if wp.static(exactNegDistance):
+                        # Obtain the closest point between the new triangle edge and the
+                        # origin.
+                        tqj = tris[0, ti + j]
+                        if (p[i, 0] != tqj[0]) or (p[i, 1] != tqj[1]) or (p[i, 2] != tqj[2]):
+                            v = p[i] - tris[0, ti + j]
+                            alpha = wp.dot(p[i], v) / wp.dot(v, v)
+                            p0 = wp.clamp(alpha, 0.0, 1.0) * v - p[i]
+                            p0, pf = gjk_normalize(p0)
+                            if pf:
+                                dist2, v = wp.static(gjk_support(type1, type2))(info1, info2, p0, convex_vert)
+                                if dist2 < depth:
+                                    depth = dist2
+                                    normal = p0
+
+                    plane = wp.cross(p[i] - tris[0, ti + j], tris[0, ti + ((j + 1) % 3)] - tris[0, ti + j])
+                    plane, pf = gjk_normalize(plane)
+                    if pf:
+                        d = wp.dot(plane, tris[0, ti + j])
+                    else:
+                        d = 1e30
+
+                    if (d < 0 and depth >= 0) or (
+                        tris[0, ti + ((j + 2) % 3)].x == p[i][0]
+                        and tris[0, ti + ((j + 2) % 3)].y == p[i][1]
+                        and tris[0, ti + ((j + 2) % 3)].z == p[i][2]
+                    ):
+                        dists[i * 3 + j] = 1e30
+                    else:
+                        dists[i * 3 + j] = d
+
+            prevCount = count
+            count = wp.min(count * 3, epa_best_count)
+
+            # Expand the polytope greedily.
+            for j in range(count):
+                bestIndex = int(0)
+                d = float(dists[0])
+                for i in range(1, 3 * prevCount):
+                    if dists[i] < d:
+                        d = dists[i]
+                        bestIndex = i
+
+                dists[bestIndex] = 2e30
+
+                parentIndex = bestIndex // 3
+                childIndex = bestIndex % 3
+                tris[1, j * 3 + 0] = tris[0, parentIndex * 3 + childIndex]
+                tris[1, j * 3 + 1] = tris[0, parentIndex * 3 + ((childIndex + 1) % 3)]
+                tris[1, j * 3 + 2] = p[parentIndex]
+
+            for r in range(max_epa_best_count * 3):
+                # swap tris
+                swap = tris[1, r]
+                tris[1, r] = tris[0, r]
+                tris[0, r] = swap
+
+        contact_normal[tid] = normal
+
+        return depth
+
+    return __epa
+
+
+def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
+    @wp.kernel
+    def _epa_dense(
+        npair: int,
+        nenv: int,
+        ngeom: int,
+        nmodel: int,
+        ncon: int,
+        geom_pair: wp.array(dtype=int, ndim=2),
+        geom_xpos: wp.array(dtype=wp.vec3),
+        geom_xmat: wp.array(dtype=wp.mat33),
+        geom_size: wp.array(dtype=wp.vec3),
+        geom_dataid: wp.array(dtype=wp.int32),
+        convex_vert: wp.array(dtype=wp.vec3),
+        convex_vert_offset: wp.array(dtype=int),
+        contact_simplex: wp.array(dtype=mat43),
+        depth_extension: float,
+        epa_best_count: int,
+        # outputs
+        tris: wp.array(dtype=wp.vec3, ndim=2),
+        contact_dist: wp.array(dtype=float),
+        contact_normal: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        if tid >= npair * nenv:
+            return
+
+        pair_id = tid % npair
+        env_id = tid / npair
+        model_id = env_id % nmodel
+
+        g1 = geom_pair[pair_id, 0]
+        g2 = geom_pair[pair_id, 1]
+        if g1 < 0 or g2 < 0:
+            return
+
+        simplex = contact_simplex[tid]
+        depth = wp.static(_epa(type1, type2, epa_iteration_count, max_epa_best_count))(
+            tid,
+            env_id,
+            model_id,
+            g1,
+            g2,
+            ngeom,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            depth_extension,
+            epa_best_count,
+            simplex,
+            # outputs
+            tris,
+            contact_normal,
+        )
+
+        if wp.isnan(depth) or depth < -depth_extension:
+            return
+
+        for i in range(ncon):
+            contact_dist[tid * ncon + i] = -depth
+
+    return _epa_dense
+
+
 def gjk_epa_dense(
-    geom_pair: wp.array(dtype=wp.uint32),
+    geom_pair: wp.array(dtype=int),
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_xmat: wp.array(dtype=wp.mat33),
     geom_size: wp.array(dtype=wp.vec3),
     geom_dataid: wp.array(dtype=wp.int32),
     convex_vert: wp.array(dtype=wp.vec3),
-    convex_vert_offset: wp.array(dtype=wp.uint32),
-    ngeom: wp.uint32,
-    npair: wp.uint32,
-    ncon: wp.uint32,
+    convex_vert_offset: wp.array(dtype=int),
+    ngeom: int,
+    npair: int,
+    ncon: int,
     geom_type0: int,
     geom_type1: int,
     depth_extension: wp.float32,
-    gjk_iteration_count: wp.uint32,
-    epa_iteration_count: wp.uint32,
-    epa_best_count: wp.uint32,
-    multi_polygon_count: wp.uint32,
+    gjk_iteration_count: int,
+    epa_iteration_count: int,
+    epa_best_count: int,
+    multi_polygon_count: int,
     multi_tilt_angle: wp.float32,
     # outputs
     dist: wp.array(dtype=wp.float32),
@@ -437,7 +693,7 @@ def gjk_epa_dense(
     for i in range(geom_xpos.ndim):
         nenv *= geom_xpos.shape[i]
 
-    nenv //= int(ngeom)
+    nenv //= ngeom
     if nenv == 0:
         raise RuntimeError("Batch size of mjx.Data calculated in LaunchKernel_GJK_EPA " "is 0.")
 
@@ -446,7 +702,7 @@ def gjk_epa_dense(
     for i in range(geom_size.ndim):
         nmodel *= geom_size.shape[i]
 
-    nmodel //= int(ngeom)
+    nmodel //= ngeom
     if nmodel == 0:
         raise RuntimeError("Batch size of mjx.Model calculated in LaunchKernel_GJK_EPA " "is 0.")
 
@@ -456,21 +712,21 @@ def gjk_epa_dense(
             "batch size of mjx.Data in LaunchKernel_GJK_EPA."
         )
 
-    if len(geom_dataid) != int(ngeom):
+    if len(geom_dataid) != ngeom:
         raise RuntimeError("Dimensions of geom_dataid in LaunchKernel_GJK_EPA " "do not match (ngeom,).")
 
     # gjk_epa_init
     dist.fill_(1e12)
 
-    grid_size = npair * wp.uint32(nenv)
+    grid_size = npair * nenv
     wp.launch(
         gjk_dense(geom_type0, geom_type1),
         dim=grid_size,
         inputs=[
             npair,
-            wp.uint32(nenv),
+            nenv,
             ngeom,
-            wp.uint32(nmodel),
+            nmodel,
             geom_pair,
             geom_xpos,
             geom_xmat,
@@ -487,9 +743,47 @@ def gjk_epa_dense(
         device=geom_pair.device,
     )
 
+    print("normal:")
     print(normal.numpy())
+    print("simplex:")
     print(simplex.numpy())
     print()
+
+    max_epa_best_count = 12
+
+    tris = wp.empty(
+        (2, max_epa_best_count * 3),
+        dtype=wp.vec3,
+        device=geom_pair.device,
+    )
+
+    wp.launch(
+        epa_dense(geom_type0, geom_type1, epa_iteration_count, max_epa_best_count),
+        dim=grid_size,
+        inputs=[
+            npair,
+            nenv,
+            ngeom,
+            nmodel,
+            ncon,
+            geom_pair,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            simplex,
+            depth_extension,
+            epa_best_count,
+        ],
+        outputs=[
+            tris,
+            dist,
+            normal,
+        ],
+        device=geom_pair.device,
+    )
 
 
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
@@ -509,7 +803,7 @@ def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
 def gjk_epa(
     m: mujoco.MjModel,
     d: mujoco.MjData,
-    geom_pair: wp.array,
+    geom_pair: jax.Array,
     types: Tuple[int, int],
     ncon: int,
     ngeom: int,
@@ -546,13 +840,13 @@ def gjk_epa(
     # TODO(btaba): consider passing in sliced geom_xpos/xmat instead for perf.
     convex_vert, convex_vert_offset = get_convex_vert(m)
 
-    wp_geom_pair = wp.from_jax(geom_pair, dtype=wp.uint32)
+    wp_geom_pair = wp.from_jax(geom_pair.astype(int), dtype=wp.int32)
     wp_geom_xpos = wp.from_jax(d.geom_xpos, dtype=wp.vec3)
     wp_geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33)
     wp_geom_size = wp.from_jax(m.geom_size, dtype=wp.vec3)
     wp_geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
     wp_convex_vert = wp.from_jax(convex_vert.reshape(-1, 3), dtype=wp.vec3)
-    wp_convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.uint32)
+    wp_convex_vert_offset = wp.from_jax(convex_vert_offset.astype(int), dtype=wp.int32)
 
     dist = wp.empty((n_points,), dtype=wp.float32)
     pos = wp.empty((n_points,), dtype=wp.vec3)
@@ -567,16 +861,16 @@ def gjk_epa(
         wp_geom_dataid,
         wp_convex_vert,
         wp_convex_vert_offset,
-        wp.uint32(ngeom),
-        wp.uint32(npair),
-        wp.uint32(ncon),
+        ngeom,
+        npair,
+        ncon,
         types[0],
         types[1],
         wp.float32(depth_extension),
-        wp.uint32(gjk_iter),
-        wp.uint32(epa_iter),
-        wp.uint32(epa_best_count),
-        wp.uint32(multi_polygon_count),
+        gjk_iter,
+        epa_iter,
+        epa_best_count,
+        multi_polygon_count,
         wp.float32(multi_tilt_angle),
         dist,
         pos,
