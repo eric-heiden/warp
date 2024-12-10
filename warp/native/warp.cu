@@ -3316,3 +3316,4 @@ void cuda_timing_end(timing_result_t* results, int size)
 
 
 #include "collision/engine_collision_convex.cu.cc"
+#include "collision/engine_broad_phase.cu.cc"

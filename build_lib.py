@@ -118,7 +118,7 @@ def find_cuda_sdk():
 
 
 def find_libmathdx():
-    libmathdx_path = os.environ.get("LIBMATHDX_HOME")
+    libmathdx_path = None #os.environ.get("LIBMATHDX_HOME")
 
     if libmathdx_path:
         print(f"Using libmathdx path '{libmathdx_path}' provided through the 'LIBMATHDX_HOME' environment variable")
@@ -190,7 +190,7 @@ else:
 
     # libmathdx needs to be used with a build of Warp that supports CUDA
     if not args.libmathdx_path and args.cuda_path:
-        args.libmathdx_path = find_libmathdx()
+        args.libmathdx_path = None # find_libmathdx()
 
 # setup MSVC and WinSDK paths
 if platform.system() == "Windows":
