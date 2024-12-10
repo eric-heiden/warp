@@ -26,18 +26,11 @@ mjxGEOM_CONVEX = 7
 mjxGEOM_size = 8
 
 FLOAT_MIN = -1e30
+FLOAT_MAX = 1e30
 
-maxContactPointsMap = [
-    # PLANE  HFIELD SPHERE CAPSULE ELLIPSOID CYLINDER BOX  CONVEX
-    [0, 0, 1, 2, 1, 3, 4, 4],  # PLANE
-    [0, 0, 1, 2, 1, 3, 4, 4],  # HFIELD
-    [0, 0, 1, 1, 1, 1, 1, 4],  # SPHERE
-    [0, 0, 0, 1, 1, 2, 2, 2],  # CAPSULE
-    [0, 0, 0, 0, 1, 1, 1, 1],  # ELLIPSOID
-    [0, 0, 0, 0, 0, 3, 3, 3],  # CYLINDER
-    [0, 0, 0, 0, 0, 0, 4, 4],  # BOX
-    [0, 0, 0, 0, 0, 0, 0, 4],  # CONVEX
-]
+kGjkMultiContactCount = 4
+kMaxEpaBestCount = 12
+kMaxMultiPolygonCount = 8
 
 
 @wp.struct
@@ -213,15 +206,15 @@ def gjk_normalize(a: wp.vec3):
 
 
 @wp.func
-def orthonormal(normal: wp.vec3, dir: wp.vec3):
+def orthonormal(normal: wp.vec3):
     if wp.abs(normal[0]) < wp.abs(normal[1]) and wp.abs(normal[0]) < wp.abs(normal[2]):
-        dir = wp.vec3(1.0 - normal[0] * normal[0], -normal[0] * normal.y, -normal[0] * normal[2])
+        dir = wp.vec3(1.0 - normal[0] * normal[0], -normal[0] * normal[1], -normal[0] * normal[2])
     elif wp.abs(normal[1]) < wp.abs(normal[2]):
         dir = wp.vec3(-normal[1] * normal[0], 1.0 - normal[1] * normal[1], -normal[1] * normal[2])
     else:
         dir = wp.vec3(-normal[2] * normal[0], -normal[2] * normal[1], 1.0 - normal[2] * normal[2])
-    norm, _ = gjk_normalize(dir)
-    return norm
+    dir, _ = gjk_normalize(dir)
+    return dir
 
 
 @wp.func
@@ -278,7 +271,7 @@ def _gjk(type1, type2):
             normal = dir_n
 
         sd = wp.normalize(simplex0 - simplex1)
-        dir = orthonormal(sd, dir)
+        dir = orthonormal(sd)
 
         dist_max, simplex3 = wp.static(gjk_support(type1, type2))(info1, info2, dir, convex_vert)
         # Initialize a 2-simplex with simplex[2]==simplex[1]. This ensures the
@@ -555,9 +548,9 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
                         d = 1e30
 
                     if (d < 0 and depth >= 0) or (
-                        tris[0, ti + ((j + 2) % 3)].x == p[i][0]
-                        and tris[0, ti + ((j + 2) % 3)].y == p[i][1]
-                        and tris[0, ti + ((j + 2) % 3)].z == p[i][2]
+                        tris[0, ti + ((j + 2) % 3)][0] == p[i][0]
+                        and tris[0, ti + ((j + 2) % 3)][1] == p[i][1]
+                        and tris[0, ti + ((j + 2) % 3)][2] == p[i][2]
                     ):
                         dists[i * 3 + j] = 1e30
                     else:
@@ -661,6 +654,386 @@ def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
             contact_dist[tid * ncon + i] = -depth
 
     return _epa_dense
+
+
+def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount):
+    mat3c = wp.types.matrix(shape=(kMaxMultiPolygonCount, 3), dtype=float)
+
+    @wp.func
+    def __get_multiple_contacts(
+        tid: int,
+        env_id: int,
+        model_id: int,
+        g1: int,
+        g2: int,
+        ngeom: int,
+        ncon: int,
+        geom_xpos: wp.array(dtype=wp.vec3),
+        geom_xmat: wp.array(dtype=wp.mat33),
+        geom_size: wp.array(dtype=wp.vec3),
+        geom_dataid: wp.array(dtype=wp.int32),
+        convex_vert: wp.array(dtype=wp.vec3),
+        convex_vert_offset: wp.array(dtype=int),
+        depth_extension: float,
+        multi_polygon_count: int,
+        multi_tilt_angle: float,
+        depth: float,
+        normal: wp.vec3,
+        # outputs
+        contact_pos: wp.array(dtype=wp.vec3),
+    ):
+        # Calculates multiple contact points given the normal from EPA.
+        #  1. Calculates the polygon on each shape by tiling the normal
+        #     "multi_tilt_angle" degrees in the orthogonal componenet of the normal.
+        #     The "multi_tilt_angle" can be changed to depend on the depth of the
+        #     contact, in a future version.
+        #  2. The normal is tilted "multi_polygon_count" times in the directions evenly
+        #    spaced in the orthogonal component of the normal.
+        #    (works well for >= 6, default is 8).
+        #  3. The intersection between these two polygons is calculated in 2D space
+        #    (complement to the normal). If they intersect, extreme points in both
+        #    directions are found. This can be modified to the extremes in the
+        #    direction of eigenvectors of the variance of points of each polygon. If
+        #    they do not intersect, the closest points of both polygons are found.
+        if geom_dataid:
+            dataid1 = geom_dataid[g1]
+            dataid2 = geom_dataid[g2]
+        else:
+            dataid1 = -1
+            dataid2 = -1
+        size1 = geom_size[model_id * ngeom + g1]
+        size2 = geom_size[model_id * ngeom + g2]
+        gid1 = env_id * ngeom + g1
+        gid2 = env_id * ngeom + g2
+        info1 = wp.static(get_info(type1))(gid1, dataid1, geom_xpos, geom_xmat, size1, convex_vert_offset)
+        info2 = wp.static(get_info(type2))(gid2, dataid2, geom_xpos, geom_xmat, size2, convex_vert_offset)
+
+        if depth < -depth_extension:
+            return
+
+        dir = orthonormal(normal)
+        dir2 = wp.cross(normal, dir)
+
+        angle = multi_tilt_angle * wp.pi / 180.0
+        c = wp.cos(angle)
+        s = wp.sin(angle)
+        t = 1.0 - c
+
+        v1 = mat3c()
+        v2 = mat3c()
+
+        # Obtain points on the polygon determined by the support and tilt angle,
+        # in the basis of the contact frame.
+        v1count = int(0)
+        v2count = int(0)
+        for i in range(multi_polygon_count):
+            angle = 2.0 * float(i) * wp.pi / float(multi_polygon_count)
+            axis = wp.cos(angle) * dir + wp.sin(angle) * dir2
+
+            # Axis-angle rotation matrix. See
+            # https://en.wikipedia.org/wiki/Rotation_matrix#Rotation_matrix_from_axis_and_angle
+            mat0 = c + axis[0] * axis[0] * t
+            mat5 = c + axis[1] * axis[1] * t
+            mat10 = c + axis[2] * axis[2] * t
+            t1 = axis[0] * axis[1] * t
+            t2 = axis[2] * s
+            mat4 = t1 + t2
+            mat1 = t1 - t2
+            t1 = axis[0] * axis[2] * t
+            t2 = axis[1] * s
+            mat8 = t1 - t2
+            mat2 = t1 + t2
+            t1 = axis[1] * axis[2] * t
+            t2 = axis[0] * s
+            mat9 = t1 + t2
+            mat6 = t1 - t2
+
+            n = wp.vec3(
+                mat0 * normal[0] + mat1 * normal[1] + mat2 * normal[2],
+                mat4 * normal[0] + mat5 * normal[1] + mat6 * normal[2],
+                mat8 * normal[0] + mat9 * normal[1] + mat10 * normal[2],
+            )
+
+            _, p = wp.static(support_functions[type1])(info1, n, convex_vert)
+            v1[v1count] = wp.vec3(wp.dot(p, dir), wp.dot(p, dir2), wp.dot(p, normal))
+            if (
+                i != 0
+                or (v1[v1count][0] != v1[v1count - 1][0])
+                or (v1[v1count][1] != v1[v1count - 1][1])
+                or (v1[v1count][2] != v1[v1count - 1][2])
+            ):
+                v1count += 1
+
+            n = -n
+            _, p = wp.static(support_functions[type2])(info2, n, convex_vert)
+            v2[v2count] = wp.vec3(wp.dot(p, dir), wp.dot(p, dir2), wp.dot(p, normal))
+            if (
+                i != 0
+                or (v2[v2count][0] != v2[v2count - 1][0])
+                or (v2[v2count][1] != v2[v2count - 1][1])
+                or (v2[v2count][2] != v2[v2count - 1][2])
+            ):
+                v2count += 1
+
+        # Remove duplicate vertices on the array boundary.
+        if (
+            (v1count > 1)
+            and (v1[v1count - 1][0] == v1[0][0])
+            and (v1[v1count - 1][1] == v1[0][1])
+            and (v1[v1count - 1][2] == v1[0][2])
+        ):
+            v1count -= 1
+        if (
+            (v2count > 1)
+            and (v2[v2count - 1][0] == v2[0][0])
+            and (v2[v2count - 1][1] == v2[0][1])
+            and (v2[v2count - 1][2] == v2[0][2])
+        ):
+            v2count -= 1
+
+        # Find an intersecting polygon between v1 and v2 in the 2D plane.
+        out = mat43()
+        candCount = int(0)
+        if v2count > 1:
+            for i in range(v1count):
+                m1a = v1[i]
+                is_in = bool(True)
+
+                # Check if point m1a is inside the v2 polygon on the 2D plane.
+                for j in range(v2count):
+                    j2 = (j + 1) % v2count
+                    # Checks that orientation of the triangle (v2[j], v2[j2], m1a) is
+                    # counter-clockwise. If so, point m1a is inside the v2 polygon.
+                    is_in = is_in and (
+                        (v2[j2][0] - v2[j][0]) * (m1a[1] - v2[j][1]) - (v2[j2][1] - v2[j][1]) * (m1a[0] - v2[j][0])
+                        >= 0.0
+                    )
+                    if not is_in:
+                        break
+
+                if is_in:
+                    if not candCount or m1a[0] < out[0][0]:
+                        out[0] = m1a
+                    if not candCount or m1a[0] > out[1][0]:
+                        out[1] = m1a
+                    if not candCount or m1a[1] < out[2][1]:
+                        out[2] = m1a
+                    if not candCount or m1a[1] > out[3][1]:
+                        out[3] = m1a
+                    candCount += 1
+
+        if v1count > 1:
+            for i in range(v2count):
+                m1a = v2[i]
+                is_in = bool(True)
+
+                for j in range(v1count):
+                    j2 = (j + 1) % v1count
+                    is_in = (
+                        is_in
+                        and (v1[j2][0] - v1[j][0]) * (m1a[1] - v1[j][1]) - (v1[j2][1] - v1[j][1]) * (m1a[0] - v1[j][0])
+                        >= 0.0
+                    )
+                    if not is_in:
+                        break
+
+                if is_in:
+                    if not candCount or m1a[0] < out[0][0]:
+                        out[0] = m1a
+                    if not candCount or m1a[0] > out[1][0]:
+                        out[1] = m1a
+                    if not candCount or m1a[1] < out[2][1]:
+                        out[2] = m1a
+                    if not candCount or m1a[1] > out[3][1]:
+                        out[3] = m1a
+                    candCount += 1
+
+        if v1count > 1 and v2count > 1:
+            # Check all edge pairs, and store line segment intersections if they are
+            # on the edge of the boundary.
+            for i in range(v1count):
+                for j in range(v2count):
+                    m1a = v1[i]
+                    m1b = v1[(i + 1) % v1count]
+                    m2a = v2[j]
+                    m2b = v2[(j + 1) % v2count]
+
+                    det = (m2a[1] - m2b[1]) * (m1b[0] - m1a[0]) - (m1a[1] - m1b[1]) * (m2b[0] - m2a[0])
+                    if wp.abs(det) > 1e-12:
+                        a11 = (m2a[1] - m2b[1]) / det
+                        a12 = (m2b[0] - m2a[0]) / det
+                        a21 = (m1a[1] - m1b[1]) / det
+                        a22 = (m1b[0] - m1a[0]) / det
+                        b1 = m2a[0] - m1a[0]
+                        b2 = m2a[1] - m1a[1]
+
+                        alpha = a11 * b1 + a12 * b2
+                        beta = a21 * b1 + a22 * b2
+                        if alpha >= 0.0 and alpha <= 1.0 and beta >= 0.0 and beta <= 1.0:
+                            m0 = wp.vec3(
+                                m1a[0] + alpha * (m1b[0] - m1a[0]),
+                                m1a[1] + alpha * (m1b[1] - m1a[1]),
+                                (m1a[2] + alpha * (m1b[2] - m1a[2]) + m2a[2] + beta * (m2b[2] - m2a[2])) * 0.5,
+                            )
+                            if not candCount or m0[0] < out[0][0]:
+                                out[0] = m0
+                            if not candCount or m0[0] > out[1][0]:
+                                out[1] = m0
+                            if not candCount or m0[1] < out[2][1]:
+                                out[2] = m0
+                            if not candCount or m0[1] > out[3][1]:
+                                out[3] = m0
+                            candCount += 1
+
+        var_rx = wp.vec3(0.0)
+        contact_count = int(0)
+        if candCount > 0:
+            # Polygon intersection was found.
+            # TODO(btaba): replace the above routine with the manifold point routine
+            # from MJX. Deduplicate the points properly.
+            last_pt = wp.vec3(FLOAT_MAX, FLOAT_MAX, FLOAT_MAX)
+
+            for k in range(wp.static(kGjkMultiContactCount)):
+                pt = out[k][0] * dir + out[k][1] * dir2 + out[k][2] * normal
+                # Skip contact points that are too close.
+                if wp.length(pt - last_pt) <= 1e-6:
+                    continue
+                contact_pos[tid * ncon + contact_count] = pt
+                last_pt = pt
+                contact_count += 1
+
+        else:
+            # Polygon intersection was not found. Loop through all vertex pairs and
+            # calculate an approximate contact point.
+            minDist = float(0.0)
+            for i in range(v1count):
+                for j in range(v2count):
+                    # Find the closest vertex pair. Calculate a contact point var_rx as the
+                    # midpoint between the closest vertex pair.
+                    m1 = v1[i]
+                    m2 = v2[j]
+                    d = (m1[0] - m2[0]) * (m1[0] - m2[0]) + (m1[1] - m2[1]) * (m1[1] - m2[1])
+                    if i != 0 and j != 0 or d < minDist:
+                        minDist = d
+                        var_rx = ((m1[0] + m2[0]) * dir + (m1[1] + m2[1]) * dir2 + (m1[2] + m2[2]) * normal) * 0.5
+
+                    # Check for a closer point between a point on v2 and an edge on v1.
+                    m1b = v1[(i + 1) % v1count]
+                    m2b = v2[(j + 1) % v2count]
+                    if v1count > 1:
+                        d = (m1b[0] - m1[0]) * (m1b[0] - m1[0]) + (m1b[1] - m1[1]) * (m1b[1] - m1[1])
+                        t = ((m2[1] - m1[1]) * (m1b[0] - m1[0]) - (m2[0] - m1[0]) * (m1b[1] - m1[1])) / d
+                        dx = m2[0] + (m1b[1] - m1[1]) * t
+                        dy = m2[1] - (m1b[0] - m1[0]) * t
+                        dist = (dx - m2[0]) * (dx - m2[0]) + (dy - m2[1]) * (dy - m2[1])
+
+                        if (
+                            (dist < minDist)
+                            and ((dx - m1[0]) * (m1b[0] - m1[0]) + (dy - m1[1]) * (m1b[1] - m1[1]) >= 0)
+                            and ((dx - m1b[0]) * (m1[0] - m1b[0]) + (dy - m1b[1]) * (m1[1] - m1b[1]) >= 0)
+                        ):
+                            alpha = wp.sqrt(((dx - m1[0]) * (dx - m1[0]) + (dy - m1[1]) * (dy - m1[1])) / d)
+                            minDist = dist
+                            w = ((1.0 - alpha) * m1 + alpha * m1b + m2) * 0.5
+                            var_rx = w[0] * dir + w[1] * dir2 + w[2] * normal
+
+                    # Check for a closer point between a point on v1 and an edge on v2.
+                    if v2count > 1:
+                        d = (m2b[0] - m2[0]) * (m2b[0] - m2[0]) + (m2b[1] - m2[1]) * (m2b[1] - m2[1])
+                        t = ((m1[1] - m2[1]) * (m2b[0] - m2[0]) - (m1[0] - m2[0]) * (m2b[1] - m2[1])) / d
+                        dx = m1[0] + (m2b[1] - m2[1]) * t
+                        dy = m1[1] - (m2b[0] - m2[0]) * t
+                        dist = (dx - m1[0]) * (dx - m1[0]) + (dy - m1[1]) * (dy - m1[1])
+
+                        if (
+                            dist < minDist
+                            and (dx - m2[0]) * (m2b[0] - m2[0]) + (dy - m2[1]) * (m2b[1] - m2[1]) >= 0
+                            and (dx - m2b[0]) * (m2[0] - m2b[0]) + (dy - m2b[1]) * (m2[1] - m2b[1]) >= 0
+                        ):
+                            alpha = wp.sqrt(((dx - m2[0]) * (dx - m2[0]) + (dy - m2[1]) * (dy - m2[1])) / d)
+                            minDist = dist
+                            w = (m1 + (1.0 - alpha) * m2 + alpha * m2b) * 0.5
+                            var_rx = w[0] * dir + w[1] * dir2 + w[2] * normal
+
+            for k in range(wp.static(kGjkMultiContactCount)):
+                contact_pos[tid * ncon + k] = var_rx
+
+            contact_count = 1
+
+        return contact_count
+
+    return __get_multiple_contacts
+
+
+def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount):
+    @wp.kernel
+    def _multiple_contacts_dense(
+        npair: int,
+        nenv: int,
+        ngeom: int,
+        nmodel: int,
+        ncon: int,
+        geom_pair: wp.array(dtype=int, ndim=2),
+        geom_xpos: wp.array(dtype=wp.vec3),
+        geom_xmat: wp.array(dtype=wp.mat33),
+        geom_size: wp.array(dtype=wp.vec3),
+        geom_dataid: wp.array(dtype=wp.int32),
+        convex_vert: wp.array(dtype=wp.vec3),
+        convex_vert_offset: wp.array(dtype=int),
+        depth_extension: float,
+        multi_polygon_count: int,
+        multi_tilt_angle: float,
+        contact_dist: wp.array(dtype=float),
+        contact_normal: wp.array(dtype=wp.vec3),
+        # outputs
+        contact_pos: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        if tid >= npair * nenv:
+            return
+
+        pair_id = tid % npair
+        env_id = tid // npair
+        model_id = env_id % nmodel
+
+        g1 = geom_pair[pair_id, 0]
+        g2 = geom_pair[pair_id, 1]
+        if g1 < 0 or g2 < 0:
+            return
+
+        normal = contact_normal[tid]
+        depth = -contact_dist[tid * ncon]
+
+        wp.static(_get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount))(
+            tid,
+            env_id,
+            model_id,
+            g1,
+            g2,
+            ngeom,
+            ncon,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            depth_extension,
+            multi_polygon_count,
+            multi_tilt_angle,
+            depth,
+            normal,
+            # outputs
+            contact_pos,
+        )
+
+        # for i in range(ncon):
+        #     offset = (tid * ncon + i) * 3
+        #     pos[offset + 0] = pos_[3 * (i % contact_count) + 0]
+        #     pos[offset + 1] = pos_[3 * (i % contact_count) + 1]
+        #     pos[offset + 2] = pos_[3 * (i % contact_count) + 2]
+
+    return _multiple_contacts_dense
 
 
 def gjk_epa_dense(
@@ -782,6 +1155,32 @@ def gjk_epa_dense(
             dist,
             normal,
         ],
+        device=geom_pair.device,
+    )
+
+    wp.launch(
+        multiple_contacts_dense(geom_type0, geom_type1, kMaxMultiPolygonCount, kGjkMultiContactCount),
+        dim=grid_size,
+        inputs=[
+            npair,
+            nenv,
+            ngeom,
+            nmodel,
+            ncon,
+            geom_pair,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            depth_extension,
+            multi_polygon_count,
+            multi_tilt_angle,
+            dist,
+            normal,
+        ],
+        outputs=[pos],
         device=geom_pair.device,
     )
 
@@ -939,65 +1338,65 @@ class EngineCollisionConvexTest(absltest.TestCase):
         pos = pos[idx]
         np.testing.assert_array_almost_equal(pos[2:4], d.contact.pos, decimal=2)
 
+    _FLAT_BOX_PLANE = """
+    <mujoco>
+      <worldbody>
+        <geom size="40 40 40" type="plane"/>
+        <body pos="0 0 0.45">
+          <freejoint/>
+          <geom size="0.5 0.5 0.5" type="box"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  """
 
-#     _FLAT_BOX_PLANE = """
-#     <mujoco>
-#       <worldbody>
-#         <geom size="40 40 40" type="plane"/>
-#         <body pos="0 0 0.45">
-#           <freejoint/>
-#           <geom size="0.5 0.5 0.5" type="box"/>
-#         </body>
-#       </worldbody>
-#     </mujoco>
-#   """
+    def test_flat_box_plane(self):
+        """Tests box collision with a plane."""
+        d, (dist, pos, n) = _collide(self._FLAT_BOX_PLANE)
 
-#     def test_flat_box_plane(self):
-#         """Tests box collision with a plane."""
-#         d, (dist, pos, n) = _collide(self._FLAT_BOX_PLANE)
+        np.testing.assert_array_less(dist, 0)
+        np.testing.assert_array_almost_equal(dist, d.contact.dist)
+        np.testing.assert_array_equal(n, np.array([[0.0, 0.0, 1.0]]))
+        idx = np.lexsort((pos[:, 0], pos[:, 1]))
+        pos = pos[idx]
+        np.testing.assert_array_almost_equal(
+            pos,
+            jp.array(
+                [
+                    [-0.5, -0.5, -0.05000001],
+                    [0.5, -0.5, -0.05000001],
+                    [-0.5, 0.5, -0.05000001],
+                    [-0.5, 0.5, -0.05000001],
+                ]
+            ),
+        )
 
-#         np.testing.assert_array_less(dist, 0)
-#         np.testing.assert_array_almost_equal(dist, d.contact.dist)
-#         np.testing.assert_array_equal(n, np.array([[0.0, 0.0, 1.0]]))
-#         idx = np.lexsort((pos[:, 0], pos[:, 1]))
-#         pos = pos[idx]
-#         np.testing.assert_array_almost_equal(
-#             pos,
-#             jp.array(
-#                 [
-#                     [-0.5, -0.5, -0.05000001],
-#                     [0.5, -0.5, -0.05000001],
-#                     [-0.5, 0.5, -0.05000001],
-#                     [-0.5, 0.5, -0.05000001],
-#                 ]
-#             ),
-#         )
+    _BOX_BOX_EDGE = """
+    <mujoco>
+      <worldbody>
+        <body pos="-1.0 -1.0 0.2">
+          <joint axis="1 0 0" type="free"/>
+          <geom size="0.2 0.2 0.2" type="box"/>
+        </body>
+        <body pos="-1.0 -1.2 0.55" euler="0 45 30">
+          <joint axis="1 0 0" type="free"/>
+          <geom size="0.1 0.1 0.1" type="box"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  """
 
-#     _BOX_BOX_EDGE = """
-#     <mujoco>
-#       <worldbody>
-#         <body pos="-1.0 -1.0 0.2">
-#           <joint axis="1 0 0" type="free"/>
-#           <geom size="0.2 0.2 0.2" type="box"/>
-#         </body>
-#         <body pos="-1.0 -1.2 0.55" euler="0 45 30">
-#           <joint axis="1 0 0" type="free"/>
-#           <geom size="0.1 0.1 0.1" type="box"/>
-#         </body>
-#       </worldbody>
-#     </mujoco>
-#   """
+    def test_box_box_edge(self):
+        """Tests an edge contact for a box-box collision."""
+        d, (dist, pos, n) = _collide(self._BOX_BOX_EDGE)
 
-#     def test_box_box_edge(self):
-#         """Tests an edge contact for a box-box collision."""
-#         d, (dist, pos, n) = _collide(self._BOX_BOX_EDGE)
+        np.testing.assert_array_less(dist, 0)
+        np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
+        np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
+        idx = np.lexsort((pos[:, 0], pos[:, 1]))
+        pos = pos[idx]
+        np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
-#         np.testing.assert_array_less(dist, 0)
-#         np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
-#         np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
-#         idx = np.lexsort((pos[:, 0], pos[:, 1]))
-#         pos = pos[idx]
-#         np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
 #     _CONVEX_CONVEX = """
 #     <mujoco>
@@ -1059,7 +1458,7 @@ if __name__ == "__main__":
     wp.init()
     assert wp.is_cuda_available(), "CUDA is not available."
 
-    # absltest.main()
+    absltest.main()
 
-    test = EngineCollisionConvexTest()
-    test.test_box_plane()
+    # test = EngineCollisionConvexTest()
+    # test.test_box_plane()
