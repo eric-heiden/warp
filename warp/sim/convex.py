@@ -25,6 +25,8 @@ mjxGEOM_BOX = 6
 mjxGEOM_CONVEX = 7
 mjxGEOM_size = 8
 
+mjMINVAL = 1e-15
+
 FLOAT_MIN = -1e30
 FLOAT_MAX = 1e30
 
@@ -95,7 +97,6 @@ def get_info(t):
         convex_vert_offset: wp.array(dtype=int),
     ):
         pos = geom_xpos[gid]
-        # rot = wp.transpose(geom_xmat[gid])
         rot = geom_xmat[gid]
         if wp.static(t == mjxGEOM_SPHERE):
             sphere = GeomType_SPHERE()
@@ -114,6 +115,37 @@ def get_info(t):
             plane.pos = pos
             plane.rot = rot
             return plane
+        elif wp.static(t == mjxGEOM_CAPSULE):
+            capsule = GeomType_CAPSULE()
+            capsule.pos = pos
+            capsule.rot = rot
+            capsule.radius = size[0]
+            capsule.halfsize = size[1]
+            return capsule
+        elif wp.static(t == mjxGEOM_ELLIPSOID):
+            ellipsoid = GeomType_ELLIPSOID()
+            ellipsoid.pos = pos
+            ellipsoid.rot = rot
+            ellipsoid.size = size
+            return ellipsoid
+        elif wp.static(t == mjxGEOM_CYLINDER):
+            cylinder = GeomType_CYLINDER()
+            cylinder.pos = pos
+            cylinder.rot = rot
+            cylinder.radius = size[0]
+            cylinder.halfsize = size[1]
+            return cylinder
+        elif wp.static(t == mjxGEOM_CONVEX):
+            convex = GeomType_CONVEX()
+            convex.pos = pos
+            convex.rot = rot
+            if convex_vert_offset and dataid >= 0:
+                convex.vert_offset = convex_vert_offset[dataid]
+                convex.vert_count = convex_vert_offset[dataid + 1] - convex.vert_offset
+            else:
+                convex.vert_offset = 0
+                convex.vert_count = 0
+            return convex
         else:
             wp.static(RuntimeError("Unsupported type", t))
 
@@ -168,10 +200,87 @@ def gjk_support_box(
     return wp.dot(support_pt, dir), support_pt
 
 
+@wp.func
+def gjk_support_capsule(
+    info: GeomType_CAPSULE,
+    dir: wp.vec3,
+    convex_vert: wp.array(dtype=wp.vec3),
+):
+    local_dir = wp.transpose(info.rot) @ dir
+    # start with sphere
+    res = local_dir * info.radius
+    # add cylinder contribution
+    res[2] += wp.sign(local_dir[2]) * info.halfsize
+    support_pt = info.rot @ res + info.pos
+    return wp.dot(support_pt, dir), support_pt
+
+
+@wp.func
+def gjk_support_ellipsoid(
+    info: GeomType_ELLIPSOID,
+    dir: wp.vec3,
+    convex_vert: wp.array(dtype=wp.vec3),
+):
+    local_dir = wp.transpose(info.rot) @ dir
+    # find support point on unit sphere: scale dir by ellipsoid sizes and
+    # renormalize
+    res = local_dir * info.size
+    res = wp.normalize(res)
+    # transform to ellipsoid
+    res = wp.cw_mul(res, info.size)
+    support_pt = info.rot @ res + info.pos
+    return wp.dot(support_pt, dir), support_pt
+
+
+@wp.func
+def gjk_support_cylinder(
+    info: GeomType_CYLINDER,
+    dir: wp.vec3,
+    convex_vert: wp.array(dtype=wp.vec3),
+):
+    local_dir = wp.transpose(info.rot) @ dir
+    res = wp.vec3(0.0, 0.0, 0.0)
+    # set result in XY plane: support on circle
+    d = wp.sqrt(wp.dot(local_dir, local_dir))
+    if d > mjMINVAL:
+        res[0] = local_dir[0] / d * info.radius
+        res[1] = local_dir[1] / d * info.radius
+
+    # set result in Z direction
+    res[2] = wp.sign(local_dir[2]) * info.halfsize
+    support_pt = info.rot @ res + info.pos
+    return wp.dot(support_pt, dir), support_pt
+
+
+@wp.func
+def gjk_support_convex(
+    info: GeomType_CONVEX,
+    dir: wp.vec3,
+    convex_vert: wp.array(dtype=wp.vec3),
+):
+    local_dir = wp.transpose(info.rot) @ dir
+    support_pt = wp.vec3(0.0, 0.0, 0.0)
+    max_dist = float(FLOAT_MIN)
+    # exhaustive search over all vertices
+    # TODO(robotics-simulation): consider hill-climb over graphdata.
+    for i in range(info.vert_count):
+        vert = convex_vert[info.vert_offset + i]
+        dist = wp.dot(vert, local_dir)
+        if dist > max_dist:
+            max_dist = dist
+            support_pt = vert
+    support_pt = info.rot @ support_pt + info.pos
+    return wp.dot(support_pt, dir), support_pt
+
+
 support_functions = {
     mjxGEOM_PLANE: gjk_support_plane,
     mjxGEOM_SPHERE: gjk_support_sphere,
     mjxGEOM_BOX: gjk_support_box,
+    mjxGEOM_CAPSULE: gjk_support_capsule,
+    mjxGEOM_ELLIPSOID: gjk_support_ellipsoid,
+    mjxGEOM_CYLINDER: gjk_support_cylinder,
+    mjxGEOM_CONVEX: gjk_support_convex,
 }
 
 
@@ -183,9 +292,9 @@ def gjk_support(type1, type2):
         dir: wp.vec3,
         convex_vert: wp.array(dtype=wp.vec3),
     ):
-        # Returns the distance between support points on two geoms. Negative distance
-        # means objects are not intersecting along direction `dir`. Positive distance
-        # means objects are intersecting along the given direction `dir`.
+        # Returns the distance between support points on two geoms, and the support point.
+        # Negative distance means objects are not intersecting along direction `dir`.
+        # Positive distance means objects are intersecting along the given direction `dir`.
 
         dist1, s1 = wp.static(support_functions[type1])(info1, dir, convex_vert)
         dist2, s2 = wp.static(support_functions[type2])(info2, -dir, convex_vert)
@@ -206,7 +315,7 @@ def gjk_normalize(a: wp.vec3):
 
 
 @wp.func
-def orthonormal(normal: wp.vec3):
+def orthonormal(normal: wp.vec3) -> wp.vec3:
     if wp.abs(normal[0]) < wp.abs(normal[1]) and wp.abs(normal[0]) < wp.abs(normal[2]):
         dir = wp.vec3(1.0 - normal[0] * normal[0], -normal[0] * normal[1], -normal[0] * normal[2])
     elif wp.abs(normal[1]) < wp.abs(normal[2]):
@@ -270,7 +379,8 @@ def _gjk(type1, type2):
             depth = dist_min
             normal = dir_n
 
-        sd = wp.normalize(simplex0 - simplex1)
+        # sd = wp.normalize(simplex0 - simplex1)
+        sd = simplex0 - simplex1
         dir = orthonormal(sd)
 
         dist_max, simplex3 = wp.static(gjk_support(type1, type2))(info1, info2, dir, convex_vert)
@@ -291,7 +401,7 @@ def _gjk(type1, type2):
             normal = dir_n
 
         plane = mat43()
-        for i in range(gjk_iteration_count):
+        for _ in range(gjk_iteration_count):
             # Winding orders: plane[0] ccw, plane[1] cw, plane[2] ccw, plane[3] cw.
             plane[0] = wp.cross(simplex[3] - simplex[2], simplex[1] - simplex[2])
             plane[1] = wp.cross(simplex[3] - simplex[0], simplex[2] - simplex[0])
@@ -333,6 +443,7 @@ def _gjk(type1, type2):
             if dist < depth:
                 depth = dist
                 normal = plane[index]
+            # wp.printf("dist: %f\n", dist)
 
             # Preserve winding order of the simplex faces.
             index1 = (index + 1) & 3
@@ -340,7 +451,11 @@ def _gjk(type1, type2):
             swap = simplex[index1]
             simplex[index1] = simplex[index2]
             simplex[index2] = swap
-            if dist < 0:
+            # wp.printf("simplex[0]: %f %f %f\n", simplex[0, 0], simplex[0, 1], simplex[0, 2])
+            # wp.printf("simplex[1]: %f %f %f\n", simplex[1, 0], simplex[1, 1], simplex[1, 2])
+            # wp.printf("simplex[2]: %f %f %f\n", simplex[2, 0], simplex[2, 1], simplex[2, 2])
+            # wp.printf("simplex[3]: %f %f %f\n", simplex[3, 0], simplex[3, 1], simplex[3, 2])
+            if dist < 0.0:
                 break  # Objects are likely non-intersecting.
 
         return simplex, normal
@@ -393,11 +508,6 @@ def gjk_dense(type1, type2):
             gjk_iteration_count,
         )
         contact_simplex[tid] = simplex
-
-        # Align to 16 byte boundary.
-        # contact_simplex[tid * 3 + 0] = simplex_f4[0]
-        # contact_simplex[tid * 3 + 1] = simplex_f4[1]
-        # contact_simplex[tid * 3 + 2] = simplex_f4[2]
 
         if contact_normal:
             contact_normal[tid] = normal
@@ -1004,7 +1114,7 @@ def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContac
         normal = contact_normal[tid]
         depth = -contact_dist[tid * ncon]
 
-        wp.static(_get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount))(
+        contact_count = wp.static(_get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount))(
             tid,
             env_id,
             model_id,
@@ -1027,11 +1137,9 @@ def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContac
             contact_pos,
         )
 
-        # for i in range(ncon):
-        #     offset = (tid * ncon + i) * 3
-        #     pos[offset + 0] = pos_[3 * (i % contact_count) + 0]
-        #     pos[offset + 1] = pos_[3 * (i % contact_count) + 1]
-        #     pos[offset + 2] = pos_[3 * (i % contact_count) + 2]
+        # TODO(eheiden): check if this is safe
+        for i in range(ncon):
+            contact_pos[tid * ncon + i] = contact_pos[i % contact_count]
 
     return _multiple_contacts_dense
 
@@ -1116,11 +1224,11 @@ def gjk_epa_dense(
         device=geom_pair.device,
     )
 
-    print("normal:")
-    print(normal.numpy())
-    print("simplex:")
-    print(simplex.numpy())
-    print()
+    # print("normal:")
+    # print(normal.numpy())
+    # print("simplex:")
+    # print(simplex.numpy())
+    # print()
 
     max_epa_best_count = 12
 
@@ -1304,7 +1412,7 @@ def _collide(
         ncon=ncon,
         ngeom=mx.ngeom,
         depth_extension=1e9,
-        gjk_iter=12,
+        gjk_iter=1,
         epa_iter=12,
         epa_best_count=12,
         multi_polygon_count=8,
@@ -1339,16 +1447,16 @@ class EngineCollisionConvexTest(absltest.TestCase):
         np.testing.assert_array_almost_equal(pos[2:4], d.contact.pos, decimal=2)
 
     _FLAT_BOX_PLANE = """
-    <mujoco>
-      <worldbody>
-        <geom size="40 40 40" type="plane"/>
-        <body pos="0 0 0.45">
-          <freejoint/>
-          <geom size="0.5 0.5 0.5" type="box"/>
-        </body>
-      </worldbody>
-    </mujoco>
-  """
+        <mujoco>
+            <worldbody>
+                <geom size="40 40 40" type="plane"/>
+                <body pos="0 0 0.45">
+                    <freejoint/>
+                    <geom size="0.5 0.5 0.5" type="box"/>
+                </body>
+            </worldbody>
+        </mujoco>
+    """
 
     def test_flat_box_plane(self):
         """Tests box collision with a plane."""
@@ -1372,19 +1480,19 @@ class EngineCollisionConvexTest(absltest.TestCase):
         )
 
     _BOX_BOX_EDGE = """
-    <mujoco>
-      <worldbody>
-        <body pos="-1.0 -1.0 0.2">
-          <joint axis="1 0 0" type="free"/>
-          <geom size="0.2 0.2 0.2" type="box"/>
-        </body>
-        <body pos="-1.0 -1.2 0.55" euler="0 45 30">
-          <joint axis="1 0 0" type="free"/>
-          <geom size="0.1 0.1 0.1" type="box"/>
-        </body>
-      </worldbody>
-    </mujoco>
-  """
+        <mujoco>
+            <worldbody>
+                <body pos="-1.0 -1.0 0.2">
+                    <joint axis="1 0 0" type="free"/>
+                    <geom size="0.2 0.2 0.2" type="box"/>
+                </body>
+                <body pos="-1.0 -1.2 0.55" euler="0 45 30">
+                    <joint axis="1 0 0" type="free"/>
+                    <geom size="0.1 0.1 0.1" type="box"/>
+                </body>
+            </worldbody>
+        </mujoco>
+      """
 
     def test_box_box_edge(self):
         """Tests an edge contact for a box-box collision."""
@@ -1397,61 +1505,36 @@ class EngineCollisionConvexTest(absltest.TestCase):
         pos = pos[idx]
         np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
+    _CONVEX_CONVEX = """
+        <mujoco>
+            <asset>
+                <mesh name="poly"
+                vertex="0.3 0 0  0 0.5 0  -0.3 0 0  0 -0.5 0  0 -1 1  0 1 1"
+                face="0 1 5  0 5 4  0 4 3  3 4 2  2 4 5  1 2 5  0 2 1  0 3 2"/>
+            </asset>
+            <worldbody>
+                <body pos="0.0 2.0 0.35" euler="0 0 90">
+                    <freejoint/>
+                    <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
+                </body>
+                <body pos="0.0 2.0 2.281" euler="180 0 0">
+                    <freejoint/>
+                    <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
+                </body>
+            </worldbody>
+        </mujoco>
+    """
 
-#     _CONVEX_CONVEX = """
-#     <mujoco>
-#       <asset>
-#         <mesh name="poly"
-#          vertex="0.3 0 0  0 0.5 0  -0.3 0 0  0 -0.5 0  0 -1 1  0 1 1"
-#          face="0 1 5  0 5 4  0 4 3  3 4 2  2 4 5  1 2 5  0 2 1  0 3 2"/>
-#       </asset>
-#       <worldbody>
-#         <body pos="0.0 2.0 0.35" euler="0 0 90">
-#           <freejoint/>
-#           <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-#         </body>
-#         <body pos="0.0 2.0 2.281" euler="180 0 0">
-#           <freejoint/>
-#           <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-#         </body>
-#       </worldbody>
-#     </mujoco>
-#   """
+    def test_convex_convex(self):
+        """Tests convex-convex collisions."""
+        d, (dist, pos, n) = _collide(self._CONVEX_CONVEX)
 
-#     def test_convex_convex(self):
-#         """Tests convex-convex collisions."""
-#         d, (dist, pos, n) = _collide(self._CONVEX_CONVEX)
-
-#         np.testing.assert_array_less(dist, 0)
-#         np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
-#         np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
-#         idx = np.lexsort((pos[:, 0], pos[:, 1]))
-#         pos = pos[idx]
-#         np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
-
-#     _CONVEX_CONVEX_MULTI = """
-#     <mujoco>
-#       <asset>
-#         <mesh name="poly"
-#          vertex="0.3 0 0  0 0.5 0  -0.3 0 0  0 -0.5 0  0 -1 1  0 1 1"
-#          face="0 1 5  0 5 4  0 4 3  3 4 2  2 4 5  1 2 5  0 2 1  0 3 2"/>
-#       </asset>
-#       <worldbody>
-#         <body pos="0.0 2.0 0.35" euler="0 0 90">
-#           <freejoint/>
-#           <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-#         </body>
-#         <body pos="0.0 2.0 2.281" euler="180 0 0">
-#           <freejoint/>
-#           <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-#         </body>
-#         <body pos="0.0 2.0 2.281" euler="180 0 0">
-#           <freejoint/>
-#           <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-#         </body>
-#       </worldbody>
-#     </mujoco>
-#   """
+        np.testing.assert_array_less(dist, 0)
+        np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
+        np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
+        idx = np.lexsort((pos[:, 0], pos[:, 1]))
+        pos = pos[idx]
+        np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
 
 if __name__ == "__main__":
@@ -1459,6 +1542,3 @@ if __name__ == "__main__":
     assert wp.is_cuda_available(), "CUDA is not available."
 
     absltest.main()
-
-    # test = EngineCollisionConvexTest()
-    # test.test_box_plane()
