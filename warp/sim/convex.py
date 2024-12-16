@@ -11,8 +11,12 @@ from mujoco.mjx._src.types import Data, Model
 import warp as wp
 import warp.sim
 
-wp.config.verify_cuda = True
+# wp.set_device("cpu")
 
+wp.config.verify_cuda = True
+# wp.config.verify_fp = True
+
+wp.config.enable_backward = False
 wp.set_module_options({"enable_backward": False})
 
 mjxGEOM_PLANE = 0
@@ -333,14 +337,49 @@ def where(condition: bool, ret_true: Any, ret_false: Any):
     return ret_false
 
 
+@wp.func
+def all_same(a: wp.vec3, b: wp.vec3):
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2]
+
+
+@wp.func
+def any_different(a: wp.vec3, b: wp.vec3):
+    return a[0] != b[0] or a[1] != b[1] or a[2] != b[2]
+
+
 mat43 = wp.types.matrix(shape=(4, 3), dtype=float)
 
 
-# Calculates whether two objects intersect.
-# Returns simplex and normal.
-def _gjk(type1, type2):
+class GjkEpaPipeline:
+    def __init__(
+        self,
+        type1,
+        type2,
+        gjk_dense: wp.Kernel,
+        epa_dense: wp.Kernel,
+        multiple_contacts_dense: wp.Kernel,
+    ):
+        self.type1 = type1
+        self.type2 = type2
+        self.gjk_dense = gjk_dense
+        self.epa_dense = epa_dense
+        self.multiple_contacts_dense = multiple_contacts_dense
+
+
+def gjk_epa_pipeline(
+    type1,
+    type2,
+    gjk_iteration_count: int,
+    epa_iteration_count: int,
+    max_epa_best_count: int = kMaxEpaBestCount,
+    epa_exact_neg_distance: bool = True,
+    kMaxMultiPolygonCount: int = kMaxMultiPolygonCount,
+    kGjkMultiContactCount: int = kGjkMultiContactCount,
+) -> GjkEpaPipeline:
+    # Calculates whether two objects intersect.
+    # Returns simplex and normal.
     @wp.func
-    def __gjk(
+    def _gjk(
         env_id: int,
         model_id: int,
         g1: int,
@@ -352,7 +391,6 @@ def _gjk(type1, type2):
         geom_dataid: wp.array(dtype=wp.int32),
         convex_vert: wp.array(dtype=wp.vec3),
         convex_vert_offset: wp.array(dtype=int),
-        gjk_iteration_count: int,
     ):
         dataid1 = -1
         dataid2 = -1
@@ -460,12 +498,8 @@ def _gjk(type1, type2):
 
         return simplex, normal
 
-    return __gjk
-
-
-def gjk_dense(type1, type2):
     @wp.kernel
-    def _gjk_dense(
+    def gjk_dense(
         npair: int,
         nenv: int,
         ngeom: int,
@@ -477,7 +511,6 @@ def gjk_dense(type1, type2):
         geom_dataid: wp.array(dtype=wp.int32),
         convex_vert: wp.array(dtype=wp.vec3),
         convex_vert_offset: wp.array(dtype=int),
-        gjk_iteration_count: int,
         contact_normal: wp.array(dtype=wp.vec3),
         contact_simplex: wp.array(dtype=mat43),
     ):
@@ -493,7 +526,7 @@ def gjk_dense(type1, type2):
         if g1 < 0 or g2 < 0:
             return
 
-        simplex, normal = wp.static(_gjk(type1, type2))(
+        simplex, normal = _gjk(
             env_id,
             model_id,
             g1,
@@ -505,25 +538,25 @@ def gjk_dense(type1, type2):
             geom_dataid,
             convex_vert,
             convex_vert_offset,
-            gjk_iteration_count,
         )
         contact_simplex[tid] = simplex
 
         if contact_normal:
             contact_normal[tid] = normal
 
-    return _gjk_dense
-
-
-# computes contact normal and depth
-def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, exactNegDistance=True):
-    # mat3c3 = wp.types.matrix(shape=(epa_iteration_count + 1, max_epa_best_count * 3, 3), dtype=float)
     matc3 = wp.types.matrix(shape=(max_epa_best_count, 3), dtype=float)
     vecc3 = wp.types.vector(max_epa_best_count * 3, dtype=float)
 
+    # Matrix definition for the `tris` scratch space which is used to store the
+    # triangles of the polytope. Note that the first dimension is 2, as we need
+    # to store the previous and current polytope. But since Warp doesn't support
+    # 3D matrices yet, we use 2 * 3 * max_epa_best_count as the first dimension.
+    tris_dim = 3 * max_epa_best_count
+    mat2c3 = wp.types.matrix(shape=(2 * tris_dim, 3), dtype=float)
+
+    # computes contact normal and depth
     @wp.func
-    def __epa(
-        tid: int,
+    def _epa(
         env_id: int,
         model_id: int,
         g1: int,
@@ -538,9 +571,7 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
         depth_extension: float,
         epa_best_count: int,
         simplex: mat43,
-        # outputs
-        tris: wp.array(dtype=wp.vec3, ndim=2),
-        contact_normal: wp.array(dtype=wp.vec3),
+        input_normal: wp.vec3,
     ):
         dataid1 = -1
         dataid2 = -1
@@ -555,17 +586,17 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
         info1 = wp.static(get_info(type1))(tg1, dataid1, geom_xpos, geom_xmat, size1, convex_vert_offset)
         info2 = wp.static(get_info(type2))(tg2, dataid2, geom_xpos, geom_xmat, size2, convex_vert_offset)
 
-        normal = contact_normal[tid]
+        normal = input_normal
 
         # Get the support. If less than 0, objects are not intersecting.
-        depth, simplex0 = wp.static(gjk_support(type1, type2))(info1, info2, normal, convex_vert)
+        depth, _simplex = wp.static(gjk_support(type1, type2))(info1, info2, normal, convex_vert)
 
         if depth < -depth_extension:
             # Objects are not intersecting, and we do not obtain the closest points as
             # specified by depth_extension.
-            return wp.nan
+            return wp.nan, wp.vec3(wp.nan, wp.nan, wp.nan)
 
-        if wp.static(exactNegDistance):
+        if wp.static(epa_exact_neg_distance):
             # Check closest points to all edges of the simplex, rather than just the
             # face normals. This gives the exact depth/normal for the non-intersecting
             # case.
@@ -598,21 +629,22 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
         # Distance to the origin for candidate triangles.
         dists = vecc3()
 
-        tris[0, 0] = simplex[2]
-        tris[0, 1] = simplex[1]
-        tris[0, 2] = simplex[3]
+        tris = mat2c3()
+        tris[0] = simplex[2]
+        tris[1] = simplex[1]
+        tris[2] = simplex[3]
 
-        tris[0, 3] = simplex[0]
-        tris[0, 4] = simplex[2]
-        tris[0, 5] = simplex[3]
+        tris[3] = simplex[0]
+        tris[4] = simplex[2]
+        tris[5] = simplex[3]
 
-        tris[0, 6] = simplex[1]
-        tris[0, 7] = simplex[0]
-        tris[0, 8] = simplex[3]
+        tris[6] = simplex[1]
+        tris[7] = simplex[0]
+        tris[8] = simplex[3]
 
-        tris[0, 9] = simplex[0]
-        tris[0, 10] = simplex[1]
-        tris[0, 11] = simplex[2]
+        tris[9] = simplex[0]
+        tris[10] = simplex[1]
+        tris[11] = simplex[2]
 
         count = 4
         for q in range(wp.static(epa_iteration_count)):
@@ -620,7 +652,7 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
                 # Loop through all triangles, and obtain distances to the origin for each
                 # new triangle candidate.
                 ti = 3 * i
-                n = wp.cross(tris[0, ti + 2] - tris[0, ti + 0], tris[0, ti + 1] - tris[0, ti + 0])
+                n = wp.cross(tris[ti + 2] - tris[ti + 0], tris[ti + 1] - tris[ti + 0])
 
                 n, nf = gjk_normalize(n)
                 if not nf:
@@ -635,12 +667,12 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
                     normal = n
                 # Loop through all edges, and get distance using support point p[i].
                 for j in range(3):
-                    if wp.static(exactNegDistance):
+                    if wp.static(epa_exact_neg_distance):
                         # Obtain the closest point between the new triangle edge and the
                         # origin.
-                        tqj = tris[0, ti + j]
+                        tqj = tris[ti + j]
                         if (p[i, 0] != tqj[0]) or (p[i, 1] != tqj[1]) or (p[i, 2] != tqj[2]):
-                            v = p[i] - tris[0, ti + j]
+                            v = p[i] - tris[ti + j]
                             alpha = wp.dot(p[i], v) / wp.dot(v, v)
                             p0 = wp.clamp(alpha, 0.0, 1.0) * v - p[i]
                             p0, pf = gjk_normalize(p0)
@@ -650,17 +682,17 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
                                     depth = dist2
                                     normal = p0
 
-                    plane = wp.cross(p[i] - tris[0, ti + j], tris[0, ti + ((j + 1) % 3)] - tris[0, ti + j])
+                    plane = wp.cross(p[i] - tris[ti + j], tris[ti + ((j + 1) % 3)] - tris[ti + j])
                     plane, pf = gjk_normalize(plane)
                     if pf:
-                        d = wp.dot(plane, tris[0, ti + j])
+                        d = wp.dot(plane, tris[ti + j])
                     else:
                         d = 1e30
 
                     if (d < 0 and depth >= 0) or (
-                        tris[0, ti + ((j + 2) % 3)][0] == p[i][0]
-                        and tris[0, ti + ((j + 2) % 3)][1] == p[i][1]
-                        and tris[0, ti + ((j + 2) % 3)][2] == p[i][2]
+                        tris[ti + ((j + 2) % 3)][0] == p[i][0]
+                        and tris[ti + ((j + 2) % 3)][1] == p[i][1]
+                        and tris[ti + ((j + 2) % 3)][2] == p[i][2]
                     ):
                         dists[i * 3 + j] = 1e30
                     else:
@@ -682,26 +714,21 @@ def _epa(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, e
 
                 parentIndex = bestIndex // 3
                 childIndex = bestIndex % 3
-                tris[1, j * 3 + 0] = tris[0, parentIndex * 3 + childIndex]
-                tris[1, j * 3 + 1] = tris[0, parentIndex * 3 + ((childIndex + 1) % 3)]
-                tris[1, j * 3 + 2] = p[parentIndex]
+                # fill in the new triangle at the next index
+                tris[tris_dim + j * 3 + 0] = tris[parentIndex * 3 + childIndex]
+                tris[tris_dim + j * 3 + 1] = tris[parentIndex * 3 + ((childIndex + 1) % 3)]
+                tris[tris_dim + j * 3 + 2] = p[parentIndex]
 
             for r in range(max_epa_best_count * 3):
-                # swap tris
-                swap = tris[1, r]
-                tris[1, r] = tris[0, r]
-                tris[0, r] = swap
+                # swap triangles
+                swap = tris[tris_dim + r]
+                tris[tris_dim + r] = tris[r]
+                tris[r] = swap
 
-        contact_normal[tid] = normal
+        return depth, normal
 
-        return depth
-
-    return __epa
-
-
-def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
     @wp.kernel
-    def _epa_dense(
+    def epa_dense(
         npair: int,
         nenv: int,
         ngeom: int,
@@ -718,7 +745,6 @@ def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
         depth_extension: float,
         epa_best_count: int,
         # outputs
-        tris: wp.array(dtype=wp.vec3, ndim=2),
         contact_dist: wp.array(dtype=float),
         contact_normal: wp.array(dtype=wp.vec3),
     ):
@@ -736,8 +762,8 @@ def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
             return
 
         simplex = contact_simplex[tid]
-        depth = wp.static(_epa(type1, type2, epa_iteration_count, max_epa_best_count))(
-            tid,
+        input_normal = contact_normal[tid]
+        depth, normal = _epa(
             env_id,
             model_id,
             g1,
@@ -752,32 +778,29 @@ def epa_dense(type1, type2, epa_iteration_count: int, max_epa_best_count: int):
             depth_extension,
             epa_best_count,
             simplex,
-            # outputs
-            tris,
-            contact_normal,
+            input_normal,
         )
 
         if wp.isnan(depth) or depth < -depth_extension:
             return
 
+        contact_normal[tid] = normal
+
         for i in range(ncon):
             contact_dist[tid * ncon + i] = -depth
 
-    return _epa_dense
+    mat3p = wp.types.matrix(shape=(kMaxMultiPolygonCount, 3), dtype=float)
 
-
-def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount):
-    mat3c = wp.types.matrix(shape=(kMaxMultiPolygonCount, 3), dtype=float)
+    # allocate maximum number of contact points
+    mat3c = wp.types.matrix(shape=(kGjkMultiContactCount, 3), dtype=float)
 
     @wp.func
-    def __get_multiple_contacts(
-        tid: int,
+    def _get_multiple_contacts(
         env_id: int,
         model_id: int,
         g1: int,
         g2: int,
         ngeom: int,
-        ncon: int,
         geom_xpos: wp.array(dtype=wp.vec3),
         geom_xmat: wp.array(dtype=wp.mat33),
         geom_size: wp.array(dtype=wp.vec3),
@@ -789,8 +812,6 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
         multi_tilt_angle: float,
         depth: float,
         normal: wp.vec3,
-        # outputs
-        contact_pos: wp.array(dtype=wp.vec3),
     ):
         # Calculates multiple contact points given the normal from EPA.
         #  1. Calculates the polygon on each shape by tiling the normal
@@ -829,8 +850,10 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
         s = wp.sin(angle)
         t = 1.0 - c
 
-        v1 = mat3c()
-        v2 = mat3c()
+        v1 = mat3p()
+        v2 = mat3p()
+
+        contact_points = mat3c()
 
         # Obtain points on the polygon determined by the support and tilt angle,
         # in the basis of the contact frame.
@@ -866,39 +889,19 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
 
             _, p = wp.static(support_functions[type1])(info1, n, convex_vert)
             v1[v1count] = wp.vec3(wp.dot(p, dir), wp.dot(p, dir2), wp.dot(p, normal))
-            if (
-                i != 0
-                or (v1[v1count][0] != v1[v1count - 1][0])
-                or (v1[v1count][1] != v1[v1count - 1][1])
-                or (v1[v1count][2] != v1[v1count - 1][2])
-            ):
+            if i != 0 or any_different(v1[v1count], v1[v1count - 1]):
                 v1count += 1
 
             n = -n
             _, p = wp.static(support_functions[type2])(info2, n, convex_vert)
             v2[v2count] = wp.vec3(wp.dot(p, dir), wp.dot(p, dir2), wp.dot(p, normal))
-            if (
-                i != 0
-                or (v2[v2count][0] != v2[v2count - 1][0])
-                or (v2[v2count][1] != v2[v2count - 1][1])
-                or (v2[v2count][2] != v2[v2count - 1][2])
-            ):
+            if i != 0 or any_different(v2[v2count], v2[v2count - 1]):
                 v2count += 1
 
         # Remove duplicate vertices on the array boundary.
-        if (
-            (v1count > 1)
-            and (v1[v1count - 1][0] == v1[0][0])
-            and (v1[v1count - 1][1] == v1[0][1])
-            and (v1[v1count - 1][2] == v1[0][2])
-        ):
+        if v1count > 1 and all_same(v1[v1count - 1], v1[0]):
             v1count -= 1
-        if (
-            (v2count > 1)
-            and (v2[v2count - 1][0] == v2[0][0])
-            and (v2[v2count - 1][1] == v2[0][1])
-            and (v2[v2count - 1][2] == v2[0][2])
-        ):
+        if v2count > 1 and all_same(v2[v2count - 1], v2[0]):
             v2count -= 1
 
         # Find an intersecting polygon between v1 and v2 in the 2D plane.
@@ -922,13 +925,13 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
                         break
 
                 if is_in:
-                    if not candCount or m1a[0] < out[0][0]:
+                    if not candCount or m1a[0] < out[0, 0]:
                         out[0] = m1a
-                    if not candCount or m1a[0] > out[1][0]:
+                    if not candCount or m1a[0] > out[1, 0]:
                         out[1] = m1a
-                    if not candCount or m1a[1] < out[2][1]:
+                    if not candCount or m1a[1] < out[2, 1]:
                         out[2] = m1a
-                    if not candCount or m1a[1] > out[3][1]:
+                    if not candCount or m1a[1] > out[3, 1]:
                         out[3] = m1a
                     candCount += 1
 
@@ -948,13 +951,13 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
                         break
 
                 if is_in:
-                    if not candCount or m1a[0] < out[0][0]:
+                    if not candCount or m1a[0] < out[0, 0]:
                         out[0] = m1a
-                    if not candCount or m1a[0] > out[1][0]:
+                    if not candCount or m1a[0] > out[1, 0]:
                         out[1] = m1a
-                    if not candCount or m1a[1] < out[2][1]:
+                    if not candCount or m1a[1] < out[2, 1]:
                         out[2] = m1a
-                    if not candCount or m1a[1] > out[3][1]:
+                    if not candCount or m1a[1] > out[3, 1]:
                         out[3] = m1a
                     candCount += 1
 
@@ -985,13 +988,13 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
                                 m1a[1] + alpha * (m1b[1] - m1a[1]),
                                 (m1a[2] + alpha * (m1b[2] - m1a[2]) + m2a[2] + beta * (m2b[2] - m2a[2])) * 0.5,
                             )
-                            if not candCount or m0[0] < out[0][0]:
+                            if not candCount or m0[0] < out[0, 0]:
                                 out[0] = m0
-                            if not candCount or m0[0] > out[1][0]:
+                            if not candCount or m0[0] > out[1, 0]:
                                 out[1] = m0
-                            if not candCount or m0[1] < out[2][1]:
+                            if not candCount or m0[1] < out[2, 1]:
                                 out[2] = m0
-                            if not candCount or m0[1] > out[3][1]:
+                            if not candCount or m0[1] > out[3, 1]:
                                 out[3] = m0
                             candCount += 1
 
@@ -1004,11 +1007,11 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
             last_pt = wp.vec3(FLOAT_MAX, FLOAT_MAX, FLOAT_MAX)
 
             for k in range(wp.static(kGjkMultiContactCount)):
-                pt = out[k][0] * dir + out[k][1] * dir2 + out[k][2] * normal
+                pt = out[k, 0] * dir + out[k, 1] * dir2 + out[k, 2] * normal
                 # Skip contact points that are too close.
                 if wp.length(pt - last_pt) <= 1e-6:
                     continue
-                contact_pos[tid * ncon + contact_count] = pt
+                contact_points[contact_count] = pt
                 last_pt = pt
                 contact_count += 1
 
@@ -1066,18 +1069,14 @@ def _get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContact
                             var_rx = w[0] * dir + w[1] * dir2 + w[2] * normal
 
             for k in range(wp.static(kGjkMultiContactCount)):
-                contact_pos[tid * ncon + k] = var_rx
+                contact_points[k] = var_rx
 
             contact_count = 1
 
-        return contact_count
+        return contact_count, contact_points
 
-    return __get_multiple_contacts
-
-
-def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount):
     @wp.kernel
-    def _multiple_contacts_dense(
+    def multiple_contacts_dense(
         npair: int,
         nenv: int,
         ngeom: int,
@@ -1114,14 +1113,12 @@ def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContac
         normal = contact_normal[tid]
         depth = -contact_dist[tid * ncon]
 
-        contact_count = wp.static(_get_multiple_contacts(type1, type2, kMaxMultiPolygonCount, kGjkMultiContactCount))(
-            tid,
+        count, points = _get_multiple_contacts(
             env_id,
             model_id,
             g1,
             g2,
             ngeom,
-            ncon,
             geom_xpos,
             geom_xmat,
             geom_size,
@@ -1133,15 +1130,18 @@ def multiple_contacts_dense(type1, type2, kMaxMultiPolygonCount, kGjkMultiContac
             multi_tilt_angle,
             depth,
             normal,
-            # outputs
-            contact_pos,
         )
 
-        # TODO(eheiden): check if this is safe
         for i in range(ncon):
-            contact_pos[tid * ncon + i] = contact_pos[i % contact_count]
+            contact_pos[tid * ncon + i] = points[i % count]
 
-    return _multiple_contacts_dense
+    return GjkEpaPipeline(
+        type1,
+        type2,
+        gjk_dense,
+        epa_dense,
+        multiple_contacts_dense,
+    )
 
 
 def gjk_epa_dense(
@@ -1157,14 +1157,14 @@ def gjk_epa_dense(
     ncon: int,
     geom_type0: int,
     geom_type1: int,
-    depth_extension: wp.float32,
+    depth_extension: float,
     gjk_iteration_count: int,
     epa_iteration_count: int,
     epa_best_count: int,
     multi_polygon_count: int,
-    multi_tilt_angle: wp.float32,
+    multi_tilt_angle: float,
     # outputs
-    dist: wp.array(dtype=wp.float32),
+    dist: wp.array(dtype=float),
     pos: wp.array(dtype=wp.vec3),
     normal: wp.array(dtype=wp.vec3),
     simplex: wp.array(dtype=mat43),
@@ -1196,12 +1196,21 @@ def gjk_epa_dense(
     if len(geom_dataid) != ngeom:
         raise RuntimeError("Dimensions of geom_dataid in LaunchKernel_GJK_EPA " "do not match (ngeom,).")
 
+    # create kernels
+    pipeline = gjk_epa_pipeline(
+        geom_type0,
+        geom_type1,
+        gjk_iteration_count,
+        epa_iteration_count,
+        epa_best_count,
+    )
+
     # gjk_epa_init
     dist.fill_(1e12)
 
     grid_size = npair * nenv
     wp.launch(
-        gjk_dense(geom_type0, geom_type1),
+        pipeline.gjk_dense,
         dim=grid_size,
         inputs=[
             npair,
@@ -1215,7 +1224,6 @@ def gjk_epa_dense(
             geom_dataid,
             convex_vert,
             convex_vert_offset,
-            gjk_iteration_count,
         ],
         outputs=[
             normal,
@@ -1230,16 +1238,8 @@ def gjk_epa_dense(
     # print(simplex.numpy())
     # print()
 
-    max_epa_best_count = 12
-
-    tris = wp.empty(
-        (2, max_epa_best_count * 3),
-        dtype=wp.vec3,
-        device=geom_pair.device,
-    )
-
     wp.launch(
-        epa_dense(geom_type0, geom_type1, epa_iteration_count, max_epa_best_count),
+        pipeline.epa_dense,
         dim=grid_size,
         inputs=[
             npair,
@@ -1259,7 +1259,6 @@ def gjk_epa_dense(
             epa_best_count,
         ],
         outputs=[
-            tris,
             dist,
             normal,
         ],
@@ -1267,7 +1266,7 @@ def gjk_epa_dense(
     )
 
     wp.launch(
-        multiple_contacts_dense(geom_type0, geom_type1, kMaxMultiPolygonCount, kGjkMultiContactCount),
+        pipeline.multiple_contacts_dense,
         dim=grid_size,
         inputs=[
             npair,
@@ -1347,45 +1346,194 @@ def gjk_epa(
     # TODO(btaba): consider passing in sliced geom_xpos/xmat instead for perf.
     convex_vert, convex_vert_offset = get_convex_vert(m)
 
-    wp_geom_pair = wp.from_jax(geom_pair.astype(int), dtype=wp.int32)
-    wp_geom_xpos = wp.from_jax(d.geom_xpos, dtype=wp.vec3)
-    wp_geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33)
-    wp_geom_size = wp.from_jax(m.geom_size, dtype=wp.vec3)
-    wp_geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
-    wp_convex_vert = wp.from_jax(convex_vert.reshape(-1, 3), dtype=wp.vec3)
-    wp_convex_vert_offset = wp.from_jax(convex_vert_offset.astype(int), dtype=wp.int32)
+    device = wp.get_preferred_device()
 
-    dist = wp.empty((n_points,), dtype=wp.float32)
-    pos = wp.empty((n_points,), dtype=wp.vec3)
-    normal = wp.empty((n_points,), dtype=wp.vec3)
-    simplex = wp.empty((n_points,), dtype=mat43)
+    wp_geom_pair = wp.from_jax(geom_pair.astype(int), dtype=wp.int32).to(device)
+    wp_geom_xpos = wp.from_jax(d.geom_xpos, dtype=wp.vec3).to(device)
+    wp_geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33).to(device)
+    wp_geom_size = wp.from_jax(m.geom_size, dtype=wp.vec3).to(device)
+    wp_geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32).to(device)
+    wp_convex_vert = wp.from_jax(convex_vert.reshape(-1, 3), dtype=wp.vec3).to(device)
+    wp_convex_vert_offset = wp.from_jax(convex_vert_offset.astype(int), dtype=wp.int32).to(device)
 
-    gjk_epa_dense(
-        wp_geom_pair,
-        wp_geom_xpos,
-        wp_geom_xmat,
-        wp_geom_size,
-        wp_geom_dataid,
-        wp_convex_vert,
-        wp_convex_vert_offset,
-        ngeom,
-        npair,
-        ncon,
-        types[0],
-        types[1],
-        wp.float32(depth_extension),
-        gjk_iter,
-        epa_iter,
-        epa_best_count,
-        multi_polygon_count,
-        wp.float32(multi_tilt_angle),
-        dist,
-        pos,
-        normal,
-        simplex,
-    )
+    with wp.ScopedDevice(device):
+        dist = wp.empty((n_points,), dtype=wp.float32)
+        pos = wp.empty((n_points,), dtype=wp.vec3)
+        normal = wp.empty((n_points,), dtype=wp.vec3)
+        simplex = wp.empty((n_points,), dtype=mat43)
+
+        gjk_epa_dense(
+            wp_geom_pair,
+            wp_geom_xpos,
+            wp_geom_xmat,
+            wp_geom_size,
+            wp_geom_dataid,
+            wp_convex_vert,
+            wp_convex_vert_offset,
+            ngeom,
+            npair,
+            ncon,
+            types[0],
+            types[1],
+            wp.float32(depth_extension),
+            gjk_iter,
+            epa_iter,
+            epa_best_count,
+            multi_polygon_count,
+            wp.float32(multi_tilt_angle),
+            dist,
+            pos,
+            normal,
+            simplex,
+        )
 
     return dist.numpy(), pos.numpy(), normal.numpy()[:1]
+
+
+# # Runs GJK and EPA on a set of sparse geom pairs per env.
+# def gjk_epa_sparse(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, epa_exact_neg_distance=True):
+#     @wp.kernel
+#     def _gjk_epa_sparse(
+#         group_key: int,
+#         nenv: int,
+#         ngeom: int,
+#         nmodel: int,
+#         ncon: int,
+#         max_contact_points_per_env: int,
+#         type_pair_env_id: wp.array(dtype=int),
+#         type_pair_geom_id: wp.array(dtype=int),
+#         type_pair_count: wp.array(dtype=int),
+#         type_pair_offset: wp.array(dtype=int),
+#         geom_xpos: wp.array(dtype=wp.vec3),
+#         geom_xmat: wp.array(dtype=wp.mat33),
+#         geom_size: wp.array(dtype=wp.vec3),
+#         geom_dataid: wp.array(dtype=wp.int32),
+#         convex_vert: wp.array(dtype=wp.vec3),
+#         convex_vert_offset: wp.array(dtype=int),
+#         gjk_iteration_count: int,
+#         epa_iteration_count: int,
+#         epa_best_count: int,
+#         depth_extension: float,
+#         multi_polygon_count: int,
+#         multi_tilt_angle: float,
+#         # outputs
+#         env_contact_counter: wp.array(dtype=int),
+#         contact_geom1: wp.array(dtype=int),
+#         contact_geom2: wp.array(dtype=int),
+#         contact_dist: wp.array(dtype=float),
+#         contact_pos: wp.array(dtype=wp.vec3),
+#         contact_normal: wp.array(dtype=wp.vec3),
+#     ):
+#         tid = wp.tid()
+#         npair = type_pair_count[group_key]
+#         if tid >= npair:
+#             return
+
+#         type_pair_id = type_pair_offset[group_key] * nenv + tid
+#         env_id = type_pair_env_id[type_pair_id]
+
+#         # Check if we generated max contacts for this env.
+#         # TODO(btaba): move max_contact_points_per_env culling to a point later
+#         # in the pipline, where we can do a sort on penetration depth per env.
+#         if env_contact_counter[env_id] > max_contact_points_per_env:
+#             return
+
+#         model_id = env_id % nmodel
+#         g1 = type_pair_geom_id[type_pair_id * 2]
+#         g2 = type_pair_geom_id[type_pair_id * 2 + 1]
+
+#         simplex, normal = wp.static(_gjk(type1, type2))(
+#             env_id,
+#             model_id,
+#             g1,
+#             g2,
+#             ngeom,
+#             geom_xpos,
+#             geom_xmat,
+#             geom_size,
+#             geom_dataid,
+#             convex_vert,
+#             convex_vert_offset,
+#             gjk_iteration_count,
+#         )
+#         # TODO(btaba): get depth from GJK, conditionally run EPA.
+#         depth = wp.static(_epa(type1, type2, epa_iteration_count, max_epa_best_count))(
+#             tid,
+#             env_id,
+#             model_id,
+#             g1,
+#             g2,
+#             ngeom,
+#             geom_xpos,
+#             geom_xmat,
+#             geom_size,
+#             geom_dataid,
+#             convex_vert,
+#             convex_vert_offset,
+#             depth_extension,
+#             epa_best_count,
+#             simplex,
+#             # outputs
+#             tris,
+#             contact_normal,
+#         )
+
+#         # TODO(btaba): add support for margin here.
+#         if depth < 0.0:
+#             return
+
+#         # TODO(btaba): split get_multiple_contacts into a separate kernel.
+#         contact_count = 0
+#         float pos_[12]
+#         _get_multiple_contacts<T1, T2>(
+#             tid, env_id, model_id, g1, g2, ngeom, ncon, size, xpos, xmat, dataid,
+#             convex_vert, convex_vert_offset, depth_extension, multi_polygon_count,
+#             multi_tilt_angle, depth, normal, pos_, contact_count)
+
+#         contact_count = contact_count > max_contact_points_per_env
+#                             ? max_contact_points_per_env
+#                             : contact_count
+#         cid = wp.atomic_add(env_contact_counter, env_id, contact_count)
+#         cid = cid + env_id * max_contact_points_per_env
+#         for i in range(contact_count):
+#             contact_dist[cid + i] = -depth
+#             contact_geom1[cid + i] = g1
+#             contact_geom2[cid + i] = g2
+#             contact_normal[cid + i] = normal
+#             contact_pos[cid + i] = pos_[i]
+
+#     return _gjk_epa_sparse
+
+
+# def _narrowphase(type1, type2):
+#     def __narrowphase(cudaStream_t stream, CollisionInput& input,
+#                   CollisionOutput& output, const int t1, const int t2):
+#         group_key = t1 + t2 * input.n_geom_types
+#         thrust::device_ptr<uint> type_pair_count(output.type_pair_count)
+#         const uint npair = type_pair_count[group_key]
+#         if (npair == 0) return
+
+#         const int blockSize = 256
+#         const int gridSize = (npair + blockSize - 1) / blockSize
+#         const int ncon = maxContactPointsMap[t1][t2]
+#         gjk_epa_sparse<T1, T2><<<gridSize, blockSize, 0, stream>>>(
+#             group_key, input.nenv, input.ngeom, input.nmodel, ncon,
+#             /*max_contact_points_per_env=*/input.max_contact_points,
+#             output.type_pair_env_id, output.type_pair_geom_id, output.type_pair_count,
+#             input.type_pair_offset, input.geom_size, input.geom_xpos, input.geom_xmat,
+#             input.geom_dataid, input.convex_vert, input.convex_vert_offset,
+#             input.gjk_iteration_count, input.epa_iteration_count,
+#             input.epa_best_count, input.depth_extension, input.multi_polygon_count,
+#             input.multi_tilt_angle, output.env_counter, output.g1, output.g2,
+#             output.dist, output.pos, output.normal)
+
+#     return __narrowphase
+
+# def narrowphase(cudaStream_t s, CollisionInput& in, CollisionOutput& out) {
+#     for t2 in range(mjxGEOM_size):
+#         for t1 in range(t1):
+
+#             _narrowphase(t1, t2)(s, in, out, t1, t2)
 
 
 def _collide(
