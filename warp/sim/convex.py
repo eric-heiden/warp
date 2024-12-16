@@ -358,12 +358,14 @@ class GjkEpaPipeline:
         gjk_dense: wp.Kernel,
         epa_dense: wp.Kernel,
         multiple_contacts_dense: wp.Kernel,
+        gjk_epa_sparse: wp.Kernel,
     ):
         self.type1 = type1
         self.type2 = type2
         self.gjk_dense = gjk_dense
         self.epa_dense = epa_dense
         self.multiple_contacts_dense = multiple_contacts_dense
+        self.gjk_epa_sparse = gjk_epa_sparse
 
 
 def gjk_epa_pipeline(
@@ -1135,12 +1137,127 @@ def gjk_epa_pipeline(
         for i in range(ncon):
             contact_pos[tid * ncon + i] = points[i % count]
 
+    # Runs GJK and EPA on a set of sparse geom pairs per env.
+    @wp.kernel
+    def gjk_epa_sparse(
+        group_key: int,
+        nenv: int,
+        ngeom: int,
+        nmodel: int,
+        max_contact_points_per_env: int,
+        type_pair_env_id: wp.array(dtype=int),
+        type_pair_geom_id: wp.array(dtype=int),
+        type_pair_count: wp.array(dtype=int),
+        type_pair_offset: wp.array(dtype=int),
+        geom_xpos: wp.array(dtype=wp.vec3),
+        geom_xmat: wp.array(dtype=wp.mat33),
+        geom_size: wp.array(dtype=wp.vec3),
+        geom_dataid: wp.array(dtype=wp.int32),
+        convex_vert: wp.array(dtype=wp.vec3),
+        convex_vert_offset: wp.array(dtype=int),
+        epa_best_count: int,
+        depth_extension: float,
+        multi_polygon_count: int,
+        multi_tilt_angle: float,
+        # outputs
+        env_contact_counter: wp.array(dtype=int),
+        contact_geom1: wp.array(dtype=int),
+        contact_geom2: wp.array(dtype=int),
+        contact_dist: wp.array(dtype=float),
+        contact_pos: wp.array(dtype=wp.vec3),
+        contact_normal: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        npair = type_pair_count[group_key]
+        if tid >= npair:
+            return
+
+        type_pair_id = type_pair_offset[group_key] * nenv + tid
+        env_id = type_pair_env_id[type_pair_id]
+
+        # Check if we generated max contacts for this env.
+        # TODO(btaba): move max_contact_points_per_env culling to a point later
+        # in the pipline, where we can do a sort on penetration depth per env.
+        if env_contact_counter[env_id] > max_contact_points_per_env:
+            return
+
+        model_id = env_id % nmodel
+        g1 = type_pair_geom_id[type_pair_id * 2]
+        g2 = type_pair_geom_id[type_pair_id * 2 + 1]
+
+        simplex, normal = _gjk(
+            env_id,
+            model_id,
+            g1,
+            g2,
+            ngeom,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+        )
+        # TODO(btaba): get depth from GJK, conditionally run EPA.
+        depth, normal = _epa(
+            env_id,
+            model_id,
+            g1,
+            g2,
+            ngeom,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            depth_extension,
+            epa_best_count,
+            simplex,
+            normal,
+        )
+
+        # TODO(btaba): add support for margin here.
+        if depth < 0.0:
+            return
+
+        # TODO(btaba): split get_multiple_contacts into a separate kernel.
+        count, points = _get_multiple_contacts(
+            env_id,
+            model_id,
+            g1,
+            g2,
+            ngeom,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            depth_extension,
+            multi_polygon_count,
+            multi_tilt_angle,
+            depth,
+            normal,
+        )
+
+        contact_count = min(count, max_contact_points_per_env)
+        cid = wp.atomic_add(env_contact_counter, env_id, contact_count)
+        cid = cid + env_id * max_contact_points_per_env
+        for i in range(contact_count):
+            contact_dist[cid + i] = -depth
+            contact_geom1[cid + i] = g1
+            contact_geom2[cid + i] = g2
+            contact_normal[cid + i] = normal
+            contact_pos[cid + i] = points[i]
+
     return GjkEpaPipeline(
         type1,
         type2,
         gjk_dense,
         epa_dense,
         multiple_contacts_dense,
+        gjk_epa_sparse,
     )
 
 
@@ -1390,144 +1507,101 @@ def gjk_epa(
     return dist.numpy(), pos.numpy(), normal.numpy()[:1]
 
 
-# # Runs GJK and EPA on a set of sparse geom pairs per env.
-# def gjk_epa_sparse(type1, type2, epa_iteration_count: int, max_epa_best_count: int = 12, epa_exact_neg_distance=True):
-#     @wp.kernel
-#     def _gjk_epa_sparse(
-#         group_key: int,
-#         nenv: int,
-#         ngeom: int,
-#         nmodel: int,
-#         ncon: int,
-#         max_contact_points_per_env: int,
-#         type_pair_env_id: wp.array(dtype=int),
-#         type_pair_geom_id: wp.array(dtype=int),
-#         type_pair_count: wp.array(dtype=int),
-#         type_pair_offset: wp.array(dtype=int),
-#         geom_xpos: wp.array(dtype=wp.vec3),
-#         geom_xmat: wp.array(dtype=wp.mat33),
-#         geom_size: wp.array(dtype=wp.vec3),
-#         geom_dataid: wp.array(dtype=wp.int32),
-#         convex_vert: wp.array(dtype=wp.vec3),
-#         convex_vert_offset: wp.array(dtype=int),
-#         gjk_iteration_count: int,
-#         epa_iteration_count: int,
-#         epa_best_count: int,
-#         depth_extension: float,
-#         multi_polygon_count: int,
-#         multi_tilt_angle: float,
-#         # outputs
-#         env_contact_counter: wp.array(dtype=int),
-#         contact_geom1: wp.array(dtype=int),
-#         contact_geom2: wp.array(dtype=int),
-#         contact_dist: wp.array(dtype=float),
-#         contact_pos: wp.array(dtype=wp.vec3),
-#         contact_normal: wp.array(dtype=wp.vec3),
-#     ):
-#         tid = wp.tid()
-#         npair = type_pair_count[group_key]
-#         if tid >= npair:
-#             return
-
-#         type_pair_id = type_pair_offset[group_key] * nenv + tid
-#         env_id = type_pair_env_id[type_pair_id]
-
-#         # Check if we generated max contacts for this env.
-#         # TODO(btaba): move max_contact_points_per_env culling to a point later
-#         # in the pipline, where we can do a sort on penetration depth per env.
-#         if env_contact_counter[env_id] > max_contact_points_per_env:
-#             return
-
-#         model_id = env_id % nmodel
-#         g1 = type_pair_geom_id[type_pair_id * 2]
-#         g2 = type_pair_geom_id[type_pair_id * 2 + 1]
-
-#         simplex, normal = wp.static(_gjk(type1, type2))(
-#             env_id,
-#             model_id,
-#             g1,
-#             g2,
-#             ngeom,
-#             geom_xpos,
-#             geom_xmat,
-#             geom_size,
-#             geom_dataid,
-#             convex_vert,
-#             convex_vert_offset,
-#             gjk_iteration_count,
-#         )
-#         # TODO(btaba): get depth from GJK, conditionally run EPA.
-#         depth = wp.static(_epa(type1, type2, epa_iteration_count, max_epa_best_count))(
-#             tid,
-#             env_id,
-#             model_id,
-#             g1,
-#             g2,
-#             ngeom,
-#             geom_xpos,
-#             geom_xmat,
-#             geom_size,
-#             geom_dataid,
-#             convex_vert,
-#             convex_vert_offset,
-#             depth_extension,
-#             epa_best_count,
-#             simplex,
-#             # outputs
-#             tris,
-#             contact_normal,
-#         )
-
-#         # TODO(btaba): add support for margin here.
-#         if depth < 0.0:
-#             return
-
-#         # TODO(btaba): split get_multiple_contacts into a separate kernel.
-#         contact_count = 0
-#         float pos_[12]
-#         _get_multiple_contacts<T1, T2>(
-#             tid, env_id, model_id, g1, g2, ngeom, ncon, size, xpos, xmat, dataid,
-#             convex_vert, convex_vert_offset, depth_extension, multi_polygon_count,
-#             multi_tilt_angle, depth, normal, pos_, contact_count)
-
-#         contact_count = contact_count > max_contact_points_per_env
-#                             ? max_contact_points_per_env
-#                             : contact_count
-#         cid = wp.atomic_add(env_contact_counter, env_id, contact_count)
-#         cid = cid + env_id * max_contact_points_per_env
-#         for i in range(contact_count):
-#             contact_dist[cid + i] = -depth
-#             contact_geom1[cid + i] = g1
-#             contact_geom2[cid + i] = g2
-#             contact_normal[cid + i] = normal
-#             contact_pos[cid + i] = pos_[i]
-
-#     return _gjk_epa_sparse
+max_contact_points_map = [
+    # PLANE  HFIELD SPHERE CAPSULE ELLIPSOID CYLINDER BOX  CONVEX
+    [0, 0, 1, 2, 1, 3, 4, 4],  # PLANE
+    [0, 0, 1, 2, 1, 3, 4, 4],  # HFIELD
+    [0, 0, 1, 1, 1, 1, 1, 4],  # SPHERE
+    [0, 0, 0, 1, 1, 2, 2, 2],  # CAPSULE
+    [0, 0, 0, 0, 1, 1, 1, 1],  # ELLIPSOID
+    [0, 0, 0, 0, 0, 3, 3, 3],  # CYLINDER
+    [0, 0, 0, 0, 0, 0, 4, 4],  # BOX
+    [0, 0, 0, 0, 0, 0, 0, 4],  # CONVEX
+]
 
 
-# def _narrowphase(type1, type2):
-#     def __narrowphase(cudaStream_t stream, CollisionInput& input,
-#                   CollisionOutput& output, const int t1, const int t2):
-#         group_key = t1 + t2 * input.n_geom_types
-#         thrust::device_ptr<uint> type_pair_count(output.type_pair_count)
-#         const uint npair = type_pair_count[group_key]
-#         if (npair == 0) return
+def _narrowphase(
+    type1: int,
+    type2: int,
+    gjk_iteration_count: int,
+    epa_iteration_count: int,
+    nenv: int,
+    ngeom: int,
+    nmodel: int,
+    n_geom_types: int,
+    max_contact_points_per_env: int,
+    type_pair_env_id: wp.array(dtype=int),
+    type_pair_geom_id: wp.array(dtype=int),
+    type_pair_count: wp.array(dtype=int),
+    type_pair_offset: wp.array(dtype=int),
+    geom_xpos: wp.array(dtype=wp.vec3),
+    geom_xmat: wp.array(dtype=wp.mat33),
+    geom_size: wp.array(dtype=wp.vec3),
+    geom_dataid: wp.array(dtype=wp.int32),
+    convex_vert: wp.array(dtype=wp.vec3),
+    convex_vert_offset: wp.array(dtype=int),
+    epa_best_count: int,
+    depth_extension: float,
+    multi_polygon_count: int,
+    multi_tilt_angle: float,
+    # outputs
+    env_contact_counter: wp.array(dtype=int),
+    contact_geom1: wp.array(dtype=int),
+    contact_geom2: wp.array(dtype=int),
+    contact_dist: wp.array(dtype=float),
+    contact_pos: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
+):
+    group_key = type1 + type2 * n_geom_types
+    npair = type_pair_count[group_key]
+    if npair == 0:
+        return
 
-#         const int blockSize = 256
-#         const int gridSize = (npair + blockSize - 1) / blockSize
-#         const int ncon = maxContactPointsMap[t1][t2]
-#         gjk_epa_sparse<T1, T2><<<gridSize, blockSize, 0, stream>>>(
-#             group_key, input.nenv, input.ngeom, input.nmodel, ncon,
-#             /*max_contact_points_per_env=*/input.max_contact_points,
-#             output.type_pair_env_id, output.type_pair_geom_id, output.type_pair_count,
-#             input.type_pair_offset, input.geom_size, input.geom_xpos, input.geom_xmat,
-#             input.geom_dataid, input.convex_vert, input.convex_vert_offset,
-#             input.gjk_iteration_count, input.epa_iteration_count,
-#             input.epa_best_count, input.depth_extension, input.multi_polygon_count,
-#             input.multi_tilt_angle, output.env_counter, output.g1, output.g2,
-#             output.dist, output.pos, output.normal)
+    blockSize = 256
+    grid_size = (npair + blockSize - 1) / blockSize
+    ncon = max_contact_points_map[type1][type2]
+    pipeline = gjk_epa_pipeline(
+        type1,
+        type2,
+        gjk_iteration_count,
+        epa_iteration_count,
+    )
+    wp.launch(
+        pipeline.gjk_epa_sparse,
+        grid_size,
+        inputs=[
+            group_key,
+            nenv,
+            ngeom,
+            nmodel,
+            max_contact_points_per_env,
+            type_pair_env_id,
+            type_pair_geom_id,
+            type_pair_count,
+            type_pair_offset,
+            geom_xpos,
+            geom_xmat,
+            geom_size,
+            geom_dataid,
+            convex_vert,
+            convex_vert_offset,
+            epa_best_count,
+            depth_extension,
+            multi_polygon_count,
+            multi_tilt_angle,
+        ],
+        outputs=[
+            env_contact_counter,
+            contact_geom1,
+            contact_geom2,
+            contact_dist,
+            contact_pos,
+            contact_normal,
+        ],
+        device=geom_xpos.device,
+        block_dim=blockSize,
+    )
 
-#     return __narrowphase
 
 # def narrowphase(cudaStream_t s, CollisionInput& in, CollisionOutput& out) {
 #     for t2 in range(mjxGEOM_size):
