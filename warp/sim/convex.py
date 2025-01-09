@@ -526,7 +526,7 @@ def gjk_epa_pipeline(
             return
 
         pair_id = tid % npair
-        env_id = tid / npair
+        env_id = tid // npair
         model_id = env_id % nmodel
 
         g1, g2 = geom_pair[pair_id, 0], geom_pair[pair_id, 1]
@@ -760,7 +760,7 @@ def gjk_epa_pipeline(
             return
 
         pair_id = tid % npair
-        env_id = tid / npair
+        env_id = tid // npair
         model_id = env_id % nmodel
 
         g1 = geom_pair[pair_id, 0]
@@ -1881,10 +1881,79 @@ class EngineCollisionConvexTest(absltest.TestCase):
         self.assertLess(dist[-1, 0], 0.0)  # geom (0, 1)
 
 
+
+def profile_gjk_epa(batch_size):
+    SPHERE_SPHERE = """
+        <mujoco>
+            <worldbody>
+                <body>
+                    <joint type="free"/>
+                    <geom pos="0 0 0" size="0.2" type="sphere"/>
+                </body>
+                <body >
+                    <joint type="free"/>
+                    <geom pos="0 0.3 0" size="0.11" type="sphere"/>
+                </body>
+            </worldbody>
+        </mujoco>
+    """
+    m = mujoco.MjModel.from_xml_string(SPHERE_SPHERE)
+
+    @jax.vmap
+    def make_model_and_data(val):
+        dx = mjx.make_data(m)
+        mx = mjx.put_model(m)
+        size = mx.geom_size
+        mx = mx.replace(geom_size=size.at[0, :].set(val * size[0, :]))
+        return mx, dx
+
+    # vary the size of body 0.
+    mx, dx = make_model_and_data((jp.arange(batch_size) + 1) / batch_size)
+
+    kinematics_jit_fn = jax.jit(jax.vmap(mjx.kinematics))
+    dx = kinematics_jit_fn(mx, dx)
+    key_types = (m.geom_type[0], m.geom_type[1])
+    # XXX geom_pair here has to be for the correct IDs of the geoms
+    # geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
+    geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
+
+    vec_gjk_epa = vmap(
+        gjk_epa,
+        in_axes=(
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
+    with warp.ScopedTimer(f"warp_gjk_epa_{batch_size}"):
+        dist, pos, n = vec_gjk_epa(mx, dx, geom_pair, key_types, 1, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0, batch_size)
+        wp.synchronize()
+
+
 if __name__ == "__main__":
     wp.init()
     assert wp.is_cuda_available(), "CUDA is not available."
 
     # absltest.main()
-    test = EngineCollisionConvexTest()
-    test.test_call_batched_model_and_data()
+    # test = EngineCollisionConvexTest()
+    # test.test_call_batched_model_and_data()
+
+    # profile_gjk_epa(8)
+    # profile_gjk_epa(3)
+    # profile_gjk_epa(7)
+    # profile_gjk_epa(5)
+    # profile_gjk_epa(1)
+    # profile_gjk_epa(100)
+    profile_gjk_epa(10000)
+    # profile_gjk_epa(100000)
+    # profile_gjk_epa(1000000)
+    # profile_gjk_epa(10000000)
