@@ -653,8 +653,8 @@ def gjk_epa_pipeline(
         tris[10] = simplex[1]
         tris[11] = simplex[2]
 
-        count = 4
-        for q in range(wp.static(epa_iteration_count)):
+        count = int(4)
+        for _iter in range(wp.static(epa_iteration_count)):
             for i in range(count):
                 # Loop through all triangles, and obtain distances to the origin for each
                 # new triangle candidate.
@@ -675,8 +675,7 @@ def gjk_epa_pipeline(
                 # Loop through all edges, and get distance using support point p[i].
                 for j in range(3):
                     if wp.static(epa_exact_neg_distance):
-                        # Obtain the closest point between the new triangle edge and the
-                        # origin.
+                        # Obtain the closest point between the new triangle edge and the origin.
                         tqj = tris[ti + j]
                         if (p[i, 0] != tqj[0]) or (p[i, 1] != tqj[1]) or (p[i, 2] != tqj[2]):
                             v = p[i] - tris[ti + j]
@@ -951,7 +950,8 @@ def gjk_epa_pipeline(
                     j2 = (j + 1) % v1count
                     is_in = (
                         is_in
-                        and (v1[j2][0] - v1[j][0]) * (m1a[1] - v1[j][1]) - (v1[j2][1] - v1[j][1]) * (m1a[0] - v1[j][0])
+                        and (v1[j2][0] - v1[j][0]) * (m1a[1] - v1[j][1])
+                        - (v1[j2][1] - v1[j][1]) * (m1a[0] - v1[j][0])
                         >= 0.0
                     )
                     if not is_in:
@@ -1295,7 +1295,6 @@ def gjk_epa_dense(
     nenv = 1
     for i in range(geom_xpos.ndim):
         nenv *= geom_xpos.shape[i]
-
     nenv //= ngeom
     if nenv == 0:
         raise RuntimeError("Batch size of mjx.Data calculated in LaunchKernel_GJK_EPA is 0.")
@@ -1304,7 +1303,6 @@ def gjk_epa_dense(
     nmodel = 1
     for i in range(geom_size.ndim):
         nmodel *= geom_size.shape[i]
-
     nmodel //= ngeom
     if nmodel == 0:
         raise RuntimeError("Batch size of mjx.Model calculated in LaunchKernel_GJK_EPA is 0.")
@@ -1315,8 +1313,8 @@ def gjk_epa_dense(
             "batch size of mjx.Data in LaunchKernel_GJK_EPA."
         )
 
-    if len(geom_dataid) != ngeom:
-        raise RuntimeError("Dimensions of geom_dataid in LaunchKernel_GJK_EPA do not match (ngeom,).")
+    # if len(geom_dataid) != ngeom:
+    #     raise RuntimeError("Dimensions of geom_dataid in LaunchKernel_GJK_EPA do not match (ngeom,).")
 
     # create kernels
     pipeline = gjk_epa_pipeline(
@@ -1331,28 +1329,29 @@ def gjk_epa_dense(
     dist.fill_(1e12)
 
     grid_size = npair * nenv
-    wp.launch(
-        pipeline.gjk_dense,
-        dim=grid_size,
-        inputs=[
-            npair,
-            nenv,
-            ngeom,
-            nmodel,
-            geom_pair,
-            geom_xpos,
-            geom_xmat,
-            geom_size,
-            geom_dataid,
-            convex_vert,
-            convex_vert_offset,
-        ],
-        outputs=[
-            normal,
-            simplex,
-        ],
-        device=geom_pair.device,
-    )
+    with wp.ScopedTimer("gjk_dense"):
+        wp.launch(
+            pipeline.gjk_dense,
+            dim=grid_size,
+            inputs=[
+                npair,
+                nenv,
+                ngeom,
+                nmodel,
+                geom_pair,
+                geom_xpos,
+                geom_xmat,
+                geom_size,
+                geom_dataid,
+                convex_vert,
+                convex_vert_offset,
+            ],
+            outputs=[
+                normal,
+                simplex,
+            ],
+            device=geom_pair.device,
+        )
 
     # print("normal:")
     # print(normal.numpy())
@@ -1360,58 +1359,60 @@ def gjk_epa_dense(
     # print(simplex.numpy())
     # print()
 
-    wp.launch(
-        pipeline.epa_dense,
-        dim=grid_size,
-        inputs=[
-            npair,
-            nenv,
-            ngeom,
-            nmodel,
-            ncon,
-            geom_pair,
-            geom_xpos,
-            geom_xmat,
-            geom_size,
-            geom_dataid,
-            convex_vert,
-            convex_vert_offset,
-            simplex,
-            depth_extension,
-            epa_best_count,
-        ],
-        outputs=[
-            dist,
-            normal,
-        ],
-        device=geom_pair.device,
-    )
+    with wp.ScopedTimer("epa_dense"):
+        wp.launch(
+            pipeline.epa_dense,
+            dim=grid_size,
+            inputs=[
+                npair,
+                nenv,
+                ngeom,
+                nmodel,
+                ncon,
+                geom_pair,
+                geom_xpos,
+                geom_xmat,
+                geom_size,
+                geom_dataid,
+                convex_vert,
+                convex_vert_offset,
+                simplex,
+                depth_extension,
+                epa_best_count,
+            ],
+            outputs=[
+                dist,
+                normal,
+            ],
+            device=geom_pair.device,
+        )
 
-    wp.launch(
-        pipeline.multiple_contacts_dense,
-        dim=grid_size,
-        inputs=[
-            npair,
-            nenv,
-            ngeom,
-            nmodel,
-            ncon,
-            geom_pair,
-            geom_xpos,
-            geom_xmat,
-            geom_size,
-            geom_dataid,
-            convex_vert,
-            convex_vert_offset,
-            depth_extension,
-            multi_polygon_count,
-            multi_tilt_angle,
-            dist,
-            normal,
-        ],
-        outputs=[pos],
-        device=geom_pair.device,
-    )
+    with wp.ScopedTimer("multiple_contacts_dense"):
+        wp.launch(
+            pipeline.multiple_contacts_dense,
+            dim=grid_size,
+            inputs=[
+                npair,
+                nenv,
+                ngeom,
+                nmodel,
+                ncon,
+                geom_pair,
+                geom_xpos,
+                geom_xmat,
+                geom_size,
+                geom_dataid,
+                convex_vert,
+                convex_vert_offset,
+                depth_extension,
+                multi_polygon_count,
+                multi_tilt_angle,
+                dist,
+                normal,
+            ],
+            outputs=[pos],
+            device=geom_pair.device,
+        )
 
 
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
@@ -1444,17 +1445,17 @@ def gjk_epa(
     nbatch: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """GJK/EPA narrowphase routine."""
-    if ngeom <= 0:
-        raise ValueError(f'ngeom should be positive, got "{ngeom}".')
+    # XXX determine ngeom from geom_size now
+    ngeom = m.geom_size.shape[0]
     if ncon <= 0:
         raise ValueError(f'ncon should be positive, got "{ncon}".')
     if len(d.geom_xpos.shape) != 2:
         raise ValueError(f'd.geom_xpos should have 2d shape, got "{len(d.geom_xpos.shape)}".')
     if len(d.geom_xmat.shape) != 3:
         raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
-    if m.geom_dataid.shape != (ngeom,):
+    if m.geom_dataid.shape != (m.ngeom,):
         raise ValueError(
-            f"m.geom_dataid.shape should be (ngeom,) == ({ngeom},), got" f' "({m.geom_dataid.shape[0]},)".'
+            f"m.geom_dataid.shape should be (ngeom,) == ({m.ngeom},), got" f' "({m.geom_dataid.shape[0]},)".'
         )
     if len(geom_pair.shape) != 2:
         raise ValueError("Expecting 2D geom_pair.")
@@ -1483,30 +1484,31 @@ def gjk_epa(
         normal = wp.empty((n_points,), dtype=wp.vec3)
         simplex = wp.empty((n_points,), dtype=mat43)
 
-        gjk_epa_dense(
-            wp_geom_pair,
-            wp_geom_xpos,
-            wp_geom_xmat,
-            wp_geom_size,
-            wp_geom_dataid,
-            wp_convex_vert,
-            wp_convex_vert_offset,
-            ngeom,
-            npair,
-            ncon,
-            types[0],
-            types[1],
-            wp.float32(depth_extension),
-            gjk_iter,
-            epa_iter,
-            epa_best_count,
-            multi_polygon_count,
-            wp.float32(multi_tilt_angle),
-            dist,
-            pos,
-            normal,
-            simplex,
-        )
+        with wp.ScopedTimer("gjk_epa_dense"):
+            gjk_epa_dense(
+                wp_geom_pair,
+                wp_geom_xpos,
+                wp_geom_xmat,
+                wp_geom_size,
+                wp_geom_dataid,
+                wp_convex_vert,
+                wp_convex_vert_offset,
+                ngeom,
+                npair,
+                ncon,
+                types[0],
+                types[1],
+                wp.float32(depth_extension),
+                gjk_iter,
+                epa_iter,
+                epa_best_count,
+                multi_polygon_count,
+                wp.float32(multi_tilt_angle),
+                dist,
+                pos,
+                normal,
+                simplex,
+            )
 
     return dist.numpy(), pos.numpy(), normal.numpy()
 
@@ -1849,8 +1851,8 @@ class EngineCollisionConvexTest(absltest.TestCase):
         dx = kinematics_jit_fn(mx, dx)
         key_types = (m.geom_type[0], m.geom_type[1])
         # XXX geom_pair here has to be for the correct IDs of the geoms
-        # geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
-        geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
+        geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
+        # geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
 
         vec_gjk_epa = vmap(
             gjk_epa,
@@ -1879,7 +1881,6 @@ class EngineCollisionConvexTest(absltest.TestCase):
         # the last env should have a collision since geom0 is scaled to 1x the
         # original size
         self.assertLess(dist[-1, 0], 0.0)  # geom (0, 1)
-
 
 
 def profile_gjk_epa(batch_size):
@@ -1914,8 +1915,8 @@ def profile_gjk_epa(batch_size):
     dx = kinematics_jit_fn(mx, dx)
     key_types = (m.geom_type[0], m.geom_type[1])
     # XXX geom_pair here has to be for the correct IDs of the geoms
-    # geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
-    geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
+    geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
+    # geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
 
     vec_gjk_epa = vmap(
         gjk_epa,
@@ -1948,12 +1949,13 @@ if __name__ == "__main__":
     # test.test_call_batched_model_and_data()
 
     # profile_gjk_epa(8)
-    # profile_gjk_epa(3)
+    profile_gjk_epa(3)
     # profile_gjk_epa(7)
     # profile_gjk_epa(5)
     # profile_gjk_epa(1)
     # profile_gjk_epa(100)
-    profile_gjk_epa(10000)
+    # profile_gjk_epa(10000)
     # profile_gjk_epa(100000)
+    # profile_gjk_epa(1000000)
     # profile_gjk_epa(1000000)
     # profile_gjk_epa(10000000)
