@@ -15,7 +15,7 @@ import warp.sim
 
 # wp.set_device("cpu")
 
-wp.config.verify_cuda = True
+# wp.config.verify_cuda = True
 # wp.config.verify_fp = True
 
 wp.config.enable_backward = False
@@ -1689,7 +1689,8 @@ def vmap(fn: Callable, in_axes: int | None | Sequence[Any] = 0):
                 squeezed_args.append(squeeze_array(arg))
             else:
                 squeezed_args.append(arg)
-        results = fn(*squeezed_args)
+        with wp.ScopedTimer(f"vmap_{fn.__name__}"):
+            results = fn(*squeezed_args)
         batched_results = []
         for result in results:
             if isinstance(result, np.ndarray) or isinstance(result, jax.Array):
@@ -1851,8 +1852,8 @@ class EngineCollisionConvexTest(absltest.TestCase):
         dx = kinematics_jit_fn(mx, dx)
         key_types = (m.geom_type[0], m.geom_type[1])
         # XXX geom_pair here has to be for the correct IDs of the geoms
-        geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
-        # geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
+        # geom_pair = jp.array(np.tile(np.array([[0, 1]]), (batch_size, 1, 1)))
+        geom_pair = jp.array([[[i * 2, i * 2 + 1]] for i in range(batch_size)])
 
         vec_gjk_epa = vmap(
             gjk_epa,
@@ -1949,13 +1950,13 @@ if __name__ == "__main__":
     # test.test_call_batched_model_and_data()
 
     # profile_gjk_epa(8)
-    profile_gjk_epa(3)
+    # profile_gjk_epa(3)
     # profile_gjk_epa(7)
     # profile_gjk_epa(5)
     # profile_gjk_epa(1)
     # profile_gjk_epa(100)
     # profile_gjk_epa(10000)
-    # profile_gjk_epa(100000)
+    profile_gjk_epa(100000)
     # profile_gjk_epa(1000000)
     # profile_gjk_epa(1000000)
     # profile_gjk_epa(10000000)
