@@ -90,30 +90,31 @@ def gjk_epa(
     normal = wp.empty((n_points, 3), dtype=wp.float32)
     simplex = wp.empty((n_points, 4, 3), dtype=wp.float32)
 
-    launch_epa_gjk(
-        wp_geom_pair.__ctype__(),
-        wp_geom_xpos.__ctype__(),
-        wp_geom_xmat.__ctype__(),
-        wp_geom_size.__ctype__(),
-        wp_geom_dataid.__ctype__(),
-        wp_convex_vert.__ctype__(),
-        wp_convex_vert_offset.__ctype__(),
-        wp.uint32(ngeom),
-        wp.uint32(npair),
-        wp.uint32(ncon),
-        wp.uint32(types[0]),
-        wp.uint32(types[1]),
-        wp.float32(depth_extension),
-        wp.uint32(gjk_iter),
-        wp.uint32(epa_iter),
-        wp.uint32(epa_best_count),
-        wp.uint32(multi_polygon_count),
-        wp.float32(multi_tilt_angle),
-        dist.__ctype__(),
-        pos.__ctype__(),
-        normal.__ctype__(),
-        simplex.__ctype__(),
-    )
+    with wp.ScopedTimer("launch_epa_gjk", use_nvtx=True):
+        launch_epa_gjk(
+            wp_geom_pair.__ctype__(),
+            wp_geom_xpos.__ctype__(),
+            wp_geom_xmat.__ctype__(),
+            wp_geom_size.__ctype__(),
+            wp_geom_dataid.__ctype__(),
+            wp_convex_vert.__ctype__(),
+            wp_convex_vert_offset.__ctype__(),
+            wp.uint32(ngeom),
+            wp.uint32(npair),
+            wp.uint32(ncon),
+            wp.uint32(types[0]),
+            wp.uint32(types[1]),
+            wp.float32(depth_extension),
+            wp.uint32(gjk_iter),
+            wp.uint32(epa_iter),
+            wp.uint32(epa_best_count),
+            wp.uint32(multi_polygon_count),
+            wp.float32(multi_tilt_angle),
+            dist.__ctype__(),
+            pos.__ctype__(),
+            normal.__ctype__(),
+            simplex.__ctype__(),
+        )
 
     return dist.numpy(), pos.numpy(), normal.numpy()
 

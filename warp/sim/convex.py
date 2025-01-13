@@ -1329,7 +1329,7 @@ def gjk_epa_dense(
     dist.fill_(1e12)
 
     grid_size = npair * nenv
-    with wp.ScopedTimer("gjk_dense"):
+    with wp.ScopedTimer("gjk_dense", use_nvtx=True):
         wp.launch(
             pipeline.gjk_dense,
             dim=grid_size,
@@ -1359,7 +1359,7 @@ def gjk_epa_dense(
     # print(simplex.numpy())
     # print()
 
-    with wp.ScopedTimer("epa_dense"):
+    with wp.ScopedTimer("epa_dense", use_nvtx=True):
         wp.launch(
             pipeline.epa_dense,
             dim=grid_size,
@@ -1387,7 +1387,7 @@ def gjk_epa_dense(
             device=geom_pair.device,
         )
 
-    with wp.ScopedTimer("multiple_contacts_dense"):
+    with wp.ScopedTimer("multiple_contacts_dense", use_nvtx=True):
         wp.launch(
             pipeline.multiple_contacts_dense,
             dim=grid_size,
@@ -1689,7 +1689,7 @@ def vmap(fn: Callable, in_axes: int | None | Sequence[Any] = 0):
                 squeezed_args.append(squeeze_array(arg))
             else:
                 squeezed_args.append(arg)
-        with wp.ScopedTimer(f"vmap_{fn.__name__}"):
+        with wp.ScopedTimer(f"vmap_{fn.__name__}", use_nvtx=True):
             results = fn(*squeezed_args)
         batched_results = []
         for result in results:
