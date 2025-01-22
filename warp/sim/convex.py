@@ -11,15 +11,18 @@ from mujoco import mjx
 from mujoco.mjx._src.types import Data, Model
 
 import warp as wp
-import warp.sim
 
 # wp.set_device("cpu")
 
 # wp.config.verify_cuda = True
 # wp.config.verify_fp = True
+# wp.clear_kernel_cache()
 
 wp.config.enable_backward = False
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({
+    "enable_backward": False,
+    "max_unroll": 1,
+})
 
 mjxGEOM_PLANE = 0
 mjxGEOM_HFIELD = 1
@@ -1510,6 +1513,38 @@ def gjk_epa(
                 simplex,
             )
 
+        with wp.ScopedCapture() as capture:
+            with wp.ScopedTimer("gjk_epa_dense_capture"):
+                gjk_epa_dense(
+                    wp_geom_pair,
+                    wp_geom_xpos,
+                    wp_geom_xmat,
+                    wp_geom_size,
+                    wp_geom_dataid,
+                    wp_convex_vert,
+                    wp_convex_vert_offset,
+                    ngeom,
+                    npair,
+                    ncon,
+                    types[0],
+                    types[1],
+                    wp.float32(depth_extension),
+                    gjk_iter,
+                    epa_iter,
+                    epa_best_count,
+                    multi_polygon_count,
+                    wp.float32(multi_tilt_angle),
+                    dist,
+                    pos,
+                    normal,
+                    simplex,
+                )
+
+        graph = capture.graph
+        with wp.ScopedTimer("gjk_epa_dense_graph"):
+            wp.capture_launch(graph)
+
+
     return dist.numpy(), pos.numpy(), normal.numpy()
 
 
@@ -1936,7 +1971,7 @@ def profile_gjk_epa(batch_size):
             None,
         ),
     )
-    with warp.ScopedTimer(f"warp_gjk_epa_{batch_size}"):
+    with wp.ScopedTimer(f"warp_gjk_epa_{batch_size}"):
         dist, pos, n = vec_gjk_epa(mx, dx, geom_pair, key_types, 1, mx.ngeom, 1e9, 12, 12, 12, 8, 1.0, batch_size)
         wp.synchronize()
 
