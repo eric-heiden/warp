@@ -101,67 +101,110 @@ class EngineCollisionDriverTest(absltest.TestCase):
     </mujoco>
   """
 
-  def test_shapes(self):
+  #  def test_shapes(self):
+  #    """Tests collision driver return shapes."""
+  #    m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
+  #    d = mujoco.MjData(m)
+  #    mujoco.mj_forward(m, d)
+  #    batch_size = 12
+  #
+  #    @jax.vmap
+  #    def make_model_and_data(val):
+  #      dx = mjx.make_data(m)
+  #      mx = mjx.put_model(m)
+  #      dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+  #      return mx, dx
+  #
+  #    # vary the size of body 0.
+  #    mx, dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
+  #
+  #    forward_jit_fn = jax.jit(jax.vmap(mjx.forward))
+  #    dx = forward_jit_fn(mx, dx)
+  #
+  #    print("dx")
+  #    print(dx)
+  #
+  #    c = jax.jit(
+  #        jax.vmap(
+  #            engine_collision_driver.collision,
+  #            in_axes=(
+  #                0,
+  #                0,
+  #                None,
+  #                None,
+  #                None,
+  #                None,
+  #                None,
+  #                None,
+  #            ),
+  #        ),
+  #        static_argnums=(
+  #            2,
+  #            3,
+  #            4,
+  #            5,
+  #            6,
+  #            7,
+  #        ),
+  #    )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
+  #
+  #    npts = dx.contact.pos.shape[1]
+  #    self.assertTupleEqual(c.dist.shape, (batch_size, npts))
+  #    self.assertTupleEqual(c.pos.shape, (batch_size, npts, 3))
+  #    self.assertTupleEqual(c.frame.shape, (batch_size, npts, 3, 3))
+  #    self.assertTupleEqual(c.friction.shape, (batch_size, npts, 5))
+  #    self.assertTupleEqual(c.solimp.shape, (batch_size, npts, mujoco.mjNIMP))
+  #    self.assertTupleEqual(c.solref.shape, (batch_size, npts, mujoco.mjNREF))
+  #    self.assertTupleEqual(
+  #        c.solreffriction.shape, (batch_size, npts, mujoco.mjNREF)
+  #    )
+  #    self.assertTupleEqual(c.geom.shape, (batch_size, npts, 2))
+  #    self.assertTupleEqual(c.geom1.shape, (batch_size, npts))
+  #    self.assertTupleEqual(c.geom2.shape, (batch_size, npts))
+
+  def test_shapes2(self):
     """Tests collision driver return shapes."""
     m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
     batch_size = 12
 
-    @jax.vmap
     def make_model_and_data(val):
-      dx = mjx.make_data(m)
-      mx = mjx.put_model(m)
-      dx = dx.replace(qpos=dx.qpos.at[2].set(val))
-      return mx, dx
+        dx = mjx.make_data(m)
+        mx = mjx.put_model(m)
+        dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+        return mx, dx
 
-    # vary the size of body 0.
-    mx, dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
+    # Vary the size of body 0, manually create the batch using a loop.
+    mx_list = []
+    dx_list = []
+    for val in jp.arange(-1, 1, 2 / batch_size):
+        mx, dx = make_model_and_data(val)
+        mx_list.append(mx)
+        dx_list.append(dx)
 
-    forward_jit_fn = jax.jit(jax.vmap(mjx.forward))
-    dx = forward_jit_fn(mx, dx)
+    # mx = jp.stack(mx_list)
+    # dx = jp.stack(dx_list)
 
-    print("dx")
-    print(dx)
+    forward_jit_fn = jax.jit(mjx.forward)
+    # dx = forward_jit_fn(mx, dx)
 
-    c = jax.jit(
-        jax.vmap(
-            engine_collision_driver.collision,
-            in_axes=(
-                0,
-                0,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-        ),
-        static_argnums=(
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-        ),
-    )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
+    dx = []
+    for i in range(batch_size):
+       tmp = forward_jit_fn(mx_list[i], dx_list[i])
+       dx.append(tmp)
 
-    npts = dx.contact.pos.shape[1]
-    self.assertTupleEqual(c.dist.shape, (batch_size, npts))
-    self.assertTupleEqual(c.pos.shape, (batch_size, npts, 3))
-    self.assertTupleEqual(c.frame.shape, (batch_size, npts, 3, 3))
-    self.assertTupleEqual(c.friction.shape, (batch_size, npts, 5))
-    self.assertTupleEqual(c.solimp.shape, (batch_size, npts, mujoco.mjNIMP))
-    self.assertTupleEqual(c.solref.shape, (batch_size, npts, mujoco.mjNREF))
-    self.assertTupleEqual(
-        c.solreffriction.shape, (batch_size, npts, mujoco.mjNREF)
-    )
-    self.assertTupleEqual(c.geom.shape, (batch_size, npts, 2))
-    self.assertTupleEqual(c.geom1.shape, (batch_size, npts))
-    self.assertTupleEqual(c.geom2.shape, (batch_size, npts))
+    # Manually iterate for the collision function
+    c_list = []
+    for i in range(batch_size):
+        c = engine_collision_driver.collision2(
+            mx_list[i], dx_list[i], 1e9, 12, 12, 12, 8, 1.0
+        )
+        c_list.append(c)
 
+    print(len(dx), len(c_list))
+
+    _compare_contacts(self, dx, c_list)
 
 if __name__ == "__main__":
   absltest.main()

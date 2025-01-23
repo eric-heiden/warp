@@ -40,6 +40,8 @@ import numpy as np
 
 import warp as wp
 
+from convex import gjk_epa_dense, mat43
+
 
 
 
@@ -667,7 +669,7 @@ class CollisionInput:
         self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
         self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
         self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
-        self.convex_vert = wp.from_jax(convex_vert)
+        self.convex_vert = wp.from_jax(convex_vert.reshape(-1, 3), dtype=wp.vec3)
         self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32)
         self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
         self.ngeom = wp.int32(len(m.geom_type))
@@ -710,6 +712,7 @@ class CollisionOutput:
         self.type_pair_geom_id = wp.empty(n_geom_pair * 2, dtype=wp.int32)
         self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
         self.tmp_count = wp.empty(1, dtype=wp.int32)
+        self.simplex = wp.empty(n_points, dtype=mat43)
 
 
 @wp.kernel
@@ -841,9 +844,11 @@ def _narrowphase(s, input, output, t1, t2):
     # Assuming maxContactPointsMap is a 2D array or list accessible in Python
     ncon = maxContactPointsMap[t1][t2]
 
+    print(output.type_pair_geom_id.shape, npair)
+
     print("Calling gjk_epa_dense")
     gjk_epa_dense(
-        geom_pair=output.type_pair_geom_id,
+        geom_pair=output.type_pair_geom_id.reshape((-1, 2)),
         geom_xpos=input.geom_xpos,
         geom_xmat=input.geom_xmat,
         geom_size=input.geom_size,

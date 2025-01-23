@@ -554,7 +554,7 @@ def gjk_epa_pipeline(
         if contact_normal:
             contact_normal[tid] = normal
 
-    matc3 = wp.types.matrix(shape=(max_epa_best_count, 3), dtype=float)
+    matc3 = wp.types.matrix(shape=(int(max_epa_best_count), 3), dtype=float)
     vecc3 = wp.types.vector(max_epa_best_count * 3, dtype=float)
 
     # Matrix definition for the `tris` scratch space which is used to store the
@@ -1270,7 +1270,7 @@ def gjk_epa_pipeline(
 
 
 def gjk_epa_dense(
-    geom_pair: wp.array(dtype=int),
+    geom_pair: wp.array(dtype=int, ndim=2),
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_xmat: wp.array(dtype=wp.mat33),
     geom_size: wp.array(dtype=wp.vec3),
@@ -1298,7 +1298,8 @@ def gjk_epa_dense(
     nenv = 1
     for i in range(geom_xpos.ndim):
         nenv *= geom_xpos.shape[i]
-    nenv //= ngeom
+    
+    nenv //= int(ngeom)
     if nenv == 0:
         raise RuntimeError("Batch size of mjx.Data calculated in LaunchKernel_GJK_EPA is 0.")
 
@@ -1306,7 +1307,8 @@ def gjk_epa_dense(
     nmodel = 1
     for i in range(geom_size.ndim):
         nmodel *= geom_size.shape[i]
-    nmodel //= ngeom
+
+    nmodel //= int(ngeom)
     if nmodel == 0:
         raise RuntimeError("Batch size of mjx.Model calculated in LaunchKernel_GJK_EPA is 0.")
 
@@ -1331,7 +1333,7 @@ def gjk_epa_dense(
     # gjk_epa_init
     dist.fill_(1e12)
 
-    grid_size = npair * nenv
+    grid_size = int(npair * nenv)
     with wp.ScopedTimer("gjk_dense", use_nvtx=True):
         wp.launch(
             pipeline.gjk_dense,
@@ -1473,7 +1475,7 @@ def gjk_epa(
 
     device = wp.get_preferred_device()
 
-    wp_geom_pair = wp.from_jax(geom_pair.astype(int), dtype=wp.int32).to(device)
+    wp_geom_pair = wp.from_jax(geom_pair.astype(int), dtype=wp.int32, shape=(npair, 2)).to(device)
     wp_geom_xpos = wp.from_jax(d.geom_xpos, dtype=wp.vec3).to(device)
     wp_geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33).to(device)
     wp_geom_size = wp.from_jax(m.geom_size, dtype=wp.vec3).to(device)
