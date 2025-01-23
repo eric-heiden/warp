@@ -1286,11 +1286,11 @@ WP_API void epa_gjk_device(
             "batch size of mjx.Data in LaunchKernel_GJK_EPA.");
   }
 
-  if (geom_dataid.shape[0] != ngeom) {
-    throw std::runtime_error(
-            "Dimensions of geom_dataid in LaunchKernel_GJK_EPA "
-            "do not match (ngeom,).");
-  }
+  // if (geom_dataid.shape[0] != ngeom) {
+  //   throw std::runtime_error(
+  //           "Dimensions of geom_dataid in LaunchKernel_GJK_EPA "
+  //           "do not match (ngeom,).");
+  // }
 
   // TODO(btaba): assert all input/output shapes.
   input.geom_pair = geom_pair.data;
