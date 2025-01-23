@@ -32,10 +32,29 @@ from mujoco.mjx._src.types import Model
 # pylint: enable=g-importing-member
 # from mujoco.mjx._src.cuda import _engine_collision_driver
 # from mujoco.mjx._src.cuda import engine_collision_convex
-import engine_collision_convex
+# import engine_collision_convex
+
+import convex
+
 import numpy as np
 
 import warp as wp
+
+
+
+
+def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
+  convex_vert, convex_vert_offset = [], [0]
+  nvert = 0
+  for mesh in m.mesh_convex:
+    if mesh is not None:
+      nvert += mesh.vert.shape[0]
+      convex_vert.append(mesh.vert)
+    convex_vert_offset.append(nvert)
+
+  convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
+  convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.uint32)
+  return convex_vert, convex_vert_offset
 
 
 
@@ -63,7 +82,7 @@ def get_dyn_body_aamm(
     body_geomnum: wp.array(dtype=int),
     body_geomadr: wp.array(dtype=int),
     geom_margin: wp.array(dtype=float),
-    geom_xpos: wp.array(dtype=float),
+    geom_xpos: wp.array(dtype=wp.vec3),
     geom_rbound: wp.array(dtype=float),
     dyn_body_aamm: wp.array(dtype=float),
 ):
@@ -84,7 +103,7 @@ def get_dyn_body_aamm(
         g = body_geomadr[bid] + i
 
         for j in range(3):
-            pos = geom_xpos[(env_id * ngeom + g) * 3 + j]
+            pos = geom_xpos[(env_id * ngeom + g)][j]
             rbound = geom_rbound[model_id * ngeom + g]
             margin = geom_margin[model_id * ngeom + g]
 
@@ -220,11 +239,12 @@ class Mat3x4:
     row2 : wp.vec4
 
 @wp.func
-def xposmat_to_float4(xpos: wp.array(dtype=float), xmat: wp.array(dtype=float), gi: int) -> Mat3x4:
+def xposmat_to_float4(xpos: wp.array(dtype=wp.vec3), xmat: wp.array(dtype=wp.mat33), gi: int) -> Mat3x4:
     result = Mat3x4()
-    result.row0 = wp.vec4(xmat[gi * 9 + 0], xmat[gi * 9 + 1], xmat[gi * 9 + 2], xpos[gi * 3 + 0])
-    result.row1 = wp.vec4(xmat[gi * 9 + 3], xmat[gi * 9 + 4], xmat[gi * 9 + 5], xpos[gi * 3 + 1])
-    result.row2 = wp.vec4(xmat[gi * 9 + 6], xmat[gi * 9 + 7], xmat[gi * 9 + 8], xpos[gi * 3 + 2])
+    trafo = xmat[gi];
+    result.row0 = wp.vec4(trafo[0][0], trafo[0][1], trafo[0][2], xpos[gi].x)
+    result.row1 = wp.vec4(trafo[1][0], trafo[1][1], trafo[1][2], xpos[gi].y)
+    result.row2 = wp.vec4(trafo[2][0], trafo[2][1], trafo[2][2], xpos[gi].z)
     return result
 
 @wp.func
@@ -236,8 +256,8 @@ def transform_point(mat : Mat3x4, pos : wp.vec3)->wp.vec3:
 
 @wp.kernel
 def get_dyn_geom_aabb(nenv: int, nmodel: int, ngeom: int,
-                      geom_xpos: wp.array(dtype=float),
-                      geom_xmat: wp.array(dtype=float),
+                      geom_xpos: wp.array(dtype=wp.vec3),
+                      geom_xmat: wp.array(dtype=wp.mat33),
                       geom_aabb: wp.array(dtype=float),
                       dyn_aabb: wp.array(dtype=float)):
     tid = wp.tid()
@@ -613,11 +633,11 @@ class CollisionInput:
         # n_geom_type_pairs = n_geom_types * n_geom_types
         # type_pair_offset = _get_ngeom_pair_type_offset(m)
         # type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
-        convex_vert, convex_vert_offset = engine_collision_convex.get_convex_vert(m)
+        convex_vert, convex_vert_offset = get_convex_vert(m)
 
-        self.geom_xpos = wp.from_jax(d.geom_xpos).reshape((-1,))
-        self.geom_xmat = wp.from_jax(d.geom_xmat).reshape((-1,))
-        self.geom_size = wp.from_jax(m.geom_size)
+        self.geom_xpos = wp.from_jax(d.geom_xpos, dtype = wp.vec3) #.reshape((-1,))
+        self.geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33) #.reshape((-1,))
+        self.geom_size = wp.from_jax(m.geom_size, dtype = wp.vec3)
         self.geom_type = wp.array(m.geom_type, dtype=wp.int32)
         self.geom_contype = wp.array(m.geom_contype, dtype=wp.int32)
         self.geom_conaffinity = wp.array(m.geom_conaffinity, dtype=wp.int32)
@@ -670,8 +690,8 @@ class CollisionInput:
 class CollisionOutput:
     def __init__(self, n_points : int, nenv : int, nbody : int, ngeom : int, n_geom_pair : int, n_geom_types : int, mjNREF : int, mjNIMP : int, device):
         self.dist = wp.empty(n_points, dtype=wp.float32)
-        self.pos = wp.empty(n_points* 3, dtype=wp.float32)
-        self.normal = wp.empty(n_points* 3, dtype=wp.float32)
+        self.pos = wp.empty(n_points, dtype=wp.vec3)
+        self.normal = wp.empty(n_points, dtype=wp.vec3)
         self.g1 = wp.empty(n_points, dtype=wp.int32)
         self.g2 = wp.empty(n_points, dtype=wp.int32)
         self.includemargin = wp.empty(n_points, dtype=wp.float32)
@@ -713,8 +733,8 @@ def init(
     max_contact_points: int,
     nenv: int,
     dist: wp.array(dtype=wp.float32),
-    pos: wp.array(dtype=wp.float32),
-    normal: wp.array(dtype=wp.float32),
+    pos: wp.array(dtype=wp.vec3),
+    normal: wp.array(dtype=wp.vec3),
     g1: wp.array(dtype=wp.int32),
     g2: wp.array(dtype=wp.int32),
     includemargin: wp.array(dtype=wp.float32),
@@ -728,12 +748,8 @@ def init(
         return
 
     dist[tid] = 1e12
-    pos[tid * 3 + 0] = 0.0
-    pos[tid * 3 + 1] = 0.0
-    pos[tid * 3 + 2] = 0.0
-    normal[tid * 3 + 0] = 0.0
-    normal[tid * 3 + 1] = 0.0
-    normal[tid * 3 + 2] = 1.0
+    pos[tid ] = wp.vec3(0.0, 0.0, 0.0)
+    normal[tid] = wp.vec3(0.0, 0.0, 0.0)
     g1[tid] = -1
     g2[tid] = -1
     includemargin[tid] = 0.0
@@ -751,6 +767,40 @@ def init(
     friction[tid * 5 + 4] = 0.0001
     solreffriction[tid * 2 + 0] = 0.0
     solreffriction[tid * 2 + 1] = 0.0
+
+
+@wp.struct
+class OrthoBasis:
+    b: wp.vec3
+    c: wp.vec3
+
+@wp.func
+def orthogonals(a: wp.vec3) -> OrthoBasis:
+    y = wp.vec3(0.0, 1.0, 0.0)
+    z = wp.vec3(0.0, 0.0, 1.0)
+    b = wp.select((-0.5 < a[1]) and (a[1] < 0.5), y, z)
+    b = b - a * wp.dot(a, b)
+    b = wp.normalize(b)
+    if (a == wp.vec3(0.0, 0.0, 0.0)):
+        b = wp.vec3(0.0, 0.0, 0.0)
+    c = wp.cross(a, b)
+    
+    result = OrthoBasis(b=b, c=c)
+    return result
+
+
+@wp.kernel
+def make_frame(n_frames: int, a: wp.array(dtype=wp.vec3), frame: wp.array(dtype=wp.vec3)):
+    tid = wp.tid()
+    if tid >= n_frames:
+        return
+    
+    a_normalized = wp.normalize(a[tid])
+    basis = orthogonals(a_normalized)
+    
+    frame[3 * tid + 0] = a_normalized
+    frame[3 * tid + 1] = basis.b
+    frame[3 * tid + 2] = basis.c
 
 
 
@@ -791,6 +841,7 @@ def _narrowphase(s, input, output, t1, t2):
     # Assuming maxContactPointsMap is a 2D array or list accessible in Python
     ncon = maxContactPointsMap[t1][t2]
 
+    print("Calling gjk_epa_dense")
     gjk_epa_dense(
         geom_pair=output.type_pair_geom_id,
         geom_xpos=input.geom_xpos,
@@ -827,6 +878,17 @@ def narrowphase(s, input, output):
         output (CollisionOutput): Output collision data.
     """
 
+    mjxGEOM_PLANE = 0
+    mjxGEOM_HFIELD = 1
+    mjxGEOM_SPHERE = 2
+    mjxGEOM_CAPSULE = 3
+    mjxGEOM_ELLIPSOID = 4
+    mjxGEOM_CYLINDER = 5
+    mjxGEOM_BOX = 6
+    mjxGEOM_CONVEX = 7
+    mjxGEOM_size = 8
+
+    mjxGEOM_size = 8  # Replace this with the actual value of mjxGEOM_size if known.
 
     for t2 in range(mjxGEOM_size):
         for t1 in range(t2 + 1):
@@ -841,16 +903,16 @@ def narrowphase(s, input, output):
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_CYLINDER:
                 _narrowphase(s, input, output, t1, t2)
-            elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_MESH:
-                _narrowphase(s, input, output, t1, t2)
+            # elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_MESH:
+            #     _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_SPHERE:
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_CAPSULE:
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_BOX:
                 _narrowphase(s, input, output, t1, t2)
-            elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_MESH:
-                _narrowphase(s, input, output, t1, t2)
+            # elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_MESH:
+            #     _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_CAPSULE:
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_BOX:
@@ -859,8 +921,8 @@ def narrowphase(s, input, output):
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_CYLINDER:
                 _narrowphase(s, input, output, t1, t2)
-            elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_MESH:
-                _narrowphase(s, input, output, t1, t2)
+            # elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_MESH:
+            #     _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_ELLIPSOID and t2 == mjxGEOM_ELLIPSOID:
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_ELLIPSOID and t2 == mjxGEOM_CYLINDER:
@@ -869,10 +931,10 @@ def narrowphase(s, input, output):
                 _narrowphase(s, input, output, t1, t2)
             elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_BOX:
                 _narrowphase(s, input, output, t1, t2)
-            elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_MESH:
-                _narrowphase(s, input, output, t1, t2)
-            elif t1 == mjxGEOM_MESH and t2 == mjxGEOM_MESH:
-                _narrowphase(s, input, output, t1, t2)
+            # elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_MESH:
+            #     _narrowphase(s, input, output, t1, t2)
+            # elif t1 == mjxGEOM_MESH and t2 == mjxGEOM_MESH:
+            #     _narrowphase(s, input, output, t1, t2)
 
 
 

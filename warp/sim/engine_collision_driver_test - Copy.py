@@ -153,10 +153,14 @@ class EngineCollisionDriverTest(absltest.TestCase):
     print("shape")
     print(len(d.geom_xpos.shape))
 
+
     c = engine_collision_driver.collision2(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
 
     npts = d.contact.pos.shape[1]
+
+    #print(f"Type: {type(arr).__name__}, Shape: {arr.shape}, Dtype: {arr.dtype}")
     self.assertTupleEqual(c.dist.shape, (batch_size, npts))
+
     self.assertTupleEqual(c.pos.shape, (batch_size, npts, 3))
     self.assertTupleEqual(c.frame.shape, (batch_size, npts, 3, 3))
     self.assertTupleEqual(c.friction.shape, (batch_size, npts, 5))
@@ -365,6 +369,10 @@ def testKernel(num : int):
 
 
 if __name__ == "__main__":
+
+  wp.init()
+  
+
 
   wp.launch(testKernel, dim=1, inputs = [1])
 
