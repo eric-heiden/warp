@@ -1270,7 +1270,7 @@ def gjk_epa_pipeline(
 
 
 def gjk_epa_dense(
-    geom_pair: wp.array(dtype=int),
+    geom_pair: wp.array(dtype=int, ndim=2),
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_xmat: wp.array(dtype=wp.mat33),
     geom_size: wp.array(dtype=wp.vec3),
@@ -1594,13 +1594,16 @@ def _narrowphase(
     contact_normal: wp.array(dtype=wp.vec3),
 ):
     group_key = type1 + type2 * n_geom_types
-    npair = type_pair_count[group_key]
+    wp.synchronize()
+    type_pair_count_host = type_pair_count.numpy()
+    wp.synchronize()
+    npair = int(type_pair_count_host[group_key])
     if npair == 0:
         return
 
-    blockSize = 256
-    grid_size = (npair + blockSize - 1) / blockSize
-    ncon = max_contact_points_map[type1][type2]
+    blockSize = int(256)
+    grid_size = int((npair + blockSize - 1) // blockSize)
+    # ncon = max_contact_points_map[type1][type2]
     pipeline = gjk_epa_pipeline(
         type1,
         type2,
@@ -1643,6 +1646,8 @@ def _narrowphase(
         block_dim=blockSize,
     )
 
+    wp.synchronize()
+    wp.synchronize()
 
 # def narrowphase(cudaStream_t s, CollisionInput& in, CollisionOutput& out) {
 #     for t2 in range(mjxGEOM_size):

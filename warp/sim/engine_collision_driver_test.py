@@ -23,6 +23,8 @@ from mujoco import mjx
 import engine_collision_driver
 import numpy as np
 
+import warp as wp
+
 
 def _compare_contacts(test_cls, dx, c):
   """Compares JAX and CUDA contacts."""
@@ -55,7 +57,7 @@ def _compare_contacts(test_cls, dx, c):
       test_cls.assertGreater(found_point, 0)
 
 
-class EngineCollisionDriverTest(absltest.TestCase):
+class EngineCollisionDriverTest: #(absltest.TestCase):
 
   _CONVEX_CONVEX = """
     <mujoco>
@@ -102,51 +104,59 @@ class EngineCollisionDriverTest(absltest.TestCase):
   """
 
   def test_shapes(self):
+
+    # https://nvidia.github.io/warp/debugging.html
+    wp.init()
+
+    wp.config.mode = "debug"
+    assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
+
+    wp.config.print_launches = True   
+    wp.config.verify_cuda = True
+
+
     """Tests collision driver return shapes."""
     m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
-    batch_size = 12
+    batch_size = 3
 
-    @jax.vmap
     def make_model_and_data(val):
-      dx = mjx.make_data(m)
-      mx = mjx.put_model(m)
-      dx = dx.replace(qpos=dx.qpos.at[2].set(val))
-      return mx, dx
+        dx = mjx.make_data(m)
+        mx = mjx.put_model(m)
+        dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+        return mx, dx
 
-    # vary the size of body 0.
-    mx, dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
+    # Vary the size of body 0, manually create the batch using a loop.
+    mx_list = []
+    dx_list = []
+    for val in jp.arange(-1, 1, 2 / batch_size):
+        mx, dx = make_model_and_data(val)
+        mx_list.append(mx)
+        dx_list.append(dx)
 
-    forward_jit_fn = jax.jit(jax.vmap(mjx.forward))
-    dx = forward_jit_fn(mx, dx)
+    # mx = jp.stack(mx_list)
+    # dx = jp.stack(dx_list)
+
+    forward_jit_fn = jax.jit(mjx.forward)
+    # dx = forward_jit_fn(mx, dx)
+
+    dx = []
+    for i in range(batch_size):
+       tmp = forward_jit_fn(mx_list[i], dx_list[i])
+       dx.append(tmp)
 
     print("dx")
     print(dx)
 
-    c = jax.jit(
-        jax.vmap(
-            engine_collision_driver.collision,
-            in_axes=(
-                0,
-                0,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-        ),
-        static_argnums=(
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-        ),
-    )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
+    # Manually iterate for the collision function
+    c_list = []
+    for i in range(batch_size):
+        c = engine_collision_driver.collision2(mx_list[i], dx[i], 1e9, 12, 12, 12, 8, 1.0)
+        c_list.append(c)
+
+    # Stack the results for consistency
+    # c = jp.stack(c_list)
 
     npts = dx.contact.pos.shape[1]
     self.assertTupleEqual(c.dist.shape, (batch_size, npts))
@@ -164,4 +174,6 @@ class EngineCollisionDriverTest(absltest.TestCase):
 
 
 if __name__ == "__main__":
-  absltest.main()
+   instance = EngineCollisionDriverTest()
+   instance.test_shapes()
+  #absltest.main()

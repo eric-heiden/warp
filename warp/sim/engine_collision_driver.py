@@ -29,6 +29,10 @@ from mujoco.mjx._src.types import Data
 from mujoco.mjx._src.types import DisableBit
 from mujoco.mjx._src.types import GeomType
 from mujoco.mjx._src.types import Model
+
+#from convex import gjk_epa_dense
+from convex import _narrowphase
+
 # pylint: enable=g-importing-member
 # from mujoco.mjx._src.cuda import _engine_collision_driver
 # from mujoco.mjx._src.cuda import engine_collision_convex
@@ -108,10 +112,11 @@ def get_dyn_body_aamm(
             margin = geom_margin[model_id * ngeom + g]
 
             min_val = pos - rbound - margin
-            max_val = pos + rbound + margin
+            max_val = pos + rbound + margin           
 
             aamm_min[j] = wp.min(aamm_min[j], min_val)
             aamm_max[j] = wp.max(aamm_max[j], max_val)
+
 
     # Write results to output
     dyn_body_aamm[tid * 6 + 0] = aamm_min[0]
@@ -121,28 +126,50 @@ def get_dyn_body_aamm(
     dyn_body_aamm[tid * 6 + 4] = aamm_max[1]
     dyn_body_aamm[tid * 6 + 5] = aamm_max[2]
 
-    # # Initialize AAMM with extreme values
-    # aamm = [wp.constant(float('inf')), wp.constant(float('inf')), wp.constant(float('inf')),
-    #         wp.constant(-float('inf')), wp.constant(-float('inf')), wp.constant(-float('inf'))]
 
-    # # Iterate over all geometries associated with the body
-    # for i in range(body_geomnum[bid]):
-    #     g = body_geomadr[bid] + i
+# @wp.kernel
+# def get_dyn_body_aamm(
+#     nenv: int, nbody: int, nmodel: int, ngeom: int,
+#     body_geomnum: wp.array(dtype=int),
+#     body_geomadr: wp.array(dtype=int),
+#     geom_margin: wp.array(dtype=float),
+#     geom_xpos: wp.array(dtype=wp.vec3),
+#     geom_rbound: wp.array(dtype=float),
+#     dyn_body_aamm: wp.array(dtype=float),
+# ):
+#     tid = wp.tid()
+#     if tid >= nenv * nbody:
+#         return
 
-    #     for j in range(3):
-    #         pos = geom_xpos[(env_id * ngeom + g) * 3 + j]
-    #         rbound = geom_rbound[model_id * ngeom + g]
-    #         margin = geom_margin[model_id * ngeom + g]
+#     bid = tid % nbody
+#     env_id = tid // nbody
+#     model_id = env_id % nmodel
 
-    #         aamm_min = pos - rbound - margin
-    #         aamm_max = pos + rbound + margin
+#     # Initialize AAMM with extreme values
+#     # aamm_min = wp.vec3(1000000000.0, 1000000000.0, 1000000000.0)
+#     # aamm_max = wp.vec3(-1000000000.0, -1000000000.0, -1000000000.0)
 
-    #         aamm[j] = wp.min(aamm[j], aamm_min)
-    #         aamm[j + 3] = wp.max(aamm[j + 3], aamm_max)
+#     for j in range(3):
+#         dyn_body_aamm[tid * 6 + j] = 1000000000.0
+#     for j in range(3):
+#         dyn_body_aamm[tid * 6 + j + 3] = -1000000000.0
 
-    # # Write results to output
-    # for i in range(6):
-    #     dyn_body_aamm[tid * 6 + i] = aamm[i]
+#     # Iterate over all geometries associated with the body
+#     for i in range(body_geomnum[bid]):
+#         g = body_geomadr[bid] + i
+
+#         for j in range(3):
+#             pos = geom_xpos[(env_id * ngeom + g)][j]
+#             rbound = geom_rbound[model_id * ngeom + g]
+#             margin = geom_margin[model_id * ngeom + g]
+
+#             min_val = pos - rbound - margin
+#             max_val = pos + rbound + margin
+#             # print(min_val)
+#             # print(max_val)
+
+#             dyn_body_aamm[tid * 6 + j] = wp.min(dyn_body_aamm[tid * 6 + j], min_val)
+#             dyn_body_aamm[tid * 6 + j + 3] = wp.max(dyn_body_aamm[tid * 6 + j + 3], max_val)
 
 
 
@@ -216,12 +243,9 @@ def get_body_pairs_nxn(
     #     (aamm2[2] > aamm1[5])
     # )
     separating = (
-        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 3]) or
-        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 4]) or
-        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 5]) or
-        (dyn_body_aamm[(env_id * nbody + body2) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 3]) or
-        (dyn_body_aamm[(env_id * nbody + body2) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 4]) or
-        (dyn_body_aamm[(env_id * nbody + body2) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 5])
+        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 3]) or (dyn_body_aamm[(env_id * nbody + body1) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 4]) or
+        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 5]) or (dyn_body_aamm[(env_id * nbody + body2) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 3]) or
+        (dyn_body_aamm[(env_id * nbody + body2) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 4]) or (dyn_body_aamm[(env_id * nbody + body2) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 5])
     )
 
     if separating and not (body_has_plane[body1] or body_has_plane[body2]):
@@ -238,13 +262,27 @@ class Mat3x4:
     row1 : wp.vec4
     row2 : wp.vec4
 
+# @wp.func
+# def xposmat_to_float4(xpos: wp.array(dtype=wp.vec3), xmat: wp.array(dtype=wp.float32), gi: int) -> Mat3x4:
+#     result = Mat3x4()
+#     pos = xpos[gi]
+#     result.row0 = wp.vec4(xmat[gi * 9 + 0], xmat[gi * 9 + 1], xmat[gi * 9 + 2],
+#                           pos.x)
+#     result.row1 = wp.vec4(xmat[gi * 9 + 3], xmat[gi * 9 + 4], xmat[gi * 9 + 5],
+#                           pos.y)
+#     result.row2 = wp.vec4(xmat[gi * 9 + 6], xmat[gi * 9 + 7], xmat[gi * 9 + 8],
+#                           pos.z)
+#     return result
 @wp.func
 def xposmat_to_float4(xpos: wp.array(dtype=wp.vec3), xmat: wp.array(dtype=wp.mat33), gi: int) -> Mat3x4:
     result = Mat3x4()
-    trafo = xmat[gi];
-    result.row0 = wp.vec4(trafo[0][0], trafo[0][1], trafo[0][2], xpos[gi].x)
-    result.row1 = wp.vec4(trafo[1][0], trafo[1][1], trafo[1][2], xpos[gi].y)
-    result.row2 = wp.vec4(trafo[2][0], trafo[2][1], trafo[2][2], xpos[gi].z)
+    pos = xpos[gi]
+    mat = xmat[gi]
+
+    result.row0 = wp.vec4(mat[0][0], mat[0][1], mat[0][2], pos.x)
+    result.row1 = wp.vec4(mat[1][0], mat[1][1], mat[1][2], pos.y)
+    result.row2 = wp.vec4(mat[2][0], mat[2][1], mat[2][2], pos.z)
+
     return result
 
 @wp.func
@@ -357,18 +395,18 @@ def get_geom_pairs_nxn(nenv: int, ngeom: int, nbody: int, n_geom_pair: int,
             #               (aabb1[2] > aabb2[5]) or (aabb2[0] > aabb1[3]) or
             #               (aabb2[1] > aabb1[4]) or (aabb2[2] > aabb1[5]))
 
-            separating = ((dyn_geom_aabb[(env_id * ngeom + geom1) * 6] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 3]) or
-              (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 4]) or
-              (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 5]) or
-              (dyn_geom_aabb[(env_id * ngeom + geom2) * 6] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 3]) or
-              (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 4]) or
-              (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 5]))
+            separating = ((dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 0] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 3]) or (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 4]) or
+                          (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 5]) or (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 0] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 3]) or
+                          (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 4]) or (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 5]))
 
             if separating or skip_con or skip_type:
                 continue
 
             if type1 > type2:
-                geom1, geom2 = geom2, geom1
+                tmp = geom1
+                geom1 = geom2
+                geom2 = tmp
+                # geom1, geom2 = geom2, geom1
             pair_id = wp.atomic_add(col_geom_pair_count, env_id, 1)
             col_geom_pair[(env_id * n_geom_pair + pair_id) * 2] = geom1
             col_geom_pair[(env_id * n_geom_pair + pair_id) * 2 + 1] = geom2
@@ -667,25 +705,82 @@ class CollisionInput:
         self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
         self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
         self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
-        self.convex_vert = wp.from_jax(convex_vert)
+        self.convex_vert = wp.from_jax(convex_vert, dtype = wp.vec3)
         self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32)
         self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
-        self.ngeom = wp.int32(len(m.geom_type))
-        self.npair = wp.int32(m.npair)
-        self.nbody = wp.int32(m.nbody)
-        self.nexclude = wp.int32(m.nexclude)
-        self.max_contact_points = wp.int32(max_contact_points)
-        self.n_geom_pair = wp.int32(n_geom_pair)
-        self.n_geom_types = wp.int32(len(GeomType))
+        self.ngeom = len(m.geom_type)
+        self.npair = m.npair
+        self.nbody = m.nbody
+        self.nexclude = m.nexclude
+        self.max_contact_points = max_contact_points
+        self.n_geom_pair = n_geom_pair
+        self.n_geom_types = len(GeomType)
         self.filter_parent = not (m.opt.disableflags & DisableBit.FILTERPARENT)
-        self.depth_extension = wp.float32(depth_extension)
-        self.gjk_iteration_count = wp.int32(gjk_iter)
-        self.epa_iteration_count = wp.int32(epa_iter)
-        self.epa_best_count = wp.int32(epa_best_count)
-        self.multi_polygon_count = wp.int32(multi_polygon_count)
+        self.depth_extension = depth_extension
+        self.gjk_iteration_count = gjk_iter
+        self.epa_iteration_count = epa_iter
+        self.epa_best_count = epa_best_count
+        self.multi_polygon_count = multi_polygon_count
         self.multi_tilt_angle = wp.float32(multi_tilt_angle)
-        self.nenv = wp.int32(nenv)
-        self.nmodel = wp.int32(nmodel)
+        self.nenv = nenv
+        self.nmodel = nmodel
+
+    def __str__(self):
+        # Return a string representation of all the members
+        return (
+            f"geom_xpos: {self.geom_xpos.numpy()}\n"
+            f"geom_xmat: {self.geom_xmat.numpy()}\n"
+            f"geom_size: {self.geom_size.numpy()}\n"
+            f"geom_type: {self.geom_type.numpy()}\n"
+            f"geom_contype: {self.geom_contype.numpy()}\n"
+            f"geom_conaffinity: {self.geom_conaffinity.numpy()}\n"
+            f"geom_priority: {self.geom_priority.numpy()}\n"
+            f"geom_margin: {self.geom_margin.numpy()}\n"
+            f"geom_gap: {self.geom_gap.numpy()}\n"
+            f"geom_solmix: {self.geom_solmix.numpy()}\n"
+            f"geom_friction: {self.geom_friction.numpy()}\n"
+            f"geom_solref: {self.geom_solref.numpy()}\n"
+            f"geom_solimp: {self.geom_solimp.numpy()}\n"
+            f"geom_aabb: {self.geom_aabb.numpy()}\n"
+            f"geom_rbound: {self.geom_rbound.numpy()}\n"
+            f"geom_dataid: {self.geom_dataid.numpy()}\n"
+            f"geom_bodyid: {self.geom_bodyid.numpy()}\n"
+            f"body_parentid: {self.body_parentid.numpy()}\n"
+            f"body_weldid: {self.body_weldid.numpy()}\n"
+            f"body_contype: {self.body_contype.numpy()}\n"
+            f"body_conaffinity: {self.body_conaffinity.numpy()}\n"
+            f"body_geomadr: {self.body_geomadr.numpy()}\n"
+            f"body_geomnum: {self.body_geomnum.numpy()}\n"
+            f"body_has_plane: {self.body_has_plane.numpy()}\n"
+            f"pair_geom1: {self.pair_geom1.numpy()}\n"
+            f"pair_geom2: {self.pair_geom2.numpy()}\n"
+            f"exclude_signature: {self.exclude_signature.numpy()}\n"
+            f"pair_margin: {self.pair_margin.numpy()}\n"
+            f"pair_gap: {self.pair_gap.numpy()}\n"
+            f"pair_friction: {self.pair_friction.numpy()}\n"
+            f"pair_solref: {self.pair_solref.numpy()}\n"
+            f"pair_solimp: {self.pair_solimp.numpy()}\n"
+            f"convex_vert: {self.convex_vert.numpy()}\n"
+            f"convex_vert_offset: {self.convex_vert_offset.numpy()}\n"
+            f"type_pair_offset: {self.type_pair_offset.numpy()}\n"
+            # f"ngeom: {self.ngeom.numpy()}\n"
+            # f"npair: {self.npair.numpy()}\n"
+            # f"nbody: {self.nbody.numpy()}\n"
+            # f"nexclude: {self.nexclude.numpy()}\n"
+            # f"max_contact_points: {self.max_contact_points.numpy()}\n"
+            # f"n_geom_pair: {self.n_geom_pair.numpy()}\n"
+            # f"n_geom_types: {self.n_geom_types.numpy()}\n"
+            # f"filter_parent: {self.filter_parent}\n"
+            # f"depth_extension: {self.depth_extension.numpy()}\n"
+            # f"gjk_iteration_count: {self.gjk_iteration_count.numpy()}\n"
+            # f"epa_iteration_count: {self.epa_iteration_count.numpy()}\n"
+            # f"epa_best_count: {self.epa_best_count.numpy()}\n"
+            # f"multi_polygon_count: {self.multi_polygon_count.numpy()}\n"
+            # f"multi_tilt_angle: {self.multi_tilt_angle.numpy()}\n"
+            # f"nenv: {self.nenv.numpy()}\n"
+            # f"nmodel: {self.nmodel.numpy()}"
+        )   
+
 
 class CollisionOutput:
     def __init__(self, n_points : int, nenv : int, nbody : int, ngeom : int, n_geom_pair : int, n_geom_types : int, mjNREF : int, mjNIMP : int, device):
@@ -710,6 +805,7 @@ class CollisionOutput:
         self.type_pair_geom_id = wp.empty(n_geom_pair * 2, dtype=wp.int32)
         self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
         self.tmp_count = wp.empty(1, dtype=wp.int32)
+        # self.simplex = wp.empty(n_points, dtype=wp.types.matrix(shape=(4, 3), dtype=float))
 
 
 @wp.kernel
@@ -811,7 +907,7 @@ def make_frame(n_frames: int, a: wp.array(dtype=wp.vec3), frame: wp.array(dtype=
 
 
 
-def _narrowphase(s, input, output, t1, t2):
+def _narrowphase2(s, input, output, t1, t2):
 
 
     mjxGEOM_size = 8  # Replace this with the actual value of mjxGEOM_size if known.
@@ -829,12 +925,58 @@ def _narrowphase(s, input, output, t1, t2):
     ]
 
 
+    # Assuming maxContactPointsMap is a 2D array or list accessible in Python
+    ncon = maxContactPointsMap[t1][t2]
+
+
+    _narrowphase(
+        t1,
+        t2,
+        input.gjk_iteration_count,
+        input.epa_iteration_count,
+        input.nenv,
+        input.ngeom,
+        input.nmodel,
+        input.n_geom_types,
+        ncon,
+        output.type_pair_env_id,
+        output.type_pair_geom_id,
+        output.type_pair_count,
+        input.type_pair_offset,
+        input.geom_xpos,
+        input.geom_xmat,
+        input.geom_size,
+        input.geom_dataid,
+        input.convex_vert,
+        input.convex_vert_offset,
+        input.epa_best_count,
+        input.depth_extension,
+        input.multi_polygon_count,
+        input.multi_tilt_angle,
+        # outputs
+        output.env_counter,
+        output.g1,
+        output.g2,
+        output.dist,
+        output.pos,
+        output.normal,
+    )
+
+    wp.synchronize()
+
+    return
+
+
+
+   
+
+
     group_key = t1 + t2 * input.n_geom_types
 
     type_pair_count = output.type_pair_count.numpy()
 
     # Accessing the value from the device array
-    npair = type_pair_count[group_key]
+    npair = int(type_pair_count[group_key])
     if npair == 0:
         return
 
@@ -842,8 +984,33 @@ def _narrowphase(s, input, output, t1, t2):
     ncon = maxContactPointsMap[t1][t2]
 
     print("Calling gjk_epa_dense")
-    gjk_epa_dense(
-        geom_pair=output.type_pair_geom_id,
+    # gjk_epa_dense(
+    #     geom_pair=output.type_pair_geom_id.reshape((-1, 2)),
+    #     geom_xpos=input.geom_xpos,
+    #     geom_xmat=input.geom_xmat,
+    #     geom_size=input.geom_size,
+    #     geom_dataid=input.geom_dataid,
+    #     convex_vert=input.convex_vert,
+    #     convex_vert_offset=input.convex_vert_offset,
+    #     ngeom=input.ngeom,
+    #     npair=npair,
+    #     ncon=ncon,
+    #     geom_type0=t1,
+    #     geom_type1=t2,
+    #     depth_extension=input.depth_extension,
+    #     gjk_iteration_count=input.gjk_iteration_count,
+    #     epa_iteration_count=input.epa_iteration_count,
+    #     epa_best_count=input.epa_best_count,
+    #     multi_polygon_count=input.multi_polygon_count,
+    #     multi_tilt_angle=input.multi_tilt_angle,
+
+    #     dist=output.dist,
+    #     pos=output.pos,
+    #     normal=output.normal,
+    #     simplex=output.simplex
+    # )
+    gjk_epa_sparse(
+        geom_pair=output.type_pair_geom_id.reshape((-1, 2)),
         geom_xpos=input.geom_xpos,
         geom_xmat=input.geom_xmat,
         geom_size=input.geom_size,
@@ -861,6 +1028,7 @@ def _narrowphase(s, input, output, t1, t2):
         epa_best_count=input.epa_best_count,
         multi_polygon_count=input.multi_polygon_count,
         multi_tilt_angle=input.multi_tilt_angle,
+        
         dist=output.dist,
         pos=output.pos,
         normal=output.normal,
@@ -885,7 +1053,7 @@ def narrowphase(s, input, output):
     mjxGEOM_ELLIPSOID = 4
     mjxGEOM_CYLINDER = 5
     mjxGEOM_BOX = 6
-    mjxGEOM_CONVEX = 7
+    mjxGEOM_MESH = 7
     mjxGEOM_size = 8
 
     mjxGEOM_size = 8  # Replace this with the actual value of mjxGEOM_size if known.
@@ -894,47 +1062,47 @@ def narrowphase(s, input, output):
         for t1 in range(t2 + 1):
             # Mapping types to narrowphase functions
             if t1 == mjxGEOM_PLANE and t2 == mjxGEOM_SPHERE:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_CAPSULE:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_BOX:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_ELLIPSOID:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_CYLINDER:
-                _narrowphase(s, input, output, t1, t2)
-            # elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_MESH:
-            #     _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
+            elif t1 == mjxGEOM_PLANE and t2 == mjxGEOM_MESH:
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_SPHERE:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_CAPSULE:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_BOX:
-                _narrowphase(s, input, output, t1, t2)
-            # elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_MESH:
-            #     _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
+            elif t1 == mjxGEOM_SPHERE and t2 == mjxGEOM_MESH:
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_CAPSULE:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_BOX:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_ELLIPSOID:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_CYLINDER:
-                _narrowphase(s, input, output, t1, t2)
-            # elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_MESH:
-            #     _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
+            elif t1 == mjxGEOM_CAPSULE and t2 == mjxGEOM_MESH:
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_ELLIPSOID and t2 == mjxGEOM_ELLIPSOID:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_ELLIPSOID and t2 == mjxGEOM_CYLINDER:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_CYLINDER and t2 == mjxGEOM_CYLINDER:
-                _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
             elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_BOX:
-                _narrowphase(s, input, output, t1, t2)
-            # elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_MESH:
-            #     _narrowphase(s, input, output, t1, t2)
-            # elif t1 == mjxGEOM_MESH and t2 == mjxGEOM_MESH:
-            #     _narrowphase(s, input, output, t1, t2)
+                _narrowphase2(s, input, output, t1, t2)
+            elif t1 == mjxGEOM_BOX and t2 == mjxGEOM_MESH:
+                _narrowphase2(s, input, output, t1, t2)
+            elif t1 == mjxGEOM_MESH and t2 == mjxGEOM_MESH:
+                _narrowphase2(s, input, output, t1, t2)
 
 
 
@@ -965,12 +1133,19 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
 
     wp.synchronize()
 
+    #print(output.dyn_body_aamm.numpy())
+
     # Generate body AAMMs
     wp.launch(get_dyn_body_aamm, 
               dim=[input.nenv * input.nbody], 
               inputs=[input.nenv, input.nbody, input.nmodel, input.ngeom, input.body_geomnum,
                                                        input.body_geomadr, input.geom_margin, input.geom_xpos, input.geom_rbound,
                                                        output.dyn_body_aamm], device = device)
+
+
+    wp.synchronize()
+    #print(input.body_geomnum.numpy())
+    #print(output.dyn_body_aamm.numpy())
 
     wp.synchronize()
 
@@ -984,6 +1159,9 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
                       output.dyn_body_aamm, output.col_body_pair, col_body_pair_count], device = device)
 
     wp.synchronize()
+
+    #print(output.env_counter.numpy())
+
     wp.synchronize()
 
     # Get geom AABBs in global frame
@@ -994,8 +1172,8 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
 
     # Generate geom pairs (midphase)
     wp.synchronize()
-
-
+    #print(output.dyn_geom_aabb.numpy())
+    wp.synchronize()
 
 
     body_pair_offset = output.env_offset
@@ -1010,6 +1188,8 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
                 output.tmp_count
               ], 
               device = device)
+    
+    wp.synchronize() #This is not for debugging - keep it
     total_body_pairs = output.tmp_count.numpy()[0]
   
 
@@ -1017,6 +1197,7 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
     col_geom_pair_count = output.env_counter2    
 
     wp.synchronize()
+    print(input.geom_type.numpy())
     wp.synchronize()
 
     wp.launch(get_geom_pairs_nxn, 
@@ -1029,6 +1210,7 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
 
 
     wp.synchronize()
+    #print(col_geom_pair_count.numpy())
     wp.synchronize()
 
 
@@ -1071,6 +1253,7 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
 
 
     wp.synchronize()
+    #print(total_geom_pairs)
     wp.synchronize()
 
 
@@ -1085,6 +1268,7 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
     
 
     wp.synchronize()
+    print(output.type_pair_count.numpy())
     wp.synchronize()
 
 
@@ -1118,7 +1302,7 @@ def _collision(input : CollisionInput, output : CollisionOutput, device):
               inputs = [                 
                 input.nenv,
                 env_contact_offset,
-                env_contact_offset,
+                env_contact_count,
                 output.tmp_count
               ], 
               device = device)
