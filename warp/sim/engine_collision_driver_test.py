@@ -28,56 +28,57 @@ from collections import defaultdict
 
 
 def _compare_contacts(test_cls, dx, c):
-  """Compares JAX and CUDA contacts."""
-  for env_id, (g1, g2) in enumerate(zip(dx.contact.geom, c.geom)):
-    for g1_key in np.unique(g1, axis=0):
-      idx1 = np.where((g1 == g1_key).all(axis=1))
-      idx2 = np.where((g2 == g1_key).all(axis=1))
-      dist1 = dx.contact.dist[env_id][idx1]
-      dist2 = c.dist[env_id][idx2]
-      # contacts may appear in JAX with dist>0, but not in CUDA.
-      if (dist1 > 0).any():
-        if dist2.shape[0]:
-          test_cls.assertTrue((dist2 >= 0).any())
-        continue
-      test_cls.assertTrue((dist1 < 0).all())
-      # contact distance in JAX are dynamically calculated, so we only
-      # check that CUDA distances are equal to the first JAX distance.
-      np.testing.assert_array_almost_equal(dist1[0], dist2, decimal=3)
-      # normals should be equal.
-      normal1 = dx.contact.frame[env_id, :, 0][idx1]
-      normal2 = c.frame[env_id, :, 0][idx2]
-      test_cls.assertLess(np.abs(normal1[0] - normal2).max(), 1e-5)
-      # contact points are not as accurate in CUDA, the test is rather loose.
-      found_point = 0
-      pos1 = dx.contact.pos[env_id][idx1]
-      pos2 = c.pos[env_id][idx2]
-      for pos1_idx in range(pos1.shape[0]):
-        pos2_idx = np.abs(pos1[pos1_idx] - pos2).sum(axis=1).argmin()
-        found_point += np.abs(pos1[pos1_idx] - pos2[pos2_idx]).max() < 0.11
-      test_cls.assertGreater(found_point, 0)
+    """Compares JAX and CUDA contacts."""
+    for env_id, (g1, g2) in enumerate(zip(dx.contact.geom, c.geom)):
+        for g1_key in np.unique(g1, axis=0):
+            idx1 = np.where((g1 == g1_key).all(axis=1))
+            idx2 = np.where((g2 == g1_key).all(axis=1))
+            dist1 = dx.contact.dist[env_id][idx1]
+            dist2 = c.dist[env_id][idx2]
+            # contacts may appear in JAX with dist>0, but not in CUDA.
+            if (dist1 > 0).any():
+                if dist2.shape[0]:
+                    test_cls.assertTrue((dist2 >= 0).any())
+                continue
+            test_cls.assertTrue((dist1 < 0).all())
+            # contact distance in JAX are dynamically calculated, so we only
+            # check that CUDA distances are equal to the first JAX distance.
+            np.testing.assert_array_almost_equal(dist1[0], dist2, decimal=3)
+            # normals should be equal.
+            normal1 = dx.contact.frame[env_id, :, 0][idx1]
+            normal2 = c.frame[env_id, :, 0][idx2]
+            test_cls.assertLess(np.abs(normal1[0] - normal2).max(), 1e-5)
+            # contact points are not as accurate in CUDA, the test is rather loose.
+            found_point = 0
+            pos1 = dx.contact.pos[env_id][idx1]
+            pos2 = c.pos[env_id][idx2]
+            for pos1_idx in range(pos1.shape[0]):
+                pos2_idx = np.abs(pos1[pos1_idx] - pos2).sum(axis=1).argmin()
+                found_point += np.abs(pos1[pos1_idx] - pos2[pos2_idx]).max() < 0.11
+            test_cls.assertGreater(found_point, 0)
 
 
 class VmapStruct:
-  def __init__(self, **kwargs):
-      for key, value in kwargs.items():
-          setattr(self, key, value)
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 
 # Attempt to partially mimic what vmap does - not sure if it is fully correct
 # TODO: Not workin yet, base class of Contact causes trouble
 def VmapList(struct_list) -> VmapStruct:
-  """
-    Merges a list of structs into a single struct, where each member of the resulting 
+    """
+    Merges a list of structs into a single struct, where each member of the resulting
     struct is a concatenated list of the corresponding members from the input structs.
 
     Args:
-        struct_list (list): A list of structs. Each struct is an object with attributes 
+        struct_list (list): A list of structs. Each struct is an object with attributes
                             (all of which are expected to be lists).
 
     Returns:
-        Struct: A single struct with attributes formed by concatenating the corresponding 
-                attributes from all structs in the input list. If an attribute exists in 
-                some structs but not others, it will only include the values from the structs 
+        Struct: A single struct with attributes formed by concatenating the corresponding
+                attributes from all structs in the input list. If an attribute exists in
+                some structs but not others, it will only include the values from the structs
                 where it exists.
 
     Example:
@@ -99,27 +100,27 @@ def VmapList(struct_list) -> VmapStruct:
         print(merged_struct.a)  # [1, 2, 3, 4, 5, 6]
         print(merged_struct.b)  # ['x', 'y', 'z', 'w']
         print(merged_struct.c)  # [10, 20, 30]
-  """
+    """
 
-  # Use defaultdict to aggregate fields
-  merged_fields = defaultdict(list)
+    # Use defaultdict to aggregate fields
+    merged_fields = defaultdict(list)
 
-  # Collect all fields from all structs
-  for struct in struct_list:
-      for field in struct.__dict__:
-          value = getattr(struct, field)
-          if value.ndim == 0:  # Convert zero-dimensional arrays to 1D arrays
-              value = np.expand_dims(value, axis=0)
-          merged_fields[field].append(value)
+    # Collect all fields from all structs
+    for struct in struct_list:
+        for field in struct.__dict__:
+            value = getattr(struct, field)
+            if value.ndim == 0:  # Convert zero-dimensional arrays to 1D arrays
+                value = np.expand_dims(value, axis=0)
+            merged_fields[field].append(value)
 
-  # Merge fields into numpy arrays and create a new Struct
-  merged_struct = VmapStruct(**{field: np.concatenate(values) for field, values in merged_fields.items()})
+    # Merge fields into numpy arrays and create a new Struct
+    merged_struct = VmapStruct(**{field: np.concatenate(values) for field, values in merged_fields.items()})
 
-  return merged_struct
+    return merged_struct
 
-class EngineCollisionDriverTest: #(absltest.TestCase):
 
-  _CONVEX_CONVEX = """
+class EngineCollisionDriverTest:  # (absltest.TestCase):
+    _CONVEX_CONVEX = """
     <mujoco>
       <asset>
         <mesh name="meshbox"
@@ -163,167 +164,155 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
     </mujoco>
   """
 
-  def test_shapes(self):
+    def test_shapes(self):
+        """Tests collision driver return shapes."""
+        m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
+        d = mujoco.MjData(m)
+        mujoco.mj_forward(m, d)
+        batch_size = 3
 
+        def make_model_and_data(val):
+            dx = mjx.make_data(m)
+            mx = mjx.put_model(m)
+            dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+            return mx, dx
 
+        # Vary the size of body 0, manually create the batch using a loop.
+        mx_list = []
+        dx_list = []
+        for val in jp.arange(-1, 1, 2 / batch_size):
+            mx, dx = make_model_and_data(val)
+            mx_list.append(mx)
+            dx_list.append(dx)
 
+        # mx = jp.stack(mx_list)
+        # dx = jp.stack(dx_list)
 
-    """Tests collision driver return shapes."""
-    m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
-    d = mujoco.MjData(m)
-    mujoco.mj_forward(m, d)
-    batch_size = 3
+        forward_jit_fn = jax.jit(mjx.forward)
+        # dx = forward_jit_fn(mx, dx)
 
-    def make_model_and_data(val):
-        dx = mjx.make_data(m)
-        mx = mjx.put_model(m)
-        dx = dx.replace(qpos=dx.qpos.at[2].set(val))
-        return mx, dx
+        dx = []
+        for i in range(batch_size):
+            tmp = forward_jit_fn(mx_list[i], dx_list[i])
+            dx.append(tmp)
 
-    # Vary the size of body 0, manually create the batch using a loop.
-    mx_list = []
-    dx_list = []
-    for val in jp.arange(-1, 1, 2 / batch_size):
-        mx, dx = make_model_and_data(val)
-        mx_list.append(mx)
-        dx_list.append(dx)
+        # mx = VmapList(mx_list)
+        # dx = VmapList(dx_list)
 
-    # mx = jp.stack(mx_list)
-    # dx = jp.stack(dx_list)
+        # print("dx")
+        # print(dx)
 
-    forward_jit_fn = jax.jit(mjx.forward)
-    # dx = forward_jit_fn(mx, dx)
+        # c = engine_collision_driver.collision2(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
 
-    dx = []
-    for i in range(batch_size):
-       tmp = forward_jit_fn(mx_list[i], dx_list[i])
-       dx.append(tmp)
+        # Manually iterate for the collision function
+        c_list = []
+        for i in range(batch_size):
+            c = engine_collision_driver.collision2(mx_list[i], dx[i], 1e9, 12, 12, 12, 8, 1.0)
+            c_list.append(c)
 
-    # mx = VmapList(mx_list)
-    # dx = VmapList(dx_list)
+        # Stack the results for consistency
+        # c = jp.stack(c_list)
 
-    # print("dx")
-    # print(dx)
+        for i in range(batch_size):
+            c = c_list[i]
+            print(c)
 
-    # c = engine_collision_driver.collision2(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
+        # c = VmapList(c_list)
+        c = c_list[i]
 
-    # Manually iterate for the collision function
-    c_list = []
-    for i in range(batch_size):
-        c = engine_collision_driver.collision2(mx_list[i], dx[i], 1e9, 12, 12, 12, 8, 1.0)
-        c_list.append(c)
+        npts = dx.contact.pos.shape[1]
+        self.assertTupleEqual(c.dist.shape, (batch_size, npts))
+        self.assertTupleEqual(c.pos.shape, (batch_size, npts, 3))
+        self.assertTupleEqual(c.frame.shape, (batch_size, npts, 3, 3))
+        self.assertTupleEqual(c.friction.shape, (batch_size, npts, 5))
+        self.assertTupleEqual(c.solimp.shape, (batch_size, npts, mujoco.mjNIMP))
+        self.assertTupleEqual(c.solref.shape, (batch_size, npts, mujoco.mjNREF))
+        self.assertTupleEqual(c.solreffriction.shape, (batch_size, npts, mujoco.mjNREF))
+        self.assertTupleEqual(c.geom.shape, (batch_size, npts, 2))
+        self.assertTupleEqual(c.geom1.shape, (batch_size, npts))
+        self.assertTupleEqual(c.geom2.shape, (batch_size, npts))
 
-    # Stack the results for consistency
-    # c = jp.stack(c_list)
+    def test_contacts_batched_data(self):
+        """Tests collision driver results."""
+        m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
+        d = mujoco.MjData(m)
+        mujoco.mj_forward(m, d)
+        batch_size = 3
 
-    for i in range(batch_size):
-       c = c_list[i]
-       print(c)
+        def make_model_and_data(val):
+            dx = mjx.make_data(m)
+            mx = mjx.put_model(m)
+            dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+            return mx, dx
 
-    #c = VmapList(c_list)
-    c = c_list[i]
+        mx_list = []
+        dx_list = []
+        for val in jp.arange(-1, 1, 2 / batch_size):
+            mx, dx = make_model_and_data(val)
+            mx_list.append(mx)
+            dx_list.append(dx)
 
-    npts = dx.contact.pos.shape[1]
-    self.assertTupleEqual(c.dist.shape, (batch_size, npts))
-    self.assertTupleEqual(c.pos.shape, (batch_size, npts, 3))
-    self.assertTupleEqual(c.frame.shape, (batch_size, npts, 3, 3))
-    self.assertTupleEqual(c.friction.shape, (batch_size, npts, 5))
-    self.assertTupleEqual(c.solimp.shape, (batch_size, npts, mujoco.mjNIMP))
-    self.assertTupleEqual(c.solref.shape, (batch_size, npts, mujoco.mjNREF))
-    self.assertTupleEqual(
-        c.solreffriction.shape, (batch_size, npts, mujoco.mjNREF)
-    )
-    self.assertTupleEqual(c.geom.shape, (batch_size, npts, 2))
-    self.assertTupleEqual(c.geom1.shape, (batch_size, npts))
-    self.assertTupleEqual(c.geom2.shape, (batch_size, npts))
+        # vary the z-position of body 0.
+        # mx = mjx.put_model(m)
+        # dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
 
+        forward_jit_fn = jax.jit(mjx.forward)
 
-  def test_contacts_batched_data(self):
-      """Tests collision driver results."""
-      m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
-      d = mujoco.MjData(m)
-      mujoco.mj_forward(m, d)
-      batch_size = 3
+        for i in range(batch_size):
+            dx_list[i] = forward_jit_fn(mx_list[i], dx_list[i])
 
-      def make_model_and_data(val):
-          dx = mjx.make_data(m)
-          mx = mjx.put_model(m)
-          dx = dx.replace(qpos=dx.qpos.at[2].set(val))
-          return mx, dx
+        c_list = []
+        for i in range(batch_size):
+            c = engine_collision_driver.collision2(mx_list[i], dx_list[i], 1e9, 12, 12, 12, 8, 1.0)
+            c_list.append(c)
 
-      mx_list = []
-      dx_list = []
-      for val in jp.arange(-1, 1, 2 / batch_size):
-          mx, dx = make_model_and_data(val)
-          mx_list.append(mx)
-          dx_list.append(dx)
+        # forward_jit_fn = jax.jit(jax.vmap(mjx.forward, in_axes=(None, 0)))
+        # dx = forward_jit_fn(mx, dx)
+        # c = jax.jit(
+        #     jax.vmap(
+        #         engine_collision_driver.collision,
+        #         in_axes=(
+        #             None,
+        #             0,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #             None,
+        #         ),
+        #     ),
+        #     static_argnums=(
+        #         2,
+        #         3,
+        #         4,
+        #         5,
+        #         6,
+        #         7,
+        #     ),
+        # )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
 
-      # vary the z-position of body 0.
-      #mx = mjx.put_model(m)
-      #dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
-
-      forward_jit_fn = jax.jit(mjx.forward)
-      
-      for i in range(batch_size):
-        dx_list[i] = forward_jit_fn(mx_list[i], dx_list[i])
-
-      c_list = []
-      for i in range(batch_size):
-          c = engine_collision_driver.collision2(mx_list[i], dx_list[i], 1e9, 12, 12, 12, 8, 1.0)
-          c_list.append(c)
-
-      # forward_jit_fn = jax.jit(jax.vmap(mjx.forward, in_axes=(None, 0)))
-      # dx = forward_jit_fn(mx, dx)
-      # c = jax.jit(
-      #     jax.vmap(
-      #         engine_collision_driver.collision,
-      #         in_axes=(
-      #             None,
-      #             0,
-      #             None,
-      #             None,
-      #             None,
-      #             None,
-      #             None,
-      #             None,
-      #         ),
-      #     ),
-      #     static_argnums=(
-      #         2,
-      #         3,
-      #         4,
-      #         5,
-      #         6,
-      #         7,
-      #     ),
-      # )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
-
-      # test contact normals and penetration depths.
-      dx_test = VmapList(dx_list)
-      c_test = VmapList(c_list)
-      _compare_contacts(self, dx_test, c_test)
-
-
+        # test contact normals and penetration depths.
+        dx_test = VmapList(dx_list)
+        c_test = VmapList(c_list)
+        _compare_contacts(self, dx_test, c_test)
 
 
 if __name__ == "__main__":
+    jax.config.update("jax_platform_name", "cpu")
 
+    # https://nvidia.github.io/warp/debugging.html
+    wp.init()
 
-  jax.config.update('jax_platform_name', 'cpu')
+    wp.set_device("cpu")
+    wp.config.mode = "debug"
+    # assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
 
-  # https://nvidia.github.io/warp/debugging.html
-  wp.init()
+    wp.config.verify_fp = True
+    wp.config.print_launches = True
+    wp.config.verify_cuda = True
 
-  wp.set_device("cpu")
-  wp.config.mode = "debug"
-  # assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
-
-  wp.config.verify_fp = True
-  wp.config.print_launches = True   
-  wp.config.verify_cuda = True
-
-
-  instance = EngineCollisionDriverTest()
-  #instance.test_shapes()
-  instance.test_contacts_batched_data()
-  #absltest.main()
+    instance = EngineCollisionDriverTest()
+    # instance.test_shapes()
+    instance.test_contacts_batched_data()
+    # absltest.main()
