@@ -64,6 +64,7 @@ class VmapStruct:
           setattr(self, key, value)
 
 # Attempt to partially mimic what vmap does - not sure if it is fully correct
+# TODO: Not workin yet, base class of Contact causes trouble
 def VmapList(struct_list) -> VmapStruct:
   """
     Merges a list of structs into a single struct, where each member of the resulting 
@@ -100,15 +101,21 @@ def VmapList(struct_list) -> VmapStruct:
         print(merged_struct.c)  # [10, 20, 30]
   """
 
-  # Use defaultdict to concatenate lists for each key
-  merged_data = defaultdict(list)
+  # Use defaultdict to aggregate fields
+  merged_fields = defaultdict(list)
 
+  # Collect all fields from all structs
   for struct in struct_list:
-      for key, value in struct.__dict__.items():
-          merged_data[key].extend(value)
+      for field in struct.__dict__:
+          value = getattr(struct, field)
+          if value.ndim == 0:  # Convert zero-dimensional arrays to 1D arrays
+              value = np.expand_dims(value, axis=0)
+          merged_fields[field].append(value)
 
-  # Create a new Struct with the merged data
-  return VmapStruct(**merged_data)
+  # Merge fields into numpy arrays and create a new Struct
+  merged_struct = VmapStruct(**{field: np.concatenate(values) for field, values in merged_fields.items()})
+
+  return merged_struct
 
 class EngineCollisionDriverTest: #(absltest.TestCase):
 
@@ -159,18 +166,6 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
   def test_shapes(self):
 
 
-    jax.config.update('jax_platform_name', 'cpu')
-
-    # https://nvidia.github.io/warp/debugging.html
-    wp.init()
-
-    wp.set_device("cpu")
-    wp.config.mode = "debug"
-    # assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
-
-    wp.config.verify_fp = True
-    wp.config.print_launches = True   
-    wp.config.verify_cuda = True
 
 
     """Tests collision driver return shapes."""
@@ -204,8 +199,13 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
        tmp = forward_jit_fn(mx_list[i], dx_list[i])
        dx.append(tmp)
 
-    print("dx")
-    print(dx)
+    # mx = VmapList(mx_list)
+    # dx = VmapList(dx_list)
+
+    # print("dx")
+    # print(dx)
+
+    # c = engine_collision_driver.collision2(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
 
     # Manually iterate for the collision function
     c_list = []
@@ -220,7 +220,8 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
        c = c_list[i]
        print(c)
 
-    vmap_experiment = VmapList(c)
+    #c = VmapList(c_list)
+    c = c_list[i]
 
     npts = dx.contact.pos.shape[1]
     self.assertTupleEqual(c.dist.shape, (batch_size, npts))
@@ -237,7 +238,92 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
     self.assertTupleEqual(c.geom2.shape, (batch_size, npts))
 
 
+  def test_contacts_batched_data(self):
+      """Tests collision driver results."""
+      m = mujoco.MjModel.from_xml_string(self._CONVEX_CONVEX)
+      d = mujoco.MjData(m)
+      mujoco.mj_forward(m, d)
+      batch_size = 3
+
+      def make_model_and_data(val):
+          dx = mjx.make_data(m)
+          mx = mjx.put_model(m)
+          dx = dx.replace(qpos=dx.qpos.at[2].set(val))
+          return mx, dx
+
+      mx_list = []
+      dx_list = []
+      for val in jp.arange(-1, 1, 2 / batch_size):
+          mx, dx = make_model_and_data(val)
+          mx_list.append(mx)
+          dx_list.append(dx)
+
+      # vary the z-position of body 0.
+      #mx = mjx.put_model(m)
+      #dx = make_model_and_data(jp.arange(-1, 1, 2 / batch_size))
+
+      forward_jit_fn = jax.jit(mjx.forward)
+      
+      for i in range(batch_size):
+        dx_list[i] = forward_jit_fn(mx_list[i], dx_list[i])
+
+      c_list = []
+      for i in range(batch_size):
+          c = engine_collision_driver.collision2(mx_list[i], dx_list[i], 1e9, 12, 12, 12, 8, 1.0)
+          c_list.append(c)
+
+      # forward_jit_fn = jax.jit(jax.vmap(mjx.forward, in_axes=(None, 0)))
+      # dx = forward_jit_fn(mx, dx)
+      # c = jax.jit(
+      #     jax.vmap(
+      #         engine_collision_driver.collision,
+      #         in_axes=(
+      #             None,
+      #             0,
+      #             None,
+      #             None,
+      #             None,
+      #             None,
+      #             None,
+      #             None,
+      #         ),
+      #     ),
+      #     static_argnums=(
+      #         2,
+      #         3,
+      #         4,
+      #         5,
+      #         6,
+      #         7,
+      #     ),
+      # )(mx, dx, 1e9, 12, 12, 12, 8, 1.0)
+
+      # test contact normals and penetration depths.
+      dx_test = VmapList(dx_list)
+      c_test = VmapList(c_list)
+      _compare_contacts(self, dx_test, c_test)
+
+
+
+
 if __name__ == "__main__":
-   instance = EngineCollisionDriverTest()
-   instance.test_shapes()
+
+
+  jax.config.update('jax_platform_name', 'cpu')
+
+  # https://nvidia.github.io/warp/debugging.html
+  wp.init()
+
+  wp.set_device("cpu")
+  wp.config.mode = "debug"
+  # assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
+
+  wp.config.verify_fp = True
+  wp.config.print_launches = True   
+  wp.config.verify_cuda = True
+
+
+  instance = EngineCollisionDriverTest()
+  #instance.test_shapes()
+  instance.test_contacts_batched_data()
   #absltest.main()

@@ -1415,19 +1415,19 @@ def collision2(
 
 
     c = Contact(
-        dist=output.dist.numpy(),
-        pos=output.pos.numpy(),
-        frame=frame.numpy(),
-        includemargin=output.includemargin.numpy(),
-        friction=output.friction.numpy(),
-        solref=output.solref.numpy(),
-        solreffriction=output.solreffriction.numpy(),
-        solimp=output.solimp.numpy(),
-        geom1=output.g1.numpy(),
-        geom2=output.g2.numpy(),
-        geom=None,  # jp.array([g1, g2]).T,
-        efc_address=None,  # d.contact.efc_address,
-        dim=None,  # d.contact.dim,
+        dist = wp.to_jax(output.dist),
+        pos = wp.to_jax(output.pos),
+        frame = wp.to_jax(frame),
+        includemargin = wp.to_jax(output.includemargin),
+        friction = wp.to_jax(output.friction),
+        solref = wp.to_jax(output.solref),
+        solreffriction = wp.to_jax(output.solreffriction),
+        solimp = wp.to_jax(output.solimp),
+        geom1 = wp.to_jax(output.g1),
+        geom2 = wp.to_jax(output.g2),
+        geom = jp.array([wp.to_jax(output.g1), wp.to_jax(output.g2)]).T,
+        efc_address = np.array([d.contact.efc_address]),
+        dim = np.array([d.contact.dim])
     )
 
     return c
