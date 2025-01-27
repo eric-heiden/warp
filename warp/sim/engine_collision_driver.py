@@ -683,9 +683,9 @@ class CollisionInput:
         self.geom_margin = wp.array(m.geom_margin, dtype=wp.float32)
         self.geom_gap = wp.array(m.geom_gap, dtype=wp.float32)
         self.geom_solmix = wp.array(m.geom_solmix, dtype=wp.float32)
-        self.geom_friction = wp.array(m.geom_friction, dtype=wp.float32)
-        self.geom_solref = wp.array(m.geom_solref, dtype=wp.float32)
-        self.geom_solimp = wp.array(m.geom_solimp, dtype=wp.float32)
+        self.geom_friction = wp.array(m.geom_friction, dtype=wp.float32).reshape((-1,))
+        self.geom_solref = wp.array(m.geom_solref, dtype=wp.float32).reshape((-1,))
+        self.geom_solimp = wp.array(m.geom_solimp, dtype=wp.float32).reshape((-1,))
         self.geom_aabb = wp.array(m.geom_aabb, dtype=wp.float32).reshape((-1,))
         self.geom_rbound = wp.array(m.geom_rbound, dtype=wp.float32)
         self.geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
@@ -1374,7 +1374,7 @@ def collision2(
         raise NotImplementedError('m.npair > 0 is not supported.')
 
 
-    device = 'cuda'
+    device = 'cpu'
 
     max_contact_points = d.contact.pos.shape[0]
     n_pts = max_contact_points

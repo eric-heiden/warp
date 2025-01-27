@@ -18,6 +18,20 @@ import warp as wp
 # wp.config.verify_fp = True
 # wp.clear_kernel_cache()
 
+
+
+
+snippet = """
+    __syncthreads();
+    """
+
+@wp.func_native(snippet)
+def sync_threads():
+    """Synchronize threads."""
+    return
+
+
+
 wp.config.enable_backward = False
 wp.set_module_options({
     "enable_backward": False,
@@ -1193,6 +1207,7 @@ def gjk_epa_pipeline(
         g1 = type_pair_geom_id[type_pair_id * 2]
         g2 = type_pair_geom_id[type_pair_id * 2 + 1]
 
+        print("before gjk")
         simplex, normal = _gjk(
             env_id,
             model_id,
@@ -1206,6 +1221,8 @@ def gjk_epa_pipeline(
             convex_vert,
             convex_vert_offset,
         )
+        print("after gjk")
+        
         # TODO(btaba): get depth from GJK, conditionally run EPA.
         depth, normal = _epa(
             env_id,
@@ -1224,6 +1241,8 @@ def gjk_epa_pipeline(
             simplex,
             normal,
         )
+
+        print("after epa")
 
         # TODO(btaba): add support for margin here.
         if depth < 0.0:
@@ -1248,6 +1267,8 @@ def gjk_epa_pipeline(
             depth,
             normal,
         )
+
+        print("after _get_multiple_contacts")
 
         contact_count = min(count, max_contact_points_per_env)
         cid = wp.atomic_add(env_contact_counter, env_id, contact_count)

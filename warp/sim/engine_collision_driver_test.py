@@ -24,6 +24,7 @@ import engine_collision_driver
 import numpy as np
 
 import warp as wp
+from collections import defaultdict
 
 
 def _compare_contacts(test_cls, dx, c):
@@ -56,6 +57,58 @@ def _compare_contacts(test_cls, dx, c):
         found_point += np.abs(pos1[pos1_idx] - pos2[pos2_idx]).max() < 0.11
       test_cls.assertGreater(found_point, 0)
 
+
+class VmapStruct:
+  def __init__(self, **kwargs):
+      for key, value in kwargs.items():
+          setattr(self, key, value)
+
+# Attempt to partially mimic what vmap does - not sure if it is fully correct
+def VmapList(struct_list) -> VmapStruct:
+  """
+    Merges a list of structs into a single struct, where each member of the resulting 
+    struct is a concatenated list of the corresponding members from the input structs.
+
+    Args:
+        struct_list (list): A list of structs. Each struct is an object with attributes 
+                            (all of which are expected to be lists).
+
+    Returns:
+        Struct: A single struct with attributes formed by concatenating the corresponding 
+                attributes from all structs in the input list. If an attribute exists in 
+                some structs but not others, it will only include the values from the structs 
+                where it exists.
+
+    Example:
+        class Struct:
+            def __init__(self, **kwargs):
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        # Example structs
+        struct1 = Struct(a=[1, 2, 3], b=['x', 'y'])
+        struct2 = Struct(a=[4, 5], b=['z'], c=[10])
+        struct3 = Struct(a=[6], b=['w'], c=[20, 30])
+
+        # Merging structs
+        struct_list = [struct1, struct2, struct3]
+        merged_struct = merge_structs(struct_list)
+
+        # Result
+        print(merged_struct.a)  # [1, 2, 3, 4, 5, 6]
+        print(merged_struct.b)  # ['x', 'y', 'z', 'w']
+        print(merged_struct.c)  # [10, 20, 30]
+  """
+
+  # Use defaultdict to concatenate lists for each key
+  merged_data = defaultdict(list)
+
+  for struct in struct_list:
+      for key, value in struct.__dict__.items():
+          merged_data[key].extend(value)
+
+  # Create a new Struct with the merged data
+  return VmapStruct(**merged_data)
 
 class EngineCollisionDriverTest: #(absltest.TestCase):
 
@@ -105,12 +158,17 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
 
   def test_shapes(self):
 
+
+    jax.config.update('jax_platform_name', 'cpu')
+
     # https://nvidia.github.io/warp/debugging.html
     wp.init()
 
+    wp.set_device("cpu")
     wp.config.mode = "debug"
-    assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
+    # assert wp.context.runtime.core.is_debug_enabled(), "Warp must be built in debug mode to enable debugging kernels"
 
+    wp.config.verify_fp = True
     wp.config.print_launches = True   
     wp.config.verify_cuda = True
 
@@ -157,6 +215,12 @@ class EngineCollisionDriverTest: #(absltest.TestCase):
 
     # Stack the results for consistency
     # c = jp.stack(c_list)
+
+    for i in range(batch_size):
+       c = c_list[i]
+       print(c)
+
+    vmap_experiment = VmapList(c)
 
     npts = dx.contact.pos.shape[1]
     self.assertTupleEqual(c.dist.shape, (batch_size, npts))
