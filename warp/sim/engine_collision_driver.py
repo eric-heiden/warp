@@ -20,9 +20,7 @@ from typing import Iterator, Tuple, Union
 
 import jax
 from jax import numpy as jp
-from jax.extend import ffi
 import mujoco
-from mujoco.mjx._src import math
 
 # pylint: disable=g-importing-member
 from mujoco.mjx._src.types import Contact
@@ -39,8 +37,6 @@ from convex import _narrowphase
 # from mujoco.mjx._src.cuda import engine_collision_convex
 # import engine_collision_convex
 
-import convex
-
 import numpy as np
 
 import warp as wp
@@ -49,12 +45,24 @@ import warp as wp
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     convex_vert, convex_vert_offset = [], [0]
     nvert = 0
+    batch_dim = 0
     for mesh in m.mesh_convex:
         if mesh is not None:
-            nvert += mesh.vert.shape[0]
-            convex_vert.append(mesh.vert)
+            if mesh.vert.ndim == 3:
+                batch_dim = mesh.vert.shape[0]
+                assert batch_dim == 1
+                nvert += mesh.vert.shape[1]
+                convex_vert.append(mesh.vert[0])
+            else:
+                nvert += mesh.vert.shape[0]
+                convex_vert.append(mesh.vert)
         convex_vert_offset.append(nvert)
 
+    # if batch_dim:
+    #     assert batch_dim == 1
+    #     convex_vert = jp.concatenate(convex_vert, axis=1) if nvert else jp.array([])
+    #     # TODO handle convex_vert_offset
+    # else:
     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.uint32)
     return convex_vert, convex_vert_offset
@@ -87,7 +95,7 @@ def get_dyn_body_aamm(
     geom_margin: wp.array(dtype=float),
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_rbound: wp.array(dtype=float),
-    dyn_body_aamm: wp.array(dtype=float),
+    dyn_body_aamm: wp.array(dtype=float, ndim=2),
 ):
     tid = wp.tid()
     if tid >= nenv * nbody:
@@ -117,12 +125,12 @@ def get_dyn_body_aamm(
             aamm_max[j] = wp.max(aamm_max[j], max_val)
 
     # Write results to output
-    dyn_body_aamm[tid * 6 + 0] = aamm_min[0]
-    dyn_body_aamm[tid * 6 + 1] = aamm_min[1]
-    dyn_body_aamm[tid * 6 + 2] = aamm_min[2]
-    dyn_body_aamm[tid * 6 + 3] = aamm_max[0]
-    dyn_body_aamm[tid * 6 + 4] = aamm_max[1]
-    dyn_body_aamm[tid * 6 + 5] = aamm_max[2]
+    dyn_body_aamm[tid, 0] = aamm_min[0]
+    dyn_body_aamm[tid, 1] = aamm_min[1]
+    dyn_body_aamm[tid, 2] = aamm_min[2]
+    dyn_body_aamm[tid, 3] = aamm_max[0]
+    dyn_body_aamm[tid, 4] = aamm_max[1]
+    dyn_body_aamm[tid, 5] = aamm_max[2]
 
 
 # @wp.kernel
@@ -194,8 +202,8 @@ def get_body_pairs_nxn(
     body_conaffinity: wp.array(dtype=int),
     body_has_plane: wp.array(dtype=int),
     exclude_signature: wp.array(dtype=int),
-    dyn_body_aamm: wp.array(dtype=float),
-    col_body_pair: wp.array(dtype=int),
+    dyn_body_aamm: wp.array(dtype=float, ndim=2),
+    col_body_pair: wp.array(dtype=int, ndim=2),
     col_body_pair_count: wp.array(dtype=int),
 ):
     tid = wp.tid()
@@ -238,13 +246,15 @@ def get_body_pairs_nxn(
     #     (aamm2[1] > aamm1[4]) or
     #     (aamm2[2] > aamm1[5])
     # )
+    b1 = env_id * nbody + body1
+    b2 = env_id * nbody + body2
     separating = (
-        (dyn_body_aamm[(env_id * nbody + body1) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 3])
-        or (dyn_body_aamm[(env_id * nbody + body1) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 4])
-        or (dyn_body_aamm[(env_id * nbody + body1) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body2) * 6 + 5])
-        or (dyn_body_aamm[(env_id * nbody + body2) * 6 + 0] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 3])
-        or (dyn_body_aamm[(env_id * nbody + body2) * 6 + 1] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 4])
-        or (dyn_body_aamm[(env_id * nbody + body2) * 6 + 2] > dyn_body_aamm[(env_id * nbody + body1) * 6 + 5])
+        (dyn_body_aamm[b1, 0] > dyn_body_aamm[b2, 3])
+        or (dyn_body_aamm[b1, 1] > dyn_body_aamm[b2, 4])
+        or (dyn_body_aamm[b1, 2] > dyn_body_aamm[b2, 5])
+        or (dyn_body_aamm[b2, 0] > dyn_body_aamm[b1, 3])
+        or (dyn_body_aamm[b2, 1] > dyn_body_aamm[b1, 4])
+        or (dyn_body_aamm[b2, 2] > dyn_body_aamm[b1, 5])
     )
 
     if separating and not (body_has_plane[body1] or body_has_plane[body2]):
@@ -252,8 +262,8 @@ def get_body_pairs_nxn(
 
     idx = wp.atomic_add(col_body_pair_count, env_id, 1)
     nbody_pair = ((nbody * (nbody - 1) // 2 + 15) // 16) * 16
-    col_body_pair[(env_id * nbody_pair + idx) * 2] = body1
-    col_body_pair[(env_id * nbody_pair + idx) * 2 + 1] = body2
+    col_body_pair[env_id * nbody_pair + idx, 0] = body1
+    col_body_pair[env_id * nbody_pair + idx, 1] = body2
 
 
 @wp.struct
@@ -302,8 +312,9 @@ def get_dyn_geom_aabb(
     ngeom: int,
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_xmat: wp.array(dtype=wp.mat33),
-    geom_aabb: wp.array(dtype=float),
-    dyn_aabb: wp.array(dtype=float),
+    geom_aabb: wp.array(dtype=float, ndim=2),
+    # outputs
+    dyn_aabb: wp.array(dtype=float, ndim=2),
 ):
     tid = wp.tid()
     if tid >= nenv * ngeom:
@@ -314,8 +325,8 @@ def get_dyn_geom_aabb(
 
     mat = xposmat_to_float4(geom_xpos, geom_xmat, env_id * ngeom + gid)
 
-    aabb = wp.vec3(geom_aabb[gid * 6 + 3], geom_aabb[gid * 6 + 4], geom_aabb[gid * 6 + 5])
-    aabb_pos = wp.vec3(geom_aabb[gid * 6], geom_aabb[gid * 6 + 1], geom_aabb[gid * 6 + 2])
+    aabb = wp.vec3(geom_aabb[gid, 3], geom_aabb[gid, 4], geom_aabb[gid, 5])
+    aabb_pos = wp.vec3(geom_aabb[gid, 0], geom_aabb[gid, 1], geom_aabb[gid, 2])
 
     aabb_max = wp.vec3(-1000000000.0, -1000000000.0, -1000000000.0)
     aabb_min = wp.vec3(1000000000.0, 1000000000.0, 1000000000.0)
@@ -332,16 +343,19 @@ def get_dyn_geom_aabb(
         aabb_max = wp.max(aabb_max, corner_world)
         aabb_min = wp.min(aabb_min, corner_world)
 
-    dyn_aabb[tid * 6 + 0] = aabb_min[0]
-    dyn_aabb[tid * 6 + 1] = aabb_min[1]
-    dyn_aabb[tid * 6 + 2] = aabb_min[2]
-    dyn_aabb[tid * 6 + 3] = aabb_max[0]
-    dyn_aabb[tid * 6 + 4] = aabb_max[1]
-    dyn_aabb[tid * 6 + 5] = aabb_max[2]
+    dyn_aabb[tid, 0] = aabb_min[0]
+    dyn_aabb[tid, 1] = aabb_min[1]
+    dyn_aabb[tid, 2] = aabb_min[2]
+    dyn_aabb[tid, 3] = aabb_max[0]
+    dyn_aabb[tid, 4] = aabb_max[1]
+    dyn_aabb[tid, 5] = aabb_max[2]
 
 
 @wp.func
 def bisection(x: wp.array(dtype=int), v: int, a: int, b: int) -> int:
+    # Binary search for the largest index i such that x[i] <= v
+    # x is a sorted array
+    # a and b are the start and end indices within x to search
     c = int(0)
     while b - a > 1:
         c = (a + b) // 2
@@ -367,11 +381,12 @@ def get_geom_pairs_nxn(
     geom_conaffinity: wp.array(dtype=int),
     geom_type: wp.array(dtype=int),
     geom_margin: wp.array(dtype=float),
-    dyn_geom_aabb: wp.array(dtype=float),
-    col_body_pair: wp.array(dtype=int),
+    dyn_geom_aabb: wp.array(dtype=float, ndim=2),
+    # outputs
+    col_body_pair: wp.array(dtype=int, ndim=2),
     col_body_pair_count: wp.array(dtype=int),
     col_body_pair_offset: wp.array(dtype=int),
-    col_geom_pair: wp.array(dtype=int),
+    col_geom_pair: wp.array(dtype=int, ndim=2),
     col_geom_pair_count: wp.array(dtype=int),
 ):
     mjGEOM_PLANE = int(0)
@@ -384,8 +399,8 @@ def get_geom_pairs_nxn(
         return
 
     nbody_pair = ((nbody * (nbody - 1) // 2 + 15) // 16) * 16
-    body1 = col_body_pair[(env_id * nbody_pair + body_pair_id) * 2]
-    body2 = col_body_pair[(env_id * nbody_pair + body_pair_id) * 2 + 1]
+    body1 = col_body_pair[env_id * nbody_pair + body_pair_id, 0]
+    body2 = col_body_pair[env_id * nbody_pair + body_pair_id, 1]
 
     for g1 in range(body_geomnum[body1]):
         geom1 = body_geomadr[body1] + g1
@@ -408,13 +423,15 @@ def get_geom_pairs_nxn(
             #               (aabb1[2] > aabb2[5]) or (aabb2[0] > aabb1[3]) or
             #               (aabb2[1] > aabb1[4]) or (aabb2[2] > aabb1[5]))
 
+            eg1 = env_id * ngeom + geom1
+            eg2 = env_id * ngeom + geom2
             separating = (
-                (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 0] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 3])
-                or (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 4])
-                or (dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 5])
-                or (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 0] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 3])
-                or (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 1] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 4])
-                or (dyn_geom_aabb[(env_id * ngeom + geom2) * 6 + 2] > dyn_geom_aabb[(env_id * ngeom + geom1) * 6 + 5])
+                (dyn_geom_aabb[eg1, 0] > dyn_geom_aabb[eg2, 3])
+                or (dyn_geom_aabb[eg1, 1] > dyn_geom_aabb[eg2, 4])
+                or (dyn_geom_aabb[eg1, 2] > dyn_geom_aabb[eg2, 5])
+                or (dyn_geom_aabb[eg2, 0] > dyn_geom_aabb[eg1, 3])
+                or (dyn_geom_aabb[eg2, 1] > dyn_geom_aabb[eg1, 4])
+                or (dyn_geom_aabb[eg2, 2] > dyn_geom_aabb[eg1, 5])
             )
 
             if separating or skip_con or skip_type:
@@ -426,8 +443,8 @@ def get_geom_pairs_nxn(
                 geom2 = tmp
                 # geom1, geom2 = geom2, geom1
             pair_id = wp.atomic_add(col_geom_pair_count, env_id, 1)
-            col_geom_pair[(env_id * n_geom_pair + pair_id) * 2] = geom1
-            col_geom_pair[(env_id * n_geom_pair + pair_id) * 2 + 1] = geom2
+            col_geom_pair[env_id * n_geom_pair + pair_id, 0] = geom1
+            col_geom_pair[env_id * n_geom_pair + pair_id, 1] = geom2
 
 
 @wp.kernel
@@ -436,12 +453,13 @@ def group_contacts_by_type(
     n_geom_pair: int,
     n_geom_types: int,
     geom_type: wp.array(dtype=int),
-    col_geom_pair: wp.array(dtype=int),
+    col_geom_pair: wp.array(dtype=int, ndim=2),
     col_geom_pair_count: wp.array(dtype=int),
     col_geom_pair_offset: wp.array(dtype=int),
     type_pair_offset: wp.array(dtype=int),
+    # outputs
     type_pair_env_id: wp.array(dtype=int),
-    type_pair_geom_id: wp.array(dtype=int),
+    type_pair_geom_id: wp.array(dtype=int, ndim=2),
     type_pair_count: wp.array(dtype=int),
 ):
     tid = wp.tid()
@@ -450,8 +468,9 @@ def group_contacts_by_type(
     if pair_id >= col_geom_pair_count[env_id]:
         return
 
-    geom1 = col_geom_pair[(env_id * n_geom_pair + pair_id) * 2]
-    geom2 = col_geom_pair[(env_id * n_geom_pair + pair_id) * 2 + 1]
+    pid = env_id * n_geom_pair + pair_id
+    geom1 = col_geom_pair[pid, 0]
+    geom2 = col_geom_pair[pid, 1]
 
     type1 = geom_type[geom1]
     type2 = geom_type[geom2]
@@ -460,16 +479,8 @@ def group_contacts_by_type(
     n_type_pair = wp.atomic_add(type_pair_count, group_key, 1)
     type_pair_id = type_pair_offset[group_key] * nenv + n_type_pair
     type_pair_env_id[type_pair_id] = env_id
-    type_pair_geom_id[type_pair_id * 2] = geom1
-    type_pair_geom_id[type_pair_id * 2 + 1] = geom2
-
-
-@wp.kernel
-def set_zero(count: int, ptr: wp.array(dtype=int)):
-    tid = wp.tid()
-    if tid >= count:
-        return
-    ptr[tid] = 0
+    type_pair_geom_id[type_pair_id, 0] = geom1
+    type_pair_geom_id[type_pair_id, 1] = geom2
 
 
 @wp.kernel
@@ -483,23 +494,23 @@ def get_contact_solver_params(
     geom2: wp.array(dtype=int),
     geom_priority: wp.array(dtype=int),
     geom_solmix: wp.array(dtype=float),
-    geom_friction: wp.array(dtype=float),
-    geom_solref: wp.array(dtype=float),
-    geom_solimp: wp.array(dtype=float),
+    geom_friction: wp.array(dtype=float, ndim=2),
+    geom_solref: wp.array(dtype=float, ndim=2),
+    geom_solimp: wp.array(dtype=float, ndim=2),
     geom_margin: wp.array(dtype=float),
     geom_gap: wp.array(dtype=float),
     env_contact_offset: wp.array(dtype=int),
+    # outputs
     includemargin: wp.array(dtype=float),
-    friction: wp.array(dtype=float),
-    solref: wp.array(dtype=float),
-    solreffriction: wp.array(dtype=float),
-    solimp: wp.array(dtype=float),
+    friction: wp.array(dtype=float, ndim=2),
+    solref: wp.array(dtype=float, ndim=2),
+    solreffriction: wp.array(dtype=float, ndim=2),
+    solimp: wp.array(dtype=float, ndim=2),
 ):
     tid = wp.tid()
     if tid >= n_contact_pts:
         return
 
-    mjNREF = int(2)
     mjNIMP = int(5)
     mjMINVAL = float(1e-15)
 
@@ -522,15 +533,13 @@ def get_contact_solver_params(
     p1 = geom_priority[g1]
     p2 = geom_priority[g2]
     mix = wp.select(p1 == p2, mix, wp.select(p1 > p2, 1.0, 0.0))
-    is_standard = (geom_solref[0 + g1 * mjNREF] > 0) and (geom_solref[0 + g2 * mjNREF] > 0)
+    is_standard = (geom_solref[g1, 0] > 0) and (geom_solref[g2, 0] > 0)
 
     # Hard code mjNREF = 2
     solref_ = wp.vec2(0.0, 0.0)  # wp.zeros(mjNREF, dtype=float)
-    for i in range(mjNREF):
-        solref_[i] = mix * geom_solref[i + g1 * mjNREF] + (float(1) - mix) * geom_solref[i + g2 * mjNREF]
-        solref_[i] = wp.select(
-            is_standard, solref_[i], wp.min(geom_solref[i + g1 * mjNREF], geom_solref[i + g2 * mjNREF])
-        )
+    for i in range(2):
+        solref_[i] = mix * geom_solref[g1, i] + (1.0 - mix) * geom_solref[g2, i]
+        solref_[i] = wp.select(is_standard, solref_[i], wp.min(geom_solref[g1, i], geom_solref[g2, i]))
 
     # solimp_ = wp.zeros(mjNIMP, dtype=float)
     # for i in range(mjNIMP):
@@ -538,22 +547,20 @@ def get_contact_solver_params(
 
     friction_ = wp.vec3(0.0, 0.0, 0.0)  # wp.zeros(3, dtype=float)
     for i in range(3):
-        friction_[i] = wp.max(geom_friction[i + g1 * 3], geom_friction[i + g2 * 3])
+        friction_[i] = wp.max(geom_friction[g1, i], geom_friction[g2, i])
 
     includemargin[tid] = margin - gap
-    friction[tid * 5] = friction_[0]
-    friction[tid * 5 + 1] = friction_[0]
-    friction[tid * 5 + 2] = friction_[1]
-    friction[tid * 5 + 3] = friction_[2]
-    friction[tid * 5 + 4] = friction_[2]
+    friction[tid, 0] = friction_[0]
+    friction[tid, 1] = friction_[0]
+    friction[tid, 2] = friction_[1]
+    friction[tid, 3] = friction_[2]
+    friction[tid, 4] = friction_[2]
 
-    for i in range(mjNREF):
-        solref[tid * mjNREF + i] = solref_[i]
+    for i in range(2):
+        solref[tid, i] = solref_[i]
 
     for i in range(mjNIMP):
-        solimp[tid * mjNIMP + i] = (
-            mix * geom_solimp[i + g1 * mjNIMP] + (float(1) - mix) * geom_solimp[i + g2 * mjNIMP]
-        )  # solimp_[i]
+        solimp[tid, i] = mix * geom_solimp[g1, i] + (1.0 - mix) * geom_solimp[g2, i]  # solimp_[i]
 
 
 # ffi.register_ffi_target(
@@ -564,6 +571,7 @@ def get_contact_solver_params(
 
 
 def _get_body_has_plane(m: Model) -> np.ndarray:
+    # Determine which bodies have plane geoms
     body_has_plane = [False] * m.nbody
     for i in range(m.nbody):
         start = m.body_geomadr[i]
@@ -667,6 +675,22 @@ def _get_ngeom_pair_type_offset(m: Model) -> np.ndarray:
     return np.cumsum(offsets)[:-1]
 
 
+def squeeze_array(a: jax.Array, target_ndim: int) -> jax.Array:
+    # remove batch dimension
+    if a.ndim == target_ndim:
+        return a
+    if a.ndim == target_ndim + 1:
+        return a.reshape(-1, *a.shape[2:])
+    raise ValueError(f"Invalid array shape: {a.shape}, expected {target_ndim} or {target_ndim + 1}")
+
+
+def unsqueeze_array(a: Union[np.ndarray, jax.Array], batch_dim) -> jax.Array:
+    # add batch dimension
+    shape_div_batch = a.shape[0] // batch_dim
+    new_shape = (batch_dim, shape_div_batch, *a.shape[1:])
+    return a.reshape(*new_shape)
+
+
 class CollisionInput:
     def __init__(
         self,
@@ -693,21 +717,21 @@ class CollisionInput:
         # type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
         convex_vert, convex_vert_offset = get_convex_vert(m)
 
-        self.geom_xpos = wp.from_jax(d.geom_xpos, dtype=wp.vec3)  # .reshape((-1,))
-        self.geom_xmat = wp.from_jax(d.geom_xmat, dtype=wp.mat33)  # .reshape((-1,))
-        self.geom_size = wp.from_jax(m.geom_size, dtype=wp.vec3)
+        self.geom_xpos = wp.from_jax(squeeze_array(d.geom_xpos, 2), dtype=wp.vec3)
+        self.geom_xmat = wp.from_jax(squeeze_array(d.geom_xmat, 3), dtype=wp.mat33)
+        self.geom_size = wp.from_jax(squeeze_array(m.geom_size, 2), dtype=wp.vec3)
         self.geom_type = wp.array(m.geom_type, dtype=wp.int32)
         self.geom_contype = wp.array(m.geom_contype, dtype=wp.int32)
         self.geom_conaffinity = wp.array(m.geom_conaffinity, dtype=wp.int32)
         self.geom_priority = wp.array(m.geom_priority, dtype=wp.int32)
-        self.geom_margin = wp.array(m.geom_margin, dtype=wp.float32)
-        self.geom_gap = wp.array(m.geom_gap, dtype=wp.float32)
-        self.geom_solmix = wp.array(m.geom_solmix, dtype=wp.float32)
-        self.geom_friction = wp.array(m.geom_friction, dtype=wp.float32).reshape((-1,))
-        self.geom_solref = wp.array(m.geom_solref, dtype=wp.float32).reshape((-1,))
-        self.geom_solimp = wp.array(m.geom_solimp, dtype=wp.float32).reshape((-1,))
-        self.geom_aabb = wp.array(m.geom_aabb, dtype=wp.float32).reshape((-1,))
-        self.geom_rbound = wp.array(m.geom_rbound, dtype=wp.float32)
+        self.geom_margin = wp.array(squeeze_array(m.geom_margin, 1), dtype=wp.float32)
+        self.geom_gap = wp.array(squeeze_array(m.geom_gap, 1), dtype=wp.float32)
+        self.geom_solmix = wp.array(squeeze_array(m.geom_solmix, 1), dtype=wp.float32)
+        self.geom_friction = wp.array(squeeze_array(m.geom_friction, 2), dtype=wp.float32)
+        self.geom_solref = wp.array(squeeze_array(m.geom_solref, 2), dtype=wp.float32)
+        self.geom_solimp = wp.array(squeeze_array(m.geom_solimp, 2), dtype=wp.float32)
+        self.geom_aabb = wp.array(m.geom_aabb.reshape((-1, 6)), dtype=wp.float32)
+        self.geom_rbound = wp.array(squeeze_array(m.geom_rbound, 1), dtype=wp.float32)
         self.geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
         self.geom_bodyid = wp.array(m.geom_bodyid, dtype=wp.int32)
         self.body_parentid = wp.array(m.body_parentid, dtype=wp.int32)
@@ -723,8 +747,8 @@ class CollisionInput:
         self.pair_margin = wp.array(m.pair_margin, dtype=wp.float32)
         self.pair_gap = wp.array(m.pair_gap, dtype=wp.float32)
         self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
-        self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
-        self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
+        # self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
+        # self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
         self.convex_vert = wp.from_jax(convex_vert, dtype=wp.vec3)
         self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32)
         self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
@@ -778,8 +802,8 @@ class CollisionInput:
             f"pair_margin: {self.pair_margin.numpy()}\n"
             f"pair_gap: {self.pair_gap.numpy()}\n"
             f"pair_friction: {self.pair_friction.numpy()}\n"
-            f"pair_solref: {self.pair_solref.numpy()}\n"
-            f"pair_solimp: {self.pair_solimp.numpy()}\n"
+            # f"pair_solref: {self.pair_solref.numpy()}\n"
+            # f"pair_solimp: {self.pair_solimp.numpy()}\n"
             f"convex_vert: {self.convex_vert.numpy()}\n"
             f"convex_vert_offset: {self.convex_vert_offset.numpy()}\n"
             f"type_pair_offset: {self.type_pair_offset.numpy()}\n"
@@ -821,19 +845,19 @@ class CollisionOutput:
         self.g1 = wp.empty(n_points, dtype=wp.int32)
         self.g2 = wp.empty(n_points, dtype=wp.int32)
         self.includemargin = wp.empty(n_points, dtype=wp.float32)
-        self.friction = wp.empty(n_points * 5, dtype=wp.float32)
-        self.solref = wp.empty(n_points * mjNREF, dtype=wp.float32)
-        self.solreffriction = wp.empty(n_points * mjNREF, dtype=wp.float32)
-        self.solimp = wp.empty(n_points * mjNIMP, dtype=wp.float32)
-        self.dyn_body_aamm = wp.empty(nenv * nbody * 6, dtype=wp.float32)
-        self.col_body_pair = wp.empty(nenv * nbody * nbody * 2, dtype=wp.int32)
+        self.friction = wp.empty((n_points, 5), dtype=wp.float32)
+        self.solref = wp.empty((n_points, mjNREF), dtype=wp.float32)
+        self.solreffriction = wp.empty((n_points, mjNREF), dtype=wp.float32)
+        self.solimp = wp.empty((n_points, mjNIMP), dtype=wp.float32)
+        self.dyn_body_aamm = wp.empty((nenv * nbody, 6), dtype=wp.float32)
+        self.col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
         self.env_counter = wp.empty(nenv, dtype=wp.int32)
         self.env_counter2 = wp.empty(nenv, dtype=wp.int32)
         self.env_offset = wp.empty(nenv, dtype=wp.int32)
-        self.dyn_geom_aabb = wp.empty(nenv * ngeom * 6, dtype=wp.float32)
-        self.col_geom_pair = wp.empty(n_geom_pair * 2, dtype=wp.int32)
+        self.dyn_geom_aabb = wp.empty((nenv * ngeom, 6), dtype=wp.float32)
+        self.col_geom_pair = wp.empty((n_geom_pair, 2), dtype=wp.int32)
         self.type_pair_env_id = wp.empty(n_geom_pair, dtype=wp.int32)
-        self.type_pair_geom_id = wp.empty(n_geom_pair * 2, dtype=wp.int32)
+        self.type_pair_geom_id = wp.empty((n_geom_pair, 2), dtype=wp.int32)
         self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
         self.tmp_count = wp.empty(1, dtype=wp.int32)
         # self.simplex = wp.empty(n_points, dtype=wp.types.matrix(shape=(4, 3), dtype=float))
@@ -849,26 +873,20 @@ def finalize_sum(
 
 
 @wp.kernel
-def testKernel(num: int):
-    tid = wp.tid()
-    if tid >= num:
-        return
-
-
-@wp.kernel
 def init(
     max_contact_points: int,
     nenv: int,
+    # outputs
     dist: wp.array(dtype=wp.float32),
     pos: wp.array(dtype=wp.vec3),
     normal: wp.array(dtype=wp.vec3),
     g1: wp.array(dtype=wp.int32),
     g2: wp.array(dtype=wp.int32),
     includemargin: wp.array(dtype=wp.float32),
-    friction: wp.array(dtype=wp.float32),
-    solref: wp.array(dtype=wp.float32),
-    solreffriction: wp.array(dtype=wp.float32),
-    solimp: wp.array(dtype=wp.float32),
+    friction: wp.array(dtype=wp.float32, ndim=2),
+    solref: wp.array(dtype=wp.float32, ndim=2),
+    solreffriction: wp.array(dtype=wp.float32, ndim=2),
+    solimp: wp.array(dtype=wp.float32, ndim=2),
 ):
     tid = wp.tid()
     if tid >= nenv * max_contact_points:
@@ -880,20 +898,20 @@ def init(
     g1[tid] = -1
     g2[tid] = -1
     includemargin[tid] = 0.0
-    solref[tid * 2 + 0] = 0.02
-    solref[tid * 2 + 1] = 1.0
-    solimp[tid * 5 + 0] = 0.9
-    solimp[tid * 5 + 1] = 0.95
-    solimp[tid * 5 + 2] = 0.001
-    solimp[tid * 5 + 3] = 0.5
-    solimp[tid * 5 + 4] = 2.0
-    friction[tid * 5 + 0] = 1.0
-    friction[tid * 5 + 1] = 1.0
-    friction[tid * 5 + 2] = 0.005
-    friction[tid * 5 + 3] = 0.0001
-    friction[tid * 5 + 4] = 0.0001
-    solreffriction[tid * 2 + 0] = 0.0
-    solreffriction[tid * 2 + 1] = 0.0
+    solref[tid, 0] = 0.02
+    solref[tid, 1] = 1.0
+    solimp[tid, 0] = 0.9
+    solimp[tid, 1] = 0.95
+    solimp[tid, 2] = 0.001
+    solimp[tid, 3] = 0.5
+    solimp[tid, 4] = 2.0
+    friction[tid, 0] = 1.0
+    friction[tid, 1] = 1.0
+    friction[tid, 2] = 0.005
+    friction[tid, 3] = 0.0001
+    friction[tid, 4] = 0.0001
+    solreffriction[tid, 0] = 0.0
+    solreffriction[tid, 1] = 0.0
 
 
 @wp.struct
@@ -918,7 +936,12 @@ def orthogonals(a: wp.vec3) -> OrthoBasis:
 
 
 @wp.kernel
-def make_frame(n_frames: int, a: wp.array(dtype=wp.vec3), frame: wp.array(dtype=wp.vec3)):
+def make_frame(
+    n_frames: int,
+    a: wp.array(dtype=wp.vec3),
+    # outputs
+    frame: wp.array(dtype=wp.vec3, ndim=2),
+):
     tid = wp.tid()
     if tid >= n_frames:
         return
@@ -926,9 +949,9 @@ def make_frame(n_frames: int, a: wp.array(dtype=wp.vec3), frame: wp.array(dtype=
     a_normalized = wp.normalize(a[tid])
     basis = orthogonals(a_normalized)
 
-    frame[3 * tid + 0] = a_normalized
-    frame[3 * tid + 1] = basis.b
-    frame[3 * tid + 2] = basis.c
+    frame[tid, 0] = a_normalized
+    frame[tid, 1] = basis.b
+    frame[tid, 2] = basis.c
 
 
 # # TODO
@@ -1124,15 +1147,13 @@ def narrowphase(s, input, output):
                 _narrowphase2(s, input, output, t1, t2)
 
 
-def _collision(input: CollisionInput, output: CollisionOutput, device):
+def _collision(input: CollisionInput, output: CollisionOutput):
     if input.ngeom == 0:
         return True
 
-    # device = 'cpu'
+    device = output.dist.device
 
     gridSize = input.max_contact_points
-
-    wp.launch(testKernel, dim=1, inputs=[1])
 
     # Initialize the output data
     wp.launch(
@@ -1141,6 +1162,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
         inputs=[
             input.max_contact_points,
             input.nenv,
+        ],
+        outputs=[
             output.dist,
             output.pos,
             output.normal,
@@ -1161,7 +1184,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
     wp.launch(
         init_buffers,
         dim=[input.nenv],
-        inputs=[input.nenv, output.env_counter, output.env_offset, output.env_counter2],
+        inputs=[input.nenv],
+        outputs=[output.env_counter, output.env_offset, output.env_counter2],
         device=device,
     )
 
@@ -1183,6 +1207,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             input.geom_margin,
             input.geom_xpos,
             input.geom_rbound,
+        ],
+        outputs=[
             output.dyn_body_aamm,
         ],
         device=device,
@@ -1210,6 +1236,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             input.body_conaffinity,
             input.body_has_plane,
             input.exclude_signature,
+        ],
+        outputs=[
             output.dyn_body_aamm,
             output.col_body_pair,
             col_body_pair_count,
@@ -1234,6 +1262,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             input.geom_xpos,
             input.geom_xmat,
             input.geom_aabb,
+        ],
+        outputs=[
             output.dyn_geom_aabb,
         ],
         device=device,
@@ -1248,7 +1278,15 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
     wp.utils.array_scan(col_body_pair_count, body_pair_offset, False)
 
     wp.launch(
-        finalize_sum, dim=1, inputs=[input.nenv, body_pair_offset, col_body_pair_count, output.tmp_count], device=device
+        finalize_sum,
+        dim=1,
+        inputs=[
+            input.nenv,
+            body_pair_offset,
+            col_body_pair_count,
+        ],
+        outputs=[output.tmp_count],
+        device=device,
     )
 
     wp.synchronize()  # This is not for debugging - keep it
@@ -1274,6 +1312,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             input.geom_conaffinity,
             input.geom_type,
             input.geom_margin,
+        ],
+        outputs=[
             output.dyn_geom_aabb,
             output.col_body_pair,
             output.env_counter,
@@ -1289,12 +1329,7 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
     wp.synchronize()
 
     # Initialize type pair count
-    wp.launch(
-        set_zero,
-        dim=[input.n_geom_types * input.n_geom_types],
-        inputs=[input.n_geom_types * input.n_geom_types, output.type_pair_count],
-        device=device,
-    )
+    output.type_pair_count.zero_()
 
     wp.synchronize()
     wp.synchronize()
@@ -1316,7 +1351,12 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
     wp.launch(
         finalize_sum,
         dim=1,
-        inputs=[input.nenv, col_geom_pair_offset, col_geom_pair_count, output.tmp_count],
+        inputs=[
+            input.nenv,
+            col_geom_pair_offset,
+            col_geom_pair_count,
+        ],
+        outputs=[output.tmp_count],
         device=device,
     )
     total_geom_pairs = output.tmp_count.numpy()[0]
@@ -1337,6 +1377,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             col_geom_pair_count,
             col_geom_pair_offset,
             input.type_pair_offset,
+        ],
+        outputs=[
             output.type_pair_env_id,
             output.type_pair_geom_id,
             output.type_pair_count,
@@ -1350,9 +1392,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
 
     # Initialize the env contact counter
     env_contact_count = output.env_counter
-    wp.launch(set_zero, dim=[input.nenv * input.ngeom], inputs=[input.nenv, env_contact_count], device=device)
+    env_contact_count.zero_()
 
-    wp.synchronize()
     wp.synchronize()
 
     # Dispatch to narrowphase collision functions
@@ -1366,7 +1407,15 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
     wp.utils.array_scan(env_contact_count, env_contact_offset, False)
 
     wp.launch(
-        finalize_sum, dim=1, inputs=[input.nenv, env_contact_offset, env_contact_count, output.tmp_count], device=device
+        finalize_sum,
+        dim=1,
+        inputs=[
+            input.nenv,
+            env_contact_offset,
+            env_contact_count,
+        ],
+        outputs=[output.tmp_count],
+        device=device,
     )
     n_contact_pts = output.tmp_count.numpy()[0]
 
@@ -1395,6 +1444,8 @@ def _collision(input: CollisionInput, output: CollisionOutput, device):
             input.geom_margin,
             input.geom_gap,
             env_contact_offset,
+        ],
+        outputs=[
             output.includemargin,
             output.friction,
             output.solref,
@@ -1419,100 +1470,110 @@ def collision2(
     epa_best_count: int,
     multi_polygon_count: int,
     multi_tilt_angle: float,
+    device="cuda",
 ) -> Contact:
     """GJK/EPA narrowphase routine."""
     ngeom = m.ngeom
+    nenv = 1
+    nmodel = 1
 
     if not (m.geom_condim[0] == m.geom_condim).all():
         raise NotImplementedError(
             "m.geom_condim should be the same for all geoms. Different condim per geom is not supported yet."
         )
-    if len(d.geom_xpos.shape) != 2:
-        raise ValueError(f'd.geom_xpos should have 2d shape, got "{len(d.geom_xpos.shape)}".')
-    if len(d.geom_xmat.shape) != 3:
-        raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
-    if m.geom_size.shape[0] != ngeom:
-        raise ValueError(f'm.geom_size.shape[0] should be ngeom ({ngeom}), got "{m.geom_size.shape[0]}".')
+    if d.geom_xpos.ndim == 3:
+        # batching is used (i.e. vmap)
+        nenv = d.geom_xpos.shape[0]
+        # squeeze first two dimensions
+        # d.geom_xpos = d.geom_xpos.reshape(nenv * ngeom, 3)
+        # d.geom_xmat = d.geom_xmat.reshape(nenv * ngeom, 3, 3)
+        # d.geom_size = d.geom_size.reshape(nenv * ngeom)
+        assert d.contact.pos.shape[0] == nenv
+        max_contact_points = nenv * d.contact.pos.shape[1]
+    else:
+        if len(d.geom_xpos.shape) != 2:
+            raise ValueError(f'd.geom_xpos should have 2d shape, got "{d.geom_xpos.shape}".')
+        if len(d.geom_xmat.shape) != 3:
+            raise ValueError(f'd.geom_xmat should have 3d shape, got "{d.geom_xmat.shape}".')
+        if m.geom_size.shape[0] != ngeom:
+            raise ValueError(f'm.geom_size.shape[0] should be ngeom ({ngeom}), got "{m.geom_size.shape[0]}".')
+        max_contact_points = d.contact.pos.shape[0]
     if m.geom_dataid.shape != (ngeom,):
         raise ValueError(f'm.geom_dataid.shape should be (ngeom,) == ({ngeom},), got "({m.geom_dataid.shape[0]},)".')
     if m.npair > 0:
         raise NotImplementedError("m.npair > 0 is not supported.")
 
-    device = "cpu"
+    with wp.ScopedDevice(device):
+        n_pts = max_contact_points
+        body_pair_size = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
+        n_geom_pair = _get_ngeom_pair(m)
 
-    max_contact_points = d.contact.pos.shape[0]
-    n_pts = max_contact_points
-    body_pair_size = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
-    n_geom_pair = _get_ngeom_pair(m)
+        n_geom_types = len(GeomType)
+        n_geom_type_pairs = n_geom_types * n_geom_types
+        type_pair_offset = _get_ngeom_pair_type_offset(m)
+        type_pair_count = wp.zeros(n_geom_type_pairs, dtype=wp.int32)
+        # convex_vert, convex_vert_offset = engine_collision_convex.get_convex_vert(m)
 
-    n_geom_types = len(GeomType)
-    n_geom_type_pairs = n_geom_types * n_geom_types
-    type_pair_offset = _get_ngeom_pair_type_offset(m)
-    type_pair_count = wp.zeros(n_geom_type_pairs, dtype=wp.int32, device=device)
-    # convex_vert, convex_vert_offset = engine_collision_convex.get_convex_vert(m)
+        mjNREF = int(2)
+        mjNIMP = int(5)
+        mjMINVAL = float(1e-15)
 
-    nenv = 1
-    nmodel = 1
-    mjNREF = int(2)
-    mjNIMP = int(5)
-    mjMINVAL = float(1e-15)
+        # Initialize input and output structures
+        input = CollisionInput(
+            m,
+            d,
+            nenv,
+            nmodel,
+            depth_extension,
+            gjk_iter,
+            epa_iter,
+            epa_best_count,
+            multi_polygon_count,
+            multi_tilt_angle,
+            device,
+        )
+        output = CollisionOutput(
+            n_pts,
+            nenv=nenv,
+            nbody=m.nbody,
+            ngeom=ngeom,
+            n_geom_pair=n_geom_pair,
+            n_geom_types=n_geom_types,
+            mjNREF=mjNREF,
+            mjNIMP=mjNIMP,
+            device=device,
+        )
 
-    # Initialize input and output structures
-    input = CollisionInput(
-        m,
-        d,
-        nenv,
-        nmodel,
-        depth_extension,
-        gjk_iter,
-        epa_iter,
-        epa_best_count,
-        multi_polygon_count,
-        multi_tilt_angle,
-        device,
-    )
-    output = CollisionOutput(
-        n_pts,
-        nenv=nenv,
-        nbody=m.nbody,
-        ngeom=ngeom,
-        n_geom_pair=n_geom_pair,
-        n_geom_types=n_geom_types,
-        mjNREF=mjNREF,
-        mjNIMP=mjNIMP,
-        device=device,
-    )
+        # Call the collision function using Warp kernels
+        _collision(input, output)
 
-    # Call the collision function using Warp kernels
-    _collision(input, output, device)
+        # Assuming output.normal is a Warp array of wp.vec3
+        n_frames = len(output.normal)
 
-    # Assuming output.normal is a Warp array of wp.vec3
-    n_frames = len(output.normal)
+        # Allocate memory for the frame
+        frame = wp.empty((n_frames, 3), dtype=wp.vec3)
 
-    # Allocate memory for the frame
-    frame = wp.empty((n_frames * 3,), dtype=wp.vec3, device=device)
+        # Launch the make_frame kernel
+        wp.launch(make_frame, dim=n_frames, inputs=[n_frames, output.normal], outputs=[frame])
 
-    # Launch the make_frame kernel
-    wp.launch(make_frame, dim=n_frames, inputs=[n_frames, output.normal, frame], device=device)
+        # Synchronize to ensure the kernel has completed
+        wp.synchronize()
 
-    # Synchronize to ensure the kernel has completed
-    wp.synchronize()
-
-    c = Contact(
-        dist=wp.to_jax(output.dist),
-        pos=wp.to_jax(output.pos),
-        frame=wp.to_jax(frame),
-        includemargin=wp.to_jax(output.includemargin),
-        friction=wp.to_jax(output.friction),
-        solref=wp.to_jax(output.solref),
-        solreffriction=wp.to_jax(output.solreffriction),
-        solimp=wp.to_jax(output.solimp),
-        geom1=wp.to_jax(output.g1),
-        geom2=wp.to_jax(output.g2),
-        geom=jp.array([wp.to_jax(output.g1), wp.to_jax(output.g2)]).T,
-        efc_address=np.array([d.contact.efc_address]),
-        dim=np.array([d.contact.dim]),
-    )
+        c = Contact(
+            dist=wp.to_jax(output.dist).reshape(nenv, n_pts),
+            pos=wp.to_jax(output.pos).reshape(nenv, n_pts, 3),
+            frame=wp.to_jax(frame).reshape(nenv, n_pts, 3, 3),
+            includemargin=wp.to_jax(output.includemargin).reshape(nenv, n_pts),
+            friction=wp.to_jax(output.friction).reshape(nenv, n_pts, 5),
+            solref=wp.to_jax(output.solref).reshape(nenv, n_pts, mjNREF),
+            solreffriction=wp.to_jax(output.solreffriction).reshape(nenv, n_pts, mjNREF),
+            solimp=wp.to_jax(output.solimp).reshape(nenv, n_pts, mjNIMP),
+            geom1=wp.to_jax(output.g1).reshape(nenv, n_pts),
+            geom2=wp.to_jax(output.g2).reshape(nenv, n_pts),
+            geom=jp.array([wp.to_jax(output.g1), wp.to_jax(output.g2)]).T.reshape(nenv, n_pts, 2),
+            efc_address=np.array([d.contact.efc_address]).reshape(nenv, n_pts),
+            dim=np.array([d.contact.dim]).reshape(nenv, n_pts),
+        )
 
     return c
 

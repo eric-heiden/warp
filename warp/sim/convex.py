@@ -1168,7 +1168,7 @@ def gjk_epa_pipeline(
         nmodel: int,
         max_contact_points_per_env: int,
         type_pair_env_id: wp.array(dtype=int),
-        type_pair_geom_id: wp.array(dtype=int),
+        type_pair_geom_id: wp.array(dtype=int, ndim=2),
         type_pair_count: wp.array(dtype=int),
         type_pair_offset: wp.array(dtype=int),
         geom_xpos: wp.array(dtype=wp.vec3),
@@ -1204,8 +1204,8 @@ def gjk_epa_pipeline(
             return
 
         model_id = env_id % nmodel
-        g1 = type_pair_geom_id[type_pair_id * 2]
-        g2 = type_pair_geom_id[type_pair_id * 2 + 1]
+        g1 = type_pair_geom_id[type_pair_id, 0]
+        g2 = type_pair_geom_id[type_pair_id, 1]
 
         print("before gjk")
         simplex, normal = _gjk(
@@ -1593,7 +1593,7 @@ def _narrowphase(
     n_geom_types: int,
     max_contact_points_per_env: int,
     type_pair_env_id: wp.array(dtype=int),
-    type_pair_geom_id: wp.array(dtype=int),
+    type_pair_geom_id: wp.array(dtype=int, ndim=2),
     type_pair_count: wp.array(dtype=int),
     type_pair_offset: wp.array(dtype=int),
     geom_xpos: wp.array(dtype=wp.vec3),
