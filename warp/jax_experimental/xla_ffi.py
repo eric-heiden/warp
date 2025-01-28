@@ -455,8 +455,8 @@ _xla_data_type_to_constructor = {
     XLA_FFI_DataType.C128: jnp.complex128,
     # XLA_FFI_DataType.TOKEN
     XLA_FFI_DataType.F8E5M2: jnp.float8_e5m2,
-    XLA_FFI_DataType.F8E3M4: jnp.float8_e3m4,
-    XLA_FFI_DataType.F8E4M3: jnp.float8_e4m3,
+    # XLA_FFI_DataType.F8E3M4: jnp.float8_e3m4,
+    # XLA_FFI_DataType.F8E4M3: jnp.float8_e4m3,
     XLA_FFI_DataType.F8E4M3FN: jnp.float8_e4m3fn,
     XLA_FFI_DataType.F8E4M3B11FNUZ: jnp.float8_e4m3b11fnuz,
     XLA_FFI_DataType.F8E5M2FNUZ: jnp.float8_e5m2fnuz,
