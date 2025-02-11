@@ -30,11 +30,11 @@ def tile_math_matmul_kernel(
     ga: wp.array2d(dtype=wp.float16), gb: wp.array2d(dtype=wp.float32), gc: wp.array2d(dtype=wp.float64)
 ):
     i, j = wp.tid()
-    a = wp.tile_load(ga, i, j, m=TILE_M, n=TILE_K)
-    b = wp.tile_load(gb, i, j, m=TILE_K, n=TILE_N)
-    c = wp.tile_zeros(m=TILE_M, n=TILE_N, dtype=wp.float64)
+    a = wp.tile_load(ga, shape=(TILE_M, TILE_K), offset=(i * TILE_M, j * TILE_K))
+    b = wp.tile_load(gb, shape=(TILE_K, TILE_N), offset=(i * TILE_K, j * TILE_N))
+    c = wp.tile_zeros(shape=(TILE_M, TILE_N), dtype=wp.float64)
     wp.tile_matmul(a, b, c)
-    wp.tile_store(gc, i, j, c)
+    wp.tile_store(gc, c, offset=(i * TILE_M, j * TILE_N))
 
 
 def test_tile_math_matmul(test, device):
@@ -71,17 +71,17 @@ def test_tile_math_matmul(test, device):
 @wp.kernel()
 def tile_math_fft_kernel_vec2f(gx: wp.array2d(dtype=wp.vec2f), gy: wp.array2d(dtype=wp.vec2f)):
     i, j = wp.tid()
-    xy = wp.tile_load(gx, i, j, m=FFT_SIZE_FP32, n=FFT_SIZE_FP32)
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_FP32, FFT_SIZE_FP32))
     wp.tile_fft(xy)
-    wp.tile_store(gy, i, j, xy)
+    wp.tile_store(gy, xy)
 
 
 @wp.kernel()
 def tile_math_fft_kernel_vec2d(gx: wp.array2d(dtype=wp.vec2d), gy: wp.array2d(dtype=wp.vec2d)):
     i, j = wp.tid()
-    xy = wp.tile_load(gx, i, j, m=FFT_SIZE_FP64, n=FFT_SIZE_FP64)
+    xy = wp.tile_load(gx, shape=(FFT_SIZE_FP64, FFT_SIZE_FP64))
     wp.tile_fft(xy)
-    wp.tile_store(gy, i, j, xy)
+    wp.tile_store(gy, xy)
 
 
 def test_tile_math_fft(test, device, wp_dtype):
@@ -114,6 +114,56 @@ def test_tile_math_fft(test, device, wp_dtype):
     # TODO: implement and test backward pass
 
 
+@wp.kernel()
+def tile_math_cholesky(
+    gA: wp.array2d(dtype=wp.float64),
+    gD: wp.array1d(dtype=wp.float64),
+    gL: wp.array2d(dtype=wp.float64),
+    gx: wp.array1d(dtype=wp.float64),
+    gy: wp.array1d(dtype=wp.float64),
+):
+    i, j = wp.tid()
+    # Load A, D & x
+    a = wp.tile_load(gA, shape=(TILE_M, TILE_M), storage="shared")
+    d = wp.tile_load(gD, shape=TILE_M, storage="shared")
+    x = wp.tile_load(gx, shape=TILE_M, storage="shared")
+    # Compute L st LL^T = A + diag(D)
+    b = wp.tile_diag_add(a, d)
+    l = wp.tile_cholesky(b)
+    # Solve for y in LL^T y = x
+    y = wp.tile_cholesky_solve(l, x)
+    # Store L & y
+    wp.tile_store(gL, l)
+    wp.tile_store(gy, y)
+
+
+def test_tile_math_cholesky(test, device):
+    A_h = np.ones((TILE_M, TILE_M), dtype=np.float64)
+    D_h = 8.0 * np.ones(TILE_M, dtype=np.float64)
+    L_h = np.zeros_like(A_h)
+    X_h = np.arange(TILE_M, dtype=np.float64)
+    Y_h = np.zeros_like(X_h)
+
+    A_np = A_h + np.diag(D_h)
+    L_np = np.linalg.cholesky(A_np)
+    Y_np = np.linalg.solve(A_np, X_h)
+
+    A_wp = wp.array2d(A_h, requires_grad=True, dtype=wp.float64, device=device)
+    D_wp = wp.array2d(D_h, requires_grad=True, dtype=wp.float64, device=device)
+    L_wp = wp.array2d(L_h, requires_grad=True, dtype=wp.float64, device=device)
+    X_wp = wp.array2d(X_h, requires_grad=True, dtype=wp.float64, device=device)
+    Y_wp = wp.array2d(Y_h, requires_grad=True, dtype=wp.float64, device=device)
+
+    wp.launch_tiled(
+        tile_math_cholesky, dim=[1, 1], inputs=[A_wp, D_wp, L_wp, X_wp, Y_wp], block_dim=TILE_DIM, device=device
+    )
+    wp.synchronize_device()
+
+    assert np.allclose(Y_wp.numpy(), Y_np) and np.allclose(L_wp.numpy(), L_np)
+
+    # TODO: implement and test backward pass
+
+
 devices = get_cuda_test_devices()
 
 
@@ -124,6 +174,9 @@ class TestTileMathDx(unittest.TestCase):
 
 # check_output=False so we can enable libmathdx's logging without failing the tests
 add_function_test(TestTileMathDx, "test_tile_math_matmul", test_tile_math_matmul, devices=devices, check_output=False)
+add_function_test(
+    TestTileMathDx, "test_tile_math_cholesky", test_tile_math_cholesky, devices=devices, check_output=False
+)
 add_function_test(
     TestTileMathDx,
     "test_tile_math_fft_vec2f",

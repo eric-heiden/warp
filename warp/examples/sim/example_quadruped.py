@@ -93,7 +93,7 @@ class Example:
         fps = 100
         self.frame_dt = 1.0 / fps
 
-        self.sim_substeps = 5
+        self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.num_envs = num_envs
@@ -116,10 +116,13 @@ class Example:
         self.model.joint_attach_ke = 16000.0
         self.model.joint_attach_kd = 200.0
         self.use_tile_gemm = False
+        self.fuse_cholesky = False
 
         # self.integrator = wp.sim.XPBDIntegrator()
         # self.integrator = wp.sim.SemiImplicitIntegrator()
-        self.integrator = wp.sim.FeatherstoneIntegrator(self.model, use_tile_gemm=self.use_tile_gemm)
+        self.integrator = wp.sim.FeatherstoneIntegrator(
+            self.model, use_tile_gemm=self.use_tile_gemm, fuse_cholesky=self.fuse_cholesky
+        )
 
         if stage_path:
             self.renderer = wp.sim.render.SimRenderer(self.model, stage_path)

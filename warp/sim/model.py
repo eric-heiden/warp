@@ -7,6 +7,8 @@
 
 """A module for building simulation models and state."""
 
+from __future__ import annotations
+
 import copy
 import math
 from typing import List, Optional, Tuple
@@ -262,47 +264,51 @@ class Mesh:
 
 
 class State:
-    """The State object holds all *time-varying* data for a model.
+    """Time-varying state data for a :class:`Model`.
 
-    Time-varying data includes particle positions, velocities, rigid body states, and
+    Time-varying state data includes particle positions, velocities, rigid body states, and
     anything that is output from the integrator as derived data, e.g.: forces.
 
     The exact attributes depend on the contents of the model. State objects should
     generally be created using the :func:`Model.state()` function.
-
-    Attributes:
-
-        particle_q (array): Array of 3D particle positions, shape [particle_count], :class:`vec3`
-        particle_qd (array): Array of 3D particle velocities, shape [particle_count], :class:`vec3`
-        particle_f (array): Array of 3D particle forces, shape [particle_count], :class:`vec3`
-
-        body_q (array): Array of body coordinates (7-dof transforms) in maximal coordinates, shape [body_count], :class:`transform`
-        body_qd (array): Array of body velocities in maximal coordinates (first 3 entries represent angular velocity, last 3 entries represent linear velocity), shape [body_count], :class:`spatial_vector`
-        body_f (array): Array of body forces in maximal coordinates (first 3 entries represent torque, last 3 entries represent linear force), shape [body_count], :class:`spatial_vector`
-
-            Note:
-
-                :attr:`body_f` represents external wrenches in world frame and denotes wrenches measured w.r.t. to the body's center of mass for all integrators except :class:`FeatherstoneIntegrator` which assumes the wrenches are measured w.r.t. world origin.
-
-        joint_q (array): Array of generalized joint coordinates, shape [joint_coord_count], float
-        joint_qd (array): Array of generalized joint velocities, shape [joint_dof_count], float
-
     """
 
     def __init__(self):
-        self.particle_q = None
-        self.particle_qd = None
-        self.particle_f = None
+        self.particle_q: Optional[wp.array] = None
+        """Array of 3D particle positions with shape ``(particle_count,)`` and type :class:`vec3`."""
 
-        self.body_q = None
-        self.body_qd = None
-        self.body_f = None
+        self.particle_qd: Optional[wp.array] = None
+        """Array of 3D particle velocities with shape ``(particle_count,)`` and type :class:`vec3`."""
 
-        self.joint_q = None
-        self.joint_qd = None
+        self.particle_f: Optional[wp.array] = None
+        """Array of 3D particle forces with shape ``(particle_count,)`` and type :class:`vec3`."""
 
-    def clear_forces(self):
-        """Clears all forces (for particles and bodies) in the state object."""
+        self.body_q: Optional[wp.array] = None
+        """Array of body coordinates (7-dof transforms) in maximal coordinates with shape ``(body_count,)`` and type :class:`transform`."""
+
+        self.body_qd: Optional[wp.array] = None
+        """Array of body velocities in maximal coordinates (first three entries represent angular velocity,
+        last three entries represent linear velocity) with shape ``(body_count,)`` and type :class:`spatial_vector`.
+        """
+
+        self.body_f: Optional[wp.array] = None
+        """Array of body forces in maximal coordinates (first three entries represent torque, last three
+        entries represent linear force) with shape ``(body_count,)`` and type :class:`spatial_vector`.
+
+        .. note::
+            :attr:`body_f` represents external wrenches in world frame and denotes wrenches measured w.r.t.
+            to the body's center of mass for all integrators except :class:`FeatherstoneIntegrator`, which
+            assumes the wrenches are measured w.r.t. world origin.
+        """
+
+        self.joint_q: Optional[wp.array] = None
+        """Array of generalized joint coordinates with shape ``(joint_coord_count,)`` and type ``float``."""
+
+        self.joint_qd: Optional[wp.array] = None
+        """Array of generalized joint velocities with shape ``(joint_dof_count,)`` and type ``float``."""
+
+    def clear_forces(self) -> None:
+        """Clear all forces (for particles and bodies) in the state object."""
         with wp.ScopedTimer("clear_forces", False):
             if self.particle_count:
                 self.particle_f.zero_()
@@ -311,7 +317,7 @@ class State:
                 self.body_f.zero_()
 
     @property
-    def requires_grad(self):
+    def requires_grad(self) -> bool:
         """Indicates whether the state arrays have gradient computation enabled."""
         if self.particle_q:
             return self.particle_q.requires_grad
@@ -320,28 +326,28 @@ class State:
         return False
 
     @property
-    def body_count(self):
+    def body_count(self) -> int:
         """The number of bodies represented in the state."""
         if self.body_q is None:
             return 0
         return len(self.body_q)
 
     @property
-    def particle_count(self):
+    def particle_count(self) -> int:
         """The number of particles represented in the state."""
         if self.particle_q is None:
             return 0
         return len(self.particle_q)
 
     @property
-    def joint_coord_count(self):
+    def joint_coord_count(self) -> int:
         """The number of generalized joint position coordinates represented in the state."""
         if self.joint_q is None:
             return 0
         return len(self.joint_q)
 
     @property
-    def joint_dof_count(self):
+    def joint_dof_count(self) -> int:
         """The number of generalized joint velocity coordinates represented in the state."""
         if self.joint_qd is None:
             return 0
@@ -349,37 +355,34 @@ class State:
 
 
 class Control:
-    """
-    The Control object holds all *time-varying* control data for a model.
+    """Time-varying control data for a :class:`Model`.
 
-    Time-varying control data includes joint control inputs, muscle activations, and activation forces for triangle and tetrahedral elements.
+    Time-varying control data includes joint control inputs, muscle activations,
+    and activation forces for triangle and tetrahedral elements.
 
-    The exact attributes depend on the contents of the model. Control objects should generally be created using the :func:`Model.control()` function.
-
-    Attributes:
-
-        joint_act (array): Array of joint control inputs, shape [joint_axis_count], float
-        tri_activations (array): Array of triangle element activations, shape [tri_count], float
-        tet_activations (array): Array of tetrahedral element activations, shape [tet_count], float
-        muscle_activations (array): Array of muscle activations, shape [muscle_count], float
-
+    The exact attributes depend on the contents of the model. Control objects
+    should generally be created using the :func:`Model.control()` function.
     """
 
-    def __init__(self, model):
-        """
-        Args:
-            model (Model): The model to use as a reference for the control inputs
-        """
-        self.model = model
-        self.joint_act = None
-        self.tri_activations = None
-        self.tet_activations = None
-        self.muscle_activations = None
+    def __init__(self, model: Model):
+        self.model: Model = model
+        """Model to use as a reference for the control inputs."""
 
-    def reset(self):
-        """
-        Resets the control inputs to their initial state defined in :class:`Model`.
-        """
+        self.joint_act: Optional[wp.array] = None
+        """Array of joint control inputs with shape ``(joint_axis_count,)`` and type ``float``."""
+
+        self.tri_activations: Optional[wp.array] = None
+        """Array of triangle element activations with shape ``(tri_count,)`` and type ``float``."""
+
+        self.tet_activations: Optional[wp.array] = None
+        """Array of tetrahedral element activations with shape with shape ``(tet_count,) and type ``float``."""
+
+        self.muscle_activations: Optional[wp.array] = None
+        """Array of muscle activations with shape ``(muscle_count,)`` and type ``float``."""
+
+    def reset(self) -> None:
+        """Reset the control inputs to their initial state defined in :attr:`model`."""
+
         if self.joint_act is not None:
             self.joint_act.assign(self.model.joint_act)
         if self.tri_activations is not None:
@@ -578,19 +581,20 @@ class Model:
 
                This setting is not supported by :class:`FeatherstoneIntegrator`.
 
-        joint_limit_lower (array): Joint lower position limits, shape [joint_count], float
-        joint_limit_upper (array): Joint upper position limits, shape [joint_count], float
-        joint_limit_ke (array): Joint position limit stiffness (used by the Euler integrators), shape [joint_count], float
-        joint_limit_kd (array): Joint position limit damping (used by the Euler integrators), shape [joint_count], float
+        joint_limit_lower (array): Joint lower position limits, shape [joint_axis_count], float
+        joint_limit_upper (array): Joint upper position limits, shape [joint_axis_count], float
+        joint_limit_ke (array): Joint position limit stiffness (used by the Euler integrators), shape [joint_axis_count], float
+        joint_limit_kd (array): Joint position limit damping (used by the Euler integrators), shape [joint_axis_count], float
         joint_twist_lower (array): Joint lower twist limit, shape [joint_count], float
         joint_twist_upper (array): Joint upper twist limit, shape [joint_count], float
-        joint_q_start (array): Start index of the first position coordinate per joint, shape [joint_count], int
-        joint_qd_start (array): Start index of the first velocity coordinate per joint, shape [joint_count], int
+        joint_q_start (array): Start index of the first position coordinate per joint (note the last value is an additional sentinel entry to allow for querying the q dimensionality of joint i via ``joint_q_start[i+1] - joint_q_start[i]``), shape [joint_count + 1], int
+        joint_qd_start (array): Start index of the first velocity coordinate per joint (note the last value is an additional sentinel entry to allow for querying the qd dimensionality of joint i via ``joint_qd_start[i+1] - joint_qd_start[i]``), shape [joint_count + 1], int
         articulation_start (array): Articulation start index, shape [articulation_count], int
         joint_name (list): Joint names, shape [joint_count], str
         joint_attach_ke (float): Joint attachment force stiffness (used by :class:`SemiImplicitIntegrator`)
         joint_attach_kd (float): Joint attachment force damping (used by :class:`SemiImplicitIntegrator`)
 
+        soft_contact_radius (float): Contact radius used for self-collisions in the VBD integrator.
         soft_contact_margin (float): Contact margin for generation of soft contacts
         soft_contact_ke (float): Stiffness of soft contacts (used by the Euler integrators)
         soft_contact_kd (float): Damping of soft contacts (used by the Euler integrators)
@@ -761,6 +765,7 @@ class Model:
         self.joint_attach_ke = 1.0e3
         self.joint_attach_kd = 1.0e2
 
+        self.soft_contact_radius = 0.2
         self.soft_contact_margin = 0.2
         self.soft_contact_ke = 1.0e3
         self.soft_contact_kd = 10.0
@@ -1046,6 +1051,8 @@ class Model:
     @property
     def soft_contact_max(self):
         """Maximum number of soft contacts that can be registered"""
+        if self.soft_contact_particle is None:
+            return 0
         return len(self.soft_contact_particle)
 
 
@@ -1442,12 +1449,14 @@ class ModelBuilder:
             self.shape_collision_filter_pairs.add((i + shape_count, j + shape_count))
         for group, shapes in builder.shape_collision_group_map.items():
             if separate_collision_group:
-                group = self.last_collision_group + 1
+                extend_group = self.last_collision_group + 1
             else:
-                group = group + self.last_collision_group if group > -1 else -1
-            if group not in self.shape_collision_group_map:
-                self.shape_collision_group_map[group] = []
-            self.shape_collision_group_map[group].extend([s + shape_count for s in shapes])
+                extend_group = group + self.last_collision_group if group > -1 else -1
+
+            if extend_group not in self.shape_collision_group_map:
+                self.shape_collision_group_map[extend_group] = []
+
+            self.shape_collision_group_map[extend_group].extend([s + shape_count for s in shapes])
 
         # update last collision group counter
         if separate_collision_group:
@@ -1745,8 +1754,8 @@ class ModelBuilder:
         mode: int = JOINT_MODE_FORCE,
         limit_lower: float = -2 * math.pi,
         limit_upper: float = 2 * math.pi,
-        limit_ke: float = default_joint_limit_ke,
-        limit_kd: float = default_joint_limit_kd,
+        limit_ke: float = None,
+        limit_kd: float = None,
         linear_compliance: float = 0.0,
         angular_compliance: float = 0.0,
         armature: float = 1e-2,
@@ -1767,8 +1776,8 @@ class ModelBuilder:
             target_kd: The damping of the joint target
             limit_lower: The lower limit of the joint
             limit_upper: The upper limit of the joint
-            limit_ke: The stiffness of the joint limit
-            limit_kd: The damping of the joint limit
+            limit_ke: The stiffness of the joint limit (None to use the default value :attr:`default_joint_limit_ke`)
+            limit_kd: The damping of the joint limit (None to use the default value :attr:`default_joint_limit_kd`)
             linear_compliance: The linear compliance of the joint
             angular_compliance: The angular compliance of the joint
             armature: Artificial inertia added around the joint axis
@@ -1785,6 +1794,9 @@ class ModelBuilder:
 
         if child_xform is None:
             child_xform = wp.transform()
+
+        limit_ke = limit_ke if limit_ke is not None else self.default_joint_limit_ke
+        limit_kd = limit_kd if limit_kd is not None else self.default_joint_limit_kd
 
         action = 0.0
         if target is None and mode == JOINT_MODE_TARGET_POSITION:
@@ -1832,8 +1844,8 @@ class ModelBuilder:
         mode: int = JOINT_MODE_FORCE,
         limit_lower: float = -1e4,
         limit_upper: float = 1e4,
-        limit_ke: float = default_joint_limit_ke,
-        limit_kd: float = default_joint_limit_kd,
+        limit_ke: float = None,
+        limit_kd: float = None,
         linear_compliance: float = 0.0,
         angular_compliance: float = 0.0,
         armature: float = 1e-2,
@@ -1854,8 +1866,8 @@ class ModelBuilder:
             target_kd: The damping of the joint target
             limit_lower: The lower limit of the joint
             limit_upper: The upper limit of the joint
-            limit_ke: The stiffness of the joint limit
-            limit_kd: The damping of the joint limit
+            limit_ke: The stiffness of the joint limit (None to use the default value :attr:`default_joint_limit_ke`)
+            limit_kd: The damping of the joint limit (None to use the default value :attr:`default_joint_limit_ke`)
             linear_compliance: The linear compliance of the joint
             angular_compliance: The angular compliance of the joint
             armature: Artificial inertia added around the joint axis
@@ -1872,6 +1884,9 @@ class ModelBuilder:
 
         if child_xform is None:
             child_xform = wp.transform()
+
+        limit_ke = limit_ke if limit_ke is not None else self.default_joint_limit_ke
+        limit_kd = limit_kd if limit_kd is not None else self.default_joint_limit_kd
 
         action = 0.0
         if target is None and mode == JOINT_MODE_TARGET_POSITION:
@@ -2521,7 +2536,7 @@ class ModelBuilder:
                 last_dynamic_body_name = self.body_name[last_dynamic_body] if last_dynamic_body > -1 else "world"
                 if verbose:
                     print(
-                        f'Remove fixed joint {joint["name"]} between {parent_name} and {child_name}, '
+                        f"Remove fixed joint {joint['name']} between {parent_name} and {child_name}, "
                         f"merging {child_name} into {last_dynamic_body_name}"
                     )
                 child_id = body_data[child_body]["original_id"]
@@ -2616,11 +2631,12 @@ class ModelBuilder:
             joint_remap[joint["original_id"]] = i
         # update articulation_start
         for i, old_i in enumerate(self.articulation_start):
-            while old_i not in joint_remap:
-                old_i += 1
-                if old_i >= self.joint_count:
+            start_i = old_i
+            while start_i not in joint_remap:
+                start_i += 1
+                if start_i >= self.joint_count:
                     break
-            self.articulation_start[i] = joint_remap.get(old_i, old_i)
+            self.articulation_start[i] = joint_remap.get(start_i, start_i)
         # remove empty articulation starts, i.e. where the start and end are the same
         self.articulation_start = list(set(self.articulation_start))
 
@@ -2772,7 +2788,7 @@ class ModelBuilder:
                 c = np.cross(normal, (0.0, 1.0, 0.0))
                 angle = np.arcsin(np.linalg.norm(c))
                 axis = np.abs(c) / np.linalg.norm(c)
-                rot = wp.quat_from_axis_angle(axis, angle)
+                rot = wp.quat_from_axis_angle(wp.vec3(*axis), wp.float32(angle))
         scale = wp.vec3(width, length, 0.0)
 
         return self._add_shape(
@@ -3498,11 +3514,11 @@ class ModelBuilder:
         i: int,
         j: int,
         k: int,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ) -> float:
         """Adds a triangular FEM element between three particles in the system.
 
@@ -3522,6 +3538,11 @@ class ModelBuilder:
             between the particles in their initial configuration.
         """
         # TODO: Expose elastic parameters on a per-element basis
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
 
         # compute basis for 2D rest pose
         p = self.particle_q[i]
@@ -3702,8 +3723,8 @@ class ModelBuilder:
         k: int,
         l: int,
         rest: float = None,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        edge_ke: float = None,
+        edge_kd: float = None,
     ):
         """Adds a bending edge element between four particles in the system.
 
@@ -3724,6 +3745,9 @@ class ModelBuilder:
             winding: (i, k, l), (j, l, k).
 
         """
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+
         # compute rest angle
         if rest is None:
             x1 = self.particle_q[i]
@@ -3831,17 +3855,17 @@ class ModelBuilder:
         fix_right: bool = False,
         fix_top: bool = False,
         fix_bottom: bool = False,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
+        edge_ke: float = None,
+        edge_kd: float = None,
         add_springs: bool = False,
-        spring_ke: float = default_spring_ke,
-        spring_kd: float = default_spring_kd,
-        particle_radius: float = default_particle_radius,
+        spring_ke: float = None,
+        spring_kd: float = None,
+        particle_radius: float = None,
     ):
         """Helper to create a regular planar cloth grid
 
@@ -3863,6 +3887,16 @@ class ModelBuilder:
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+        spring_ke = spring_ke if spring_ke is not None else self.default_spring_ke
+        spring_kd = spring_kd if spring_kd is not None else self.default_spring_kd
+        particle_radius = particle_radius if particle_radius is not None else self.default_particle_radius
 
         def grid_index(x, y, dim_x):
             return y * dim_x + x
@@ -3965,17 +3999,17 @@ class ModelBuilder:
         density: float,
         edge_callback=None,
         face_callback=None,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
+        edge_ke: float = None,
+        edge_kd: float = None,
         add_springs: bool = False,
-        spring_ke: float = default_spring_ke,
-        spring_kd: float = default_spring_kd,
-        particle_radius: float = default_particle_radius,
+        spring_ke: float = None,
+        spring_kd: float = None,
+        particle_radius: float = None,
     ):
         """Helper to create a cloth model from a regular triangle mesh
 
@@ -3996,6 +4030,17 @@ class ModelBuilder:
 
             The mesh should be two manifold.
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+        spring_ke = spring_ke if spring_ke is not None else self.default_spring_ke
+        spring_kd = spring_kd if spring_kd is not None else self.default_spring_kd
+        particle_radius = particle_radius if particle_radius is not None else self.default_particle_radius
+
         num_tris = int(len(indices) / 3)
 
         start_vertex = len(self.particle_q)
@@ -4073,9 +4118,11 @@ class ModelBuilder:
         cell_z: float,
         mass: float,
         jitter: float,
-        radius_mean: float = default_particle_radius,
+        radius_mean: float = None,
         radius_std: float = 0.0,
     ):
+        radius_mean = radius_mean if radius_mean is not None else self.default_particle_radius
+
         rng = np.random.default_rng(42)
         for z in range(dim_z):
             for y in range(dim_y):
@@ -4110,11 +4157,11 @@ class ModelBuilder:
         fix_right: bool = False,
         fix_top: bool = False,
         fix_bottom: bool = False,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ):
         """Helper to create a rectangular tetrahedral FEM grid
 
@@ -4141,6 +4188,11 @@ class ModelBuilder:
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
 
         start_vertex = len(self.particle_q)
 
@@ -4232,11 +4284,11 @@ class ModelBuilder:
         k_mu: float,
         k_lambda: float,
         k_damp: float,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ):
         """Helper to create a tetrahedral model from an input tetrahedral mesh
 
@@ -4251,6 +4303,12 @@ class ModelBuilder:
             k_lambda: The second elastic Lame parameter
             k_damp: The damping stiffness
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+
         num_tets = int(len(indices) / 4)
 
         start_vertex = len(self.particle_q)
@@ -4269,8 +4327,7 @@ class ModelBuilder:
         pos = wp.vec3(pos[0], pos[1], pos[2])
         # add particles
         for v in vertices:
-            v = wp.vec3(v[0], v[1], v[2])
-            p = wp.quat_rotate(rot, v * scale) + pos
+            p = wp.quat_rotate(rot, wp.vec3(v[0], v[1], v[2]) * scale) + pos
 
             self.add_particle(p, vel, 0.0)
 
@@ -4342,16 +4399,22 @@ class ModelBuilder:
         self,
         normal=None,
         offset=0.0,
-        ke: float = default_shape_ke,
-        kd: float = default_shape_kd,
-        kf: float = default_shape_kf,
-        mu: float = default_shape_mu,
-        restitution: float = default_shape_restitution,
+        ke: float = None,
+        kd: float = None,
+        kf: float = None,
+        mu: float = None,
+        restitution: float = None,
     ):
         """
         Creates a ground plane for the world. If the normal is not specified,
         the up_vector of the ModelBuilder is used.
         """
+        ke = ke if ke is not None else self.default_shape_ke
+        kd = kd if kd is not None else self.default_shape_kd
+        kf = kf if kf is not None else self.default_shape_kf
+        mu = mu if mu is not None else self.default_shape_mu
+        restitution = restitution if restitution is not None else self.default_shape_restitution
+
         if normal is None:
             normal = self.up_vector
         self._ground_params = {
@@ -4402,16 +4465,18 @@ class ModelBuilder:
             balance_colors: Whether to apply the color balancing algorithm to balance the size of each color
             target_max_min_color_ratio: the color balancing algorithm will stop when the ratio between the largest color and
                 the smallest color reaches this value
-            algorithm: Value should an enum type of ColoringAlgorithm, otherwise it will raise an error. ColoringAlgorithm.mcs means using the MCS coloring algorithm,
+            algorithm: Value should be an enum type of ColoringAlgorithm, otherwise it will raise an error. ColoringAlgorithm.mcs means using the MCS coloring algorithm,
                 while ColoringAlgorithm.ordered_greedy means using the degree-ordered greedy algorithm. The MCS algorithm typically generates 30% to 50% fewer colors
                 compared to the ordered greedy algorithm, while maintaining the same linear complexity. Although MCS has a constant overhead that makes it about twice
                 as slow as the greedy algorithm, it produces significantly better coloring results. We recommend using MCS, especially if coloring is only part of the
-                preprocessing stage.e.
+                preprocessing.
 
         Note:
 
             References to the coloring algorithm:
+
             MCS: Pereira, F. M. Q., & Palsberg, J. (2005, November). Register allocation via coloring of chordal graphs. In Asian Symposium on Programming Languages and Systems (pp. 315-329). Berlin, Heidelberg: Springer Berlin Heidelberg.
+
             Ordered Greedy: Ton-That, Q. M., Kry, P. G., & Andrews, S. (2023). Parallel block Neo-Hookean XPBD using graph clustering. Computers & Graphics, 110, 1-10.
 
         """

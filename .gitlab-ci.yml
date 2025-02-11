@@ -63,17 +63,18 @@ linux-aarch64 build:
   stage: build
   image: ubuntu:20.04
   extends:
+    - .runner-build-linux-aarch64
     - .save_warp_bin_artifact
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_aarch64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/release-0.1.2/L1_Nightly/5/libmathdx-Linux-aarch64-0.1.2.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
@@ -81,8 +82,6 @@ linux-aarch64 build:
     - mkdir -p warp/bin/linux-aarch64
     - mv warp/bin/warp.so warp/bin/linux-aarch64
     - mv warp/bin/warp-clang.so warp/bin/linux-aarch64
-  tags:
-    - arch/arm
 
 linux-x86_64 build:
   stage: build
@@ -95,11 +94,11 @@ linux-x86_64 build:
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_x86_64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/release-0.1.2/L1_Nightly/5/libmathdx-Linux-x86_64-0.1.2.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
@@ -119,12 +118,12 @@ windows-x86_64 build:
       $headers = @{
           "Authorization" = "Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("warp-cicd:${env:LIBMATHDX_REGISTRY_TOKEN}")))"
       }
-      $url = "${CI_API_V4_URL}/projects/141992/packages/generic/libmathdx/0-1-0-2/libmathdx-0.1.0-win64.zip"
+      $url = "${CI_API_V4_URL}/projects/141992/packages/generic/libmathdx/0-1-2-2/libmathdx-win64-x86_64-0.1.2.zip"
       $output = "libmathdx.zip"
       Invoke-WebRequest -Uri $url -Headers $headers -OutFile $output -ErrorAction Stop
     - Expand-Archive -Path libmathdx.zip -DestinationPath _build/target-deps -Force
     - Get-ChildItem -Path "${env:CI_PROJECT_DIR}\_build\target-deps"
-    - $env:LIBMATHDX_HOME = "${env:CI_PROJECT_DIR}\_build\target-deps\libmathdx-0.1.0-win64"
+    - $env:LIBMATHDX_HOME = "${env:CI_PROJECT_DIR}\_build\target-deps\libmathdx"
   script:
     - ./tools/ci/building/build-windows-x86_64/build.bat
 
@@ -173,6 +172,7 @@ ruff format:
     - ruff format --diff
 
 osec:sonarqube:
+  allow_failure: true  # Uptime not guaranteed
   variables:
     # Disable C/C++ analyzer until project specific work is done to enable it.
     # See: https://confluence.nvidia.com/display/OMNIVERSE/SonarQube+Gitlab+CI+Integration#C+Project+Enablement+Additions
@@ -220,36 +220,34 @@ linux-aarch64 test:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
+    - .runner-test-linux-aarch64  # TODO: Change to .omni_devplat_arm_docker_gpu
     - .test_common_main
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install coverage[toml]
+    - python -m pip install coverage[toml]==7.6.10  # 7.6.11 seems to have a bug
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
-  tags:
-    - arch/arm
 
 linux-aarch64 test jetson:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
-    - .test_common_main
+    - .save_test_report_artifact
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH 
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH =~ /^release-.*/
     - when: manual # If not auto-triggered, allow any pipeline to run this job manually
-  allow_failure: true # Unsure of stability of Jetson runner for now
+      allow_failure: true
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install coverage[toml]
     - python -m pip install -U "jax[cuda12]"
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
-    - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    - python -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
   tags:
     - gpu/orin
 
@@ -315,7 +313,7 @@ mac-x86_64 test:
     - python -m pip install --upgrade usd-core coverage[toml]
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
-    - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    - python -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
 
 # Test the Linux release build in an environment with minimal Python dependencies installed
 linux-x86_64 test minimal:
@@ -449,7 +447,7 @@ windows-x86_64 docs:
     - python -m pip install -r docs/requirements.txt
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
   script:
-    - python build_docs.py
+    - python build_docs.py --quick
     - mv docs/_build/html/ ./public/
   after_script:
     - echo "View the website at https://$CI_PROJECT_ROOT_NAMESPACE.$CI_PAGES_DOMAIN/-/$CI_PROJECT_NAME/-/jobs/$CI_JOB_ID/artifacts/public/index.html"
@@ -473,6 +471,49 @@ doctest:
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - sphinx-build -b doctest docs docs/_build/doctest
+
+# Benchmark this commit with the current main branch using Airspeed Velocity
+# Only runs on merge requests
+linux-x86_64 asv:
+  stage: test
+  needs: []
+  image: ubuntu:22.04
+  extends:
+    - .omni_nvks_gpu
+  variables:
+    GIT_DEPTH: "50"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+      changes:
+        - .gitlab-ci.yml
+        - asv/**/*
+        - warp/**/*
+        - pyproject.toml
+        - deps/*
+        - build_lib.py
+        - build_llvm.py
+  before_script:
+    - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
+    - df -h
+    - apt-get update && apt-get install python3 python3.10-venv git-lfs build-essential curl ca-certificates --no-install-recommends -y
+    - tools/packman/packman pull --platform linux-x86_64 deps/cuda-toolkit-deps.packman.xml --verbose --include-tag "cuda-12"
+    - export PATH="$CUDA_BIN:$PATH"
+    - python3 -m venv _venv
+    - source _venv/bin/activate
+    - python -m pip install --upgrade pip
+    - python -m pip install asv
+    - export GIT_LFS_SKIP_SMUDGE=1
+    - git config --global --add safe.directory '*' 
+    - git fetch origin main
+    # Make sure the main branch can be checked out by asv
+    - git checkout -f main
+    - git checkout -f $CI_COMMIT_SHA
+    - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
+  script:
+    - cd asv
+    - asv machine --yes
+    - asv continuous --interleave-rounds --append-samples --no-only-changed -f 1.15 --bench '^(?!api)' main $CI_COMMIT_SHA
+  allow_failure: True # Can make success required after we have tested this job more
 
 # ==============================================================================
 # Child pipelines
@@ -627,6 +668,36 @@ create pypi wheels:
       - "dist-github/"
     when: always
 
+create dev wheels:
+  stage: package
+  needs:
+    - linux-aarch64 build
+    - linux-x86_64 build
+    - windows-x86_64 build
+  extends:
+    - .runner-utility-linux-x86_64
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    # Move binaries into platform-specific folders. Already done in the build jobs for Linux.
+    - mkdir -p warp/bin/windows-x86_64
+    - mv warp/bin/warp.dll warp/bin/windows-x86_64/
+    - mv warp/bin/warp-clang.dll warp/bin/windows-x86_64/
+    - python3 -m pip install --upgrade pip
+    - python3 -m pip install build
+  script:
+    - python3 tools/ci/publishing/set_nightly_version.py  # Modify VERSION.md with dev version
+    - python3 -m build --wheel -C--build-option=-Pwindows-x86_64
+    - python3 -m build --wheel -C--build-option=-Plinux-x86_64
+    - python3 -m build --wheel -C--build-option=-Plinux-aarch64
+    - find . -type f -exec chmod 664 {} +
+    - find . -type d -exec chmod 775 {} +
+    - cp VERSION.md dist/
+  artifacts:
+    name: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA-dev
+    paths:
+      - "dist/"
+
 # ==============================================================================
 # Deployment Jobs
 #
@@ -660,7 +731,7 @@ publish wheels to pypi registry:
   extends:
     - .runner-utility-linux-x86_64
   rules:
-    - if: $CI_COMMIT_BRANCH =~ /release-.*/ || $CI_COMMIT_TAG
+    - if: $CI_COMMIT_TAG
       when: manual
       allow_failure: true
   environment:
@@ -710,6 +781,83 @@ publish wheels to gitlab package registry:
       done
     - echo "See the published files at $CI_PROJECT_URL/-/packages"
 
+publish dev wheels to artifactory:
+  stage: deploy
+  image: releases-docker.jfrog.io/jfrog/jfrog-cli-v2-jf
+  needs:
+    - job: create dev wheels
+      optional: true
+  extends:
+    - .runner-utility-linux-x86_64
+  rules: # Should be consistent with create dev wheels
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  allow_failure: true
+  before_script:
+    - export VERSION=$(head -n 1 dist/VERSION.md)
+  script:
+    - cd dist
+    - >
+      jf rt u --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token=$ARTIFACTORY_SVC_ACCESS_TOKEN
+      --target-props="component_name=warp-lang;release_approver=ershi;release_status=ready;version=$VERSION;branch=$CI_COMMIT_REF_SLUG"
+      '*.whl' sw-warp-pypi-local/nightly/warp-lang/
+    # Set build-specific properties on individual artifacts
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token=$ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/nightly/warp-lang/*$VERSION*-win_amd64.whl
+      'arch=x86_64;os=windows'
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token=$ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/nightly/warp-lang/*$VERSION*-manylinux2014_aarch64.whl
+      'arch=aarch64;os=linux'
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token=$ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/nightly/warp-lang/*$VERSION*-manylinux2014_x86_64.whl
+      'arch=x86_64;os=linux'
+
+publish tag wheels to artifactory:
+  stage: deploy
+  image: releases-docker.jfrog.io/jfrog/jfrog-cli-v2-jf
+  needs: ["create pypi wheels"]
+  extends:
+    - .runner-utility-linux-x86_64
+  rules:
+    - if: $CI_COMMIT_TAG
+  allow_failure: true
+  before_script:
+    - export VERSION=$(head -n 1 VERSION.md)
+  script:
+    - cd dist
+    - >
+      jf rt u --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      --target-props 'component_name=warp-lang;release_approver=ershi;release_status=ready'
+      '*.whl' sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/
+    # Set build-specific properties on individual artifacts
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*-win_amd64.whl
+      'arch=x86_64;os=windows'
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*-manylinux2014_aarch64.whl
+      'arch=aarch64;os=linux'
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*-manylinux2014_x86_64.whl
+      'arch=x86_64;os=linux'
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*-macosx_*_universal2.whl
+      'arch=universal;os=macosx'
+    # Set additional common properties on all artifacts
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*.whl
+      version=$VERSION
+    - >
+      jf rt sp --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token $ARTIFACTORY_SVC_ACCESS_TOKEN
+      sw-warp-pypi-local/warp/$CI_COMMIT_REF_NAME/$VERSION/*.whl
+      branch=$CI_COMMIT_REF_NAME
+
 .build-docs-common:
   stage: deploy
   image: python:3.11-slim
@@ -730,7 +878,7 @@ publish wheels to gitlab package registry:
     - python -m pip install -r docs/requirements.txt
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
-    - python build_docs.py
+    - python build_docs.py --quick
     - mv docs/_build/html/ ./public/
 
 # Merge requests: Build documentation and save as an artifact

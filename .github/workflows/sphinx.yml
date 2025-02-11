@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -33,7 +35,7 @@ jobs:
       - name: Build Warp without CUDA Support
         run: python build_lib.py
       - name: Build Sphinx documentation
-        run: python build_docs.py
+        run: python build_docs.py --quick
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

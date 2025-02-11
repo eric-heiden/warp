@@ -45,11 +45,23 @@ the `pip install` command, e.g.
 
 | Platform        | Install Command                                                                                                               |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Linux aarch64   | `pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-manylinux2014_aarch64.whl` |
-| Linux x86-64    | `pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-manylinux2014_x86_64.whl`  |
-| Windows x86-64  | `pip install https://github.com/NVIDIA/warp/releases/download/v1.4.2/warp_lang-1.4.2+cu11-py3-none-win_amd64.whl`             |
+| Linux aarch64   | `pip install https://github.com/NVIDIA/warp/releases/download/v1.6.0/warp_lang-1.6.0+cu11-py3-none-manylinux2014_aarch64.whl` |
+| Linux x86-64    | `pip install https://github.com/NVIDIA/warp/releases/download/v1.6.0/warp_lang-1.6.0+cu11-py3-none-manylinux2014_x86_64.whl`  |
+| Windows x86-64  | `pip install https://github.com/NVIDIA/warp/releases/download/v1.6.0/warp_lang-1.6.0+cu11-py3-none-win_amd64.whl`             |
 
 The `--force-reinstall` option may need to be used to overwrite a previous installation.
+
+### Nightly Builds
+
+Nightly builds of Warp from the `main` branch are available on the [NVIDIA Package Index](https://pypi.nvidia.com/warp-lang/).
+
+To install the latest nightly build, use the following command:
+
+```text
+pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
+```
+
+Note that the nightly builds are built with the CUDA 12 runtime and are not published for macOS.
 
 ### CUDA Requirements
 
@@ -110,6 +122,30 @@ wp.launch(kernel=length,
 print(lengths)
 ```
 
+## Running Notebooks
+
+A few notebooks are available in the [notebooks](./notebooks/) directory to provide an overview over the key features available in Warp.
+
+To run these notebooks, ``jupyterlab`` is required to be installed using:
+
+```text
+pip install jupyterlab
+```
+
+From there, opening the notebooks can be done with the following command:
+
+```text
+jupyter lab ./notebooks
+```
+
+* [Warp Core Tutorial: Basics](./notebooks/core_01_basics.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb)
+* [Warp Core Tutorial: Generics](./notebooks/core_02_generics.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb)
+* [Warp Core Tutorial: Points](./notebooks/core_03_points.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb)
+* [Warp Core Tutorial: Meshes](./notebooks/core_04_meshes.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb)
+* [Warp Core Tutorial: Volumes](./notebooks/core_05_volumes.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb)
+* [Warp PyTorch Tutorial: Basics](./notebooks/pytorch_01_basics.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb)
+* [Warp PyTorch Tutorial: Custom Operators](./notebooks/pytorch_02_custom_operators.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb)
+
 ## Running Examples
 
 The [warp/examples](./warp/examples/) directory contains a number of scripts categorized under subdirectories
@@ -154,10 +190,10 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_dem.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_dem.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_fluid.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_fluid.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_graph_capture.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_graph_capture.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_marching_cubes.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_marching_cubes.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_dem.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fluid.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_graph_capture.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_marching_cubes.png"></a></td>
         </tr>
         <tr>
             <td align="center">dem</td>
@@ -166,10 +202,10 @@ python -m warp.tests
             <td align="center">marching cubes</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_mesh.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_mesh.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_nvdb.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_nvdb.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raycast.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_raycast.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raymarch.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_raymarch.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_mesh.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_nvdb.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_nvdb.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raycast.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raymarch.png"></a></td>
         </tr>
         <tr>
             <td align="center">mesh</td>
@@ -178,9 +214,9 @@ python -m warp.tests
             <td align="center">raymarch</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_sph.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_sph.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_torch.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_torch.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_wave.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/core_wave.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sph.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_torch.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_wave.png"></a></td>
             <td></td>
         </tr>
         <tr>
@@ -197,10 +233,10 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_diffusion_3d.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_diffusion_3d.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_mixed_elasticity.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_mixed_elasticity.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_apic_fluid.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_apic_fluid.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_streamlines.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_streamlines.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_diffusion_3d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_diffusion_3d.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_mixed_elasticity.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_mixed_elasticity.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_apic_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_apic_fluid.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_streamlines.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_streamlines.png"></a></td>
         </tr>
         <tr>
             <td align="center">diffusion 3d</td>
@@ -209,10 +245,10 @@ python -m warp.tests
             <td align="center">streamlines</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_convection_diffusion.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_convection_diffusion.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_navier_stokes.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_navier_stokes.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_burgers.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_burgers.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_magnetostatics.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_magnetostatics.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_convection_diffusion.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_convection_diffusion.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_navier_stokes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_navier_stokes.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_burgers.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_burgers.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_magnetostatics.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_magnetostatics.png"></a></td>
         </tr>
         <tr>
             <td align="center">convection diffusion</td>
@@ -228,10 +264,10 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_bounce.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_bounce.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_cloth_throw.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_cloth_throw.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_diffray.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_diffray.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_drone.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_drone.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_bounce.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_bounce.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_cloth_throw.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_cloth_throw.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_diffray.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_drone.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_drone.png"></a></td>
         </tr>
         <tr>
             <td align="center">bounce</td>
@@ -240,16 +276,28 @@ python -m warp.tests
             <td align="center">drone</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_inverse_kinematics.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_inverse_kinematics.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_spring_cage.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_spring_cage.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_trajectory.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_trajectory.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_walker.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/optim_walker.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_inverse_kinematics.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_inverse_kinematics.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_spring_cage.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_spring_cage.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_trajectory.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_trajectory.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_walker.png"></a></td>
         </tr>
         <tr>
             <td align="center">inverse kinematics</td>
             <td align="center">spring cage</td>
             <td align="center">trajectory</td>
             <td align="center">walker</td>
+        </tr>
+        <tr>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_softbody_properties.png"></a></td>
+            <td></td>
+            <td></td>
+            <td></td>
+        </tr>
+        <tr>
+            <td align="center">soft body properties</td>
+            <td align="center"></td>
+            <td align="center"></td>
+            <td align="center"></td>
         </tr>
     </tbody>
 </table>
@@ -259,10 +307,10 @@ python -m warp.tests
 <table>
     <tbody>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cartpole.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_cartpole.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cloth.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_cloth.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_granular.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_granular.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_granular_collision_sdf.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_granular_collision_sdf.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cartpole.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_cartpole.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cloth.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_cloth.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_granular.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_granular.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_granular_collision_sdf.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_granular_collision_sdf.png"></a></td>
         </tr>
         <tr>
             <td align="center">cartpole</td>
@@ -271,10 +319,10 @@ python -m warp.tests
             <td align="center">granular collision sdf</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_jacobian_ik.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_jacobian_ik.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_quadruped.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_quadruped.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_chain.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_rigid_chain.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_contact.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_rigid_contact.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_jacobian_ik.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_jacobian_ik.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_quadruped.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_quadruped.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_chain.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_rigid_chain.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_contact.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_rigid_contact.png"></a></td>
         </tr>
         <tr>
             <td align="center">jacobian ik</td>
@@ -283,10 +331,10 @@ python -m warp.tests
             <td align="center">rigid contact</td>
         </tr>
         <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_force.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_rigid_force.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_gyroscopic.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_rigid_gyroscopic.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_soft_contact.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_rigid_soft_contact.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_soft_body.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/sim_soft_body.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_force.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_rigid_force.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_gyroscopic.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_rigid_gyroscopic.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_rigid_soft_contact.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_rigid_soft_contact.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_soft_body.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_soft_body.png"></a></td>
         </tr>
         <tr>
             <td align="center">rigid force</td>
@@ -294,33 +342,20 @@ python -m warp.tests
             <td align="center">rigid soft contact</td>
             <td align="center">soft body</td>
         </tr>
+        <tr>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cloth_self_contact.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/sim_example_cloth_self_contact.png"></a></td>
+            <td></td>
+            <td></td>
+            <td></td>
+        </tr>
+        <tr>
+            <td align="center">cloth self contact</td>
+            <td align="center"></td>
+            <td align="center"></td>
+            <td align="center"></td>
+        </tr>
     </tbody>
 </table>
-
-## Running Notebooks
-
-A few notebooks are available in the [notebooks](./notebooks/) directory to provide an overview over the key features available in Warp.
-
-To run these notebooks, ``jupyterlab`` is required to be installed using:
-
-
-```text
-pip install jupyterlab
-```
-
-From there, opening the notebooks can be done with the following command:
-
-```text
-jupyter lab ./notebooks
-```
-
-- [Warp Core Tutorial: Basics](https://github.com/NVIDIA/warp/tree/main/warp/notebooks/core_01_basics.ipynb) <a target="_blank" href="https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-- [Warp Core Tutorial: Generics](https://github.com/NVIDIA/warp/tree/main/warp/notebooks/core_02_generics.ipynb) <a target="_blank" href="https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/notebooks/core_02_generics.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-- [Warp Core Tutorial: Points](https://github.com/NVIDIA/warp/tree/main/warp/notebooks/core_03_points.ipynb) <a target="_blank" href="https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/notebooks/core_03_points.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-- [Warp Core Tutorial: Meshes](https://github.com/NVIDIA/warp/tree/main/warp/notebooks/core_04_meshes.ipynb) <a target="_blank" href="https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/notebooks/core_04_meshes.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-- [Warp Core Tutorial: Volumes](https://github.com/NVIDIA/warp/tree/main/warp/notebooks/core_05_volumes.ipynb) <a target="_blank" href="https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/notebooks/core_05_volumes.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-
-
 
 ## Building
 

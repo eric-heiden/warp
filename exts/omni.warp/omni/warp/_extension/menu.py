@@ -11,7 +11,6 @@ from omni.kit.menu.utils import MenuItemDescription
 
 class WarpMenu:
     def __init__(self):
-        omni.kit.menu.utils.set_default_menu_proirity("Warp", -8)
         self._top_menu = None
         self._build_warp_menu()
 
@@ -25,7 +24,7 @@ class WarpMenu:
 
         self._top_menu = [MenuItemDescription(name="Warp", appear_after="Simulation", sub_menu=warp_menu)]
 
-        omni.kit.menu.utils.add_menu_items(self._top_menu, "Window", -8)
+        omni.kit.menu.utils.add_menu_items(self._top_menu, "Window")
 
     def shutdown(self):
         omni.kit.menu.utils.remove_menu_items(self._top_menu, "Window")

@@ -11,27 +11,50 @@ import os
 import warp.config
 from warp.thirdparty import appdirs
 
+# From nvJitLink.h
+nvJitLink_input_type = {"cubin": 1, "ptx": 2, "ltoir": 3, "fatbin": 4, "object": 5, "library": 6}
+
 
 # builds cuda source to PTX or CUBIN using NVRTC (output type determined by output_path extension)
-def build_cuda(cu_path, arch, output_path, config="release", verify_fp=False, fast_math=False, ltoirs=None):
+def build_cuda(
+    cu_path,
+    arch,
+    output_path,
+    config="release",
+    verify_fp=False,
+    fast_math=False,
+    fuse_fp=True,
+    lineinfo=False,
+    ltoirs=None,
+    fatbins=None,
+) -> None:
     with open(cu_path, "rb") as src_file:
         src = src_file.read()
-        cu_path = cu_path.encode("utf-8")
+        cu_path_bytes = cu_path.encode("utf-8")
+        program_name_bytes = os.path.basename(cu_path).encode("utf-8")
         inc_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "native").encode("utf-8")
         output_path = output_path.encode("utf-8")
 
         if warp.config.llvm_cuda:
-            warp.context.runtime.llvm.compile_cuda(src, cu_path, inc_path, output_path, False)
+            warp.context.runtime.llvm.compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
 
         else:
             if ltoirs is None:
                 ltoirs = []
+            if fatbins is None:
+                fatbins = []
 
-            num_ltoirs = len(ltoirs)
-            arr_lroirs = (ctypes.c_char_p * num_ltoirs)(*ltoirs)
-            arr_lroir_sizes = (ctypes.c_size_t * num_ltoirs)(*[len(l) for l in ltoirs])
+            link_data = list(ltoirs) + list(fatbins)
+            num_link = len(link_data)
+            arr_link = (ctypes.c_char_p * num_link)(*link_data)
+            arr_link_sizes = (ctypes.c_size_t * num_link)(*[len(l) for l in link_data])
+            link_input_types = [nvJitLink_input_type["ltoir"]] * len(ltoirs) + [nvJitLink_input_type["fatbin"]] * len(
+                fatbins
+            )
+            arr_link_input_types = (ctypes.c_int * num_link)(*link_input_types)
             err = warp.context.runtime.core.cuda_compile_program(
                 src,
+                program_name_bytes,
                 arch,
                 inc_path,
                 0,
@@ -40,10 +63,13 @@ def build_cuda(cu_path, arch, output_path, config="release", verify_fp=False, fa
                 warp.config.verbose,
                 verify_fp,
                 fast_math,
+                fuse_fp,
+                lineinfo,
                 output_path,
-                num_ltoirs,
-                arr_lroirs,
-                arr_lroir_sizes,
+                num_link,
+                arr_link,
+                arr_link_sizes,
+                arr_link_input_types,
             )
             if err != 0:
                 raise Exception(f"CUDA kernel build failed with error code {err}")
@@ -57,14 +83,16 @@ def load_cuda(input_path, device):
     return warp.context.runtime.core.cuda_load_module(device.context, input_path.encode("utf-8"))
 
 
-def build_cpu(obj_path, cpp_path, mode="release", verify_fp=False, fast_math=False):
+def build_cpu(obj_path, cpp_path, mode="release", verify_fp=False, fast_math=False, fuse_fp=True):
     with open(cpp_path, "rb") as cpp:
         src = cpp.read()
         cpp_path = cpp_path.encode("utf-8")
         inc_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "native").encode("utf-8")
         obj_path = obj_path.encode("utf-8")
 
-        err = warp.context.runtime.llvm.compile_cpp(src, cpp_path, inc_path, obj_path, mode == "debug", verify_fp)
+        err = warp.context.runtime.llvm.compile_cpp(
+            src, cpp_path, inc_path, obj_path, mode == "debug", verify_fp, fuse_fp
+        )
         if err != 0:
             raise Exception(f"CPU kernel build failed with error code {err}")
 

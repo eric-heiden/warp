@@ -30,7 +30,7 @@ def tile_gemm(A: wp.array2d(dtype=wp.float32), B: wp.array2d(dtype=wp.float16), 
     # output tile index
     i, j = wp.tid()
 
-    sum = wp.tile_zeros(m=TILE_M, n=TILE_N, dtype=wp.float64)
+    sum = wp.tile_zeros(shape=(TILE_M, TILE_N), dtype=wp.float64)
 
     _M = A.shape[0]
     _N = B.shape[1]
@@ -39,13 +39,13 @@ def tile_gemm(A: wp.array2d(dtype=wp.float32), B: wp.array2d(dtype=wp.float16), 
     count = int(K / TILE_K)
 
     for k in range(0, count):
-        a = wp.tile_load(A, i, k, m=TILE_M, n=TILE_K)
-        b = wp.tile_load(B, k, j, m=TILE_K, n=TILE_N)
+        a = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(i * TILE_M, k * TILE_K))
+        b = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(k * TILE_K, j * TILE_N))
 
         # sum += a*b
         wp.tile_matmul(a, b, sum)
 
-    wp.tile_store(C, i, j, sum)
+    wp.tile_store(C, sum, offset=(i * TILE_M, j * TILE_N))
 
 
 if __name__ == "__main__":
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     with wp.Tape() as tape:
         wp.launch_tiled(
             tile_gemm,
-            dim=(int(M / TILE_M), int(N / TILE_N)),
+            dim=(M // TILE_M, N // TILE_N),
             inputs=[A_wp, B_wp],
             outputs=[C_wp],
             block_dim=TILE_THREADS,

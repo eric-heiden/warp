@@ -1,9 +1,12 @@
 Tiles
 =====
 
+.. currentmodule:: warp
+
 .. warning:: Tile-based operations in Warp are under preview, APIs are subject to change.
 
-Block-based programming models such as those in OpenAI Triton have proved to be effective ways of expressing high-performance kernels that can leverage cooperative operations on modern GPUs. With Warp 1.5.0 developers now have access to new tile-based programming primitives in Warp kernels. Leveraging cuBLASDx and cuFFTDx, these new tools provide developers with efficient matrix multiplication and Fourier transforms for accelerated simulation and scientific computing. 
+Block-based programming models such as those in OpenAI Triton have proved to be effective ways of expressing high-performance kernels that can leverage cooperative operations on modern GPUs.
+With Warp 1.5.0 [1]_, developers now have access to new tile-based programming primitives in Warp kernels. Leveraging cuBLASDx and cuFFTDx, these new tools provide developers with efficient matrix multiplication and Fourier transforms for accelerated simulation and scientific computing. 
 
 Requirements
 ------------
@@ -20,23 +23,40 @@ Inside kernels, tile operations are executed cooperatively across each block of 
 
 In the following example, we launch a grid of threads where each block is responsible for loading a row of data from a 2D array and computing its sum:
 
-.. code:: python
+.. testcode::
+    :skipif: wp.get_cuda_device_count() == 0
     
     TILE_SIZE = wp.constant(256)
     TILE_THREADS = 64
 
     @wp.kernel
-    def compute(a: array2d(dtype=float))
-        
+    def compute(a: wp.array2d(dtype=float), b: wp.array2d(dtype=float)):
+
         # obtain our block index
         i = wp.tid()
 
         # load a row from global memory
-        t = wp.tile_load(array[i], i, TILE_SIZE)
-        s = wp.tile_sum(t)
-        ...
+        t = wp.tile_load(a[i], TILE_SIZE)
 
-    wp.launch_tiled(compute, dim=[a.shape[0]], inputs=[a], block_dim=TILE_THREADS)
+        # cooperatively compute the sum of the tile elements; s is a single element tile
+        s = wp.tile_sum(t)
+
+        # store s in global memory
+        wp.tile_store(b[i], s)
+
+    N = 10
+
+    a_np = np.arange(N).reshape(-1, 1) * np.ones((1, 256), dtype=float)
+    a = wp.array(a_np, dtype=float)
+    b = wp.zeros((N,1), dtype=float)
+
+    wp.launch_tiled(compute, dim=[a.shape[0]], inputs=[a, b], block_dim=TILE_THREADS)
+
+    print(f"b = {b[:,0]}")
+
+.. testoutput::
+
+    b = [   0.  256.  512.  768. 1024. 1280. 1536. 1792. 2048. 2304.]
     
 Here, we have used the new :func:`warp.launch_tiled` function which assigns ``TILE_THREADS`` threads to each of the elements in the launch grid. Each block of ``TILE_THREADS`` threads then loads an entire row of 256 values from the global memory array and computes its sum (cooperatively).
 
@@ -53,13 +73,13 @@ In Warp, tile objects are 2D arrays of data where the tile elements may be scala
     TILE_THREADS = 64
 
     @wp.kernel
-    def compute(a: array2d(dtype=float))
+    def compute(a: array2d(dtype=float)):
         
         # obtain our 2d block index
         i, j = wp.tid()
 
         # load a 2d tile from global memory
-        t = wp.tile_load(array, i, j, m=TILE_M, n=TILE_N)
+        t = wp.tile_load(array, shape=(TILE_M, TILE_N), offset=(i*TILE_M, j*TILE_N))
         s = wp.tile_sum(t)
         ...
 
@@ -115,7 +135,7 @@ Example: General Matrix Multiply (GEMM)
         # output tile index
         i, j = wp.tid()
 
-        sum = wp.tile_zeros(m=TILE_M, n=TILE_N, dtype=wp.float32)
+        sum = wp.tile_zeros(shape=(TILE_M, TILE_N), dtype=wp.float32)
 
         M = A.shape[0]
         N = B.shape[1]
@@ -124,13 +144,13 @@ Example: General Matrix Multiply (GEMM)
         count = int(K / TILE_K)
 
         for k in range(0, count):
-            a = wp.tile_load(A, i, k, m=TILE_M, n=TILE_K)
-            b = wp.tile_load(B, k, j, m=TILE_K, n=TILE_N)
+            a = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(i*TILE_M, k*TILE_K))
+            b = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(k*TILE_K, j*TILE_N))
 
             # sum += a*b
             wp.tile_matmul(a, b, sum)
 
-        wp.tile_store(C, i, j, sum)
+        wp.tile_store(C, sum, offset=(i*TILE_M, j*TILE_N))
 
 
 
@@ -169,35 +189,40 @@ Tile Operations
 Construction
 ^^^^^^^^^^^^
 
-* :func:`warp.tile_zeros`
-* :func:`warp.tile_ones`
-* :func:`warp.tile_arange`
-* :func:`warp.tile`
-* :func:`warp.untile`
+* :func:`tile_zeros`
+* :func:`tile_ones`
+* :func:`tile_arange`
+* :func:`tile`
+* :func:`untile`
+* :func:`tile_view`
+* :func:`tile_broadcast`
 
 Load/Store
 ^^^^^^^^^^
 
-* :func:`warp.tile_load`
-* :func:`warp.tile_store`
-* :func:`warp.tile_atomic_add`
+* :func:`tile_load`
+* :func:`tile_store`
+* :func:`tile_atomic_add`
 
 Maps/Reductions
 ^^^^^^^^^^^^^^^
 
-* :func:`warp.tile_map`
-* :func:`warp.tile_reduce`
-* :func:`warp.tile_sum`
-* :func:`warp.tile_min`
-* :func:`warp.tile_max`
+* :func:`tile_map`
+* :func:`tile_reduce`
+* :func:`tile_sum`
+* :func:`tile_min`
+* :func:`tile_max`
 
 Linear Algebra
 ^^^^^^^^^^^^^^
 
-* :func:`warp.tile_matmul`
-* :func:`warp.tile_transpose`
-* :func:`warp.tile_fft`
-* :func:`warp.tile_ifft`
+* :func:`tile_matmul`
+* :func:`tile_transpose`
+* :func:`tile_fft`
+* :func:`tile_ifft`
+* :func:`tile_cholesky`
+* :func:`tile_cholesky_solve`
+* :func:`tile_diag_add`
 
 Tiles and SIMT Code
 -------------------
@@ -209,7 +234,7 @@ Traditionally, Warp kernels are primarily written in the SIMT programming model,
     TILE_THREADS = 64
 
     @wp.kernel
-    def compute()
+    def compute():
         i = wp.tid()
 
         # perform some per-thread computation
@@ -247,3 +272,5 @@ When building Warp locally using ``build_lib.py``, the script will attempt to au
 from the `cuBLASDx Downloads Page <https://developer.nvidia.com/cublasdx-downloads>`__.
 A path to an existing ``libmathdx`` installation can also be specified using the ``--libmathdx_path`` option
 when running ``build_lib.py`` or by defining the path in the ``LIBMATHDX_HOME`` environment variable.
+
+.. [1] `Technical Blog: Introducing Tile-Based Programming in Warp 1.5.0 <https://developer.nvidia.com/blog/introducing-tile-based-programming-in-warp-1-5-0/>`_

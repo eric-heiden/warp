@@ -2766,6 +2766,76 @@ def test_indexing_types(test, device):
     )
 
 
+def test_alloc_strides(test, device):
+    def test_transposed(shape, dtype):
+        # allocate without specifying strides
+        a1 = wp.zeros(shape, dtype=dtype)
+
+        # allocate with contiguous strides
+        strides = wp.types.strides_from_shape(shape, dtype)
+        a2 = wp.zeros(shape, dtype=dtype, strides=strides)
+
+        # allocate with transposed (reversed) shape/strides
+        rshape = shape[::-1]
+        rstrides = strides[::-1]
+        a3 = wp.zeros(rshape, dtype=dtype, strides=rstrides)
+
+        # ensure that correct capacity was allocated
+        assert a2.capacity == a1.capacity
+        assert a3.capacity == a1.capacity
+
+    with wp.ScopedDevice(device):
+        shapes = [(5, 5), (5, 3), (3, 5), (2, 3, 4), (4, 2, 3), (3, 2, 4)]
+        for shape in shapes:
+            with test.subTest(msg=f"shape={shape}"):
+                test_transposed(shape, wp.int8)
+                test_transposed(shape, wp.float32)
+                test_transposed(shape, wp.vec3)
+
+
+def test_casting(test, device):
+    idxs = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    idxs = wp.array(idxs, device=device).reshape((-1, 3))
+    idxs = wp.array(idxs, shape=idxs.shape[0], dtype=wp.vec3i, device=device)
+    assert idxs.dtype is wp.vec3i
+    assert idxs.shape == (4,)
+    assert idxs.strides == (12,)
+
+
+@wp.kernel
+def array_len_kernel(
+    a1: wp.array(dtype=int),
+    a2: wp.array(dtype=float, ndim=3),
+    out: wp.array(dtype=int),
+):
+    length = len(a1)
+    wp.expect_eq(len(a1), 123)
+    out[0] = len(a1)
+
+    length = len(a2)
+    wp.expect_eq(len(a2), 2)
+    out[1] = len(a2)
+
+
+def test_array_len(test, device):
+    a1 = wp.zeros(123, dtype=int, device=device)
+    a2 = wp.zeros((2, 3, 4), dtype=float, device=device)
+    out = wp.empty(2, dtype=int, device=device)
+    wp.launch(
+        array_len_kernel,
+        dim=(1,),
+        inputs=(
+            a1,
+            a2,
+        ),
+        outputs=(out,),
+        device=device,
+    )
+
+    test.assertEqual(out.numpy()[0], 123)
+    test.assertEqual(out.numpy()[1], 2)
+
+
 devices = get_test_devices()
 
 
@@ -2834,6 +2904,10 @@ add_function_test(TestArray, "test_kernel_array_from_ptr", test_kernel_array_fro
 add_function_test(TestArray, "test_array_from_int32_domain", test_array_from_int32_domain, devices=devices)
 add_function_test(TestArray, "test_array_from_int64_domain", test_array_from_int64_domain, devices=devices)
 add_function_test(TestArray, "test_indexing_types", test_indexing_types, devices=devices)
+
+add_function_test(TestArray, "test_alloc_strides", test_alloc_strides, devices=devices)
+add_function_test(TestArray, "test_casting", test_casting, devices=devices)
+add_function_test(TestArray, "test_array_len", test_array_len, devices=devices)
 
 try:
     import torch

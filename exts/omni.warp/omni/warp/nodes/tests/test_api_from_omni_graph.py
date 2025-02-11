@@ -10,15 +10,16 @@
 import omni.graph.core as og
 import omni.graph.core.tests as ogts
 import omni.warp
-from omni.warp.nodes.tests._common import (
+
+import warp as wp
+
+from ._common import (
     array_are_equal,
     attr_set_array,
     bundle_create_attr,
     bundle_get_attr,
     register_node,
 )
-
-import warp as wp
 
 #   Test Node Definitions
 # -----------------------------------------------------------------------------
@@ -230,7 +231,6 @@ def compute(db: og.Database) -> None:
     # Float Array
     # --------------------------------------------------------------------------
 
-    attr = "floatArray"
     for variant in variants:
         if variant in ("cpuBundle", "gpuBundle"):
             data = bundle_get_attr(db.inputs.bundleAttr, "{}FloatArray".format(variant))
@@ -239,19 +239,16 @@ def compute(db: og.Database) -> None:
 
         result = omni.warp.from_omni_graph(data)
         expected = wp.array((1.0, 2.0, 3.0), dtype=wp.float32, shape=(3,))
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
         # Cast the array to vec3.
         result = omni.warp.from_omni_graph(data, dtype=wp.vec3)
         expected = wp.array(((1.0, 2.0, 3.0),), dtype=wp.vec3, shape=(1,))
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) with casting to wp.vec3 not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
     # Vector3 Array
     # --------------------------------------------------------------------------
 
-    attr = "vec3Array"
     for variant in variants:
         if variant in ("cpuBundle", "gpuBundle"):
             data = bundle_get_attr(db.inputs.bundleAttr, "{}Vec3Array".format(variant))
@@ -260,25 +257,21 @@ def compute(db: og.Database) -> None:
 
         result = omni.warp.from_omni_graph(data)
         expected = wp.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=wp.vec3, shape=(2,))
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
         # Cast the array to floats while preserving the same shape.
         result = omni.warp.from_omni_graph(data, dtype=wp.float32)
         expected = wp.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=wp.float32, shape=(2, 3))
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) with casting to float not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
         # Cast the array to floats while flattening it to a single dimension.
         result = omni.warp.from_omni_graph(data, dtype=wp.float32, shape=(6,))
         expected = wp.array((1.0, 2.0, 3.0, 4.0, 5.0, 6.0), dtype=wp.float32, shape=(6,))
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) with flattening not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
     # Matrix4 Array
     # --------------------------------------------------------------------------
 
-    attr = "mat4Array"
     for variant in variants:
         if variant in ("cpuBundle", "gpuBundle"):
             data = bundle_get_attr(db.inputs.bundleAttr, "{}Mat4Array".format(variant))
@@ -309,8 +302,7 @@ def compute(db: og.Database) -> None:
             dtype=wp.mat44d,
             shape=(2,),
         )
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
         # Cast the array to vec4d.
         result = omni.warp.from_omni_graph(data, dtype=wp.vec4d)
@@ -332,8 +324,7 @@ def compute(db: og.Database) -> None:
             dtype=wp.vec4d,
             shape=(2, 4),
         )
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) with casting to vec4 not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
         # Cast the array to floats while flattening it to a single dimension.
         result = omni.warp.from_omni_graph(data, dtype=wp.float64, shape=(32,))
@@ -375,8 +366,7 @@ def compute(db: og.Database) -> None:
             dtype=wp.float64,
             shape=(32,),
         )
-        if not array_are_equal(result, expected):
-            raise RuntimeError("Test for {} ({}) with flattening not passing.".format(attr, variant))
+        array_are_equal(result, expected)
 
 
 class FromOmniGraphNode:

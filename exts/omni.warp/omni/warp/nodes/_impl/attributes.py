@@ -21,9 +21,10 @@ from typing import (
 
 import numpy as np
 import omni.graph.core as og
-from omni.warp.nodes._impl.common import type_convert_og_to_warp
 
 import warp as wp
+
+from .common import type_convert_og_to_warp
 
 ATTR_BUNDLE_TYPE = og.Type(
     og.BaseDataType.RELATIONSHIP,
@@ -255,7 +256,7 @@ def from_omni_graph(
         if shape is None:
             if arr_size % element_size != 0:
                 raise RuntimeError(
-                    "Cannot infer a size matching the Warp data type '{}' with " "an array size of '{}' bytes.".format(
+                    "Cannot infer a size matching the Warp data type '{}' with an array size of '{}' bytes.".format(
                         dtype.__name__, arr_size
                     )
                 )
@@ -316,8 +317,9 @@ def from_omni_graph(
             if shape is None:
                 if arr_size % element_size != 0:
                     raise RuntimeError(
-                        "Cannot infer a size matching the Warp data type '{}' with "
-                        "an array size of '{}' bytes.".format(dtype.__name__, arr_size)
+                        "Cannot infer a size matching the Warp data type '{}' with an array size of '{}' bytes.".format(
+                            dtype.__name__, arr_size
+                        )
                     )
                 shape = (arr_size // element_size,)
 

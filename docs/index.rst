@@ -191,11 +191,20 @@ warp/examples/optim
       - .. image:: ./img/examples/optim_trajectory.png
            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_trajectory.py
       - .. image:: ./img/examples/optim_walker.png
-           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_walker.py
+           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py
     * - inverse kinematics
       - spring cage
       - trajectory
       - walker
+    * - .. image:: ./img/examples/optim_softbody_properties.png
+           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py
+      -
+      -
+      -
+    * - soft body properties
+      -
+      -
+      -
 
 warp/examples/sim
 ^^^^^^^^^^^^^^^^^
@@ -239,6 +248,15 @@ warp/examples/sim
       - rigid gyroscopic
       - rigid soft contact
       - soft body
+    * - .. image:: ./img/examples/sim_example_cloth_self_contact.png
+           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/sim/example_cloth_self_contact.py
+      -
+      -
+      -
+    * - cloth self contact
+      -
+      -
+      -
 
 Omniverse
 ---------

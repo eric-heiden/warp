@@ -1,13 +1,12 @@
 import contextlib
 import io
 import unittest
+from typing import Any
 
 import numpy as np
 
 import warp as wp
 from warp.tests.unittest_utils import *
-
-wp.init()  # For wp.context.runtime.core.is_cutlass_enabled()
 
 # kernels are defined in the global scope, to ensure wp.Kernel objects are not GC'ed in the MGPU case
 # kernel args are assigned array modes during codegen, so wp.Kernel objects generated during codegen
@@ -164,18 +163,18 @@ def test_kernel_writeread_kernel_write(test, device):
 
 
 @wp.func
-def read_func(a: wp.array(dtype=float), idx: int):
+def read_func(a: wp.array(dtype=Any), idx: int):
     x = a[idx]
     return x
 
 
 @wp.func
-def read_return_func(b: wp.array(dtype=float), idx: int):
+def read_return_func(b: wp.array(dtype=Any), idx: int):
     return 1.0, b[idx]
 
 
 @wp.func
-def write_func(c: wp.array(dtype=float), idx: int):
+def write_func(c: wp.array(dtype=Any), idx: int):
     c[idx] = 1.0
 
 
@@ -362,62 +361,6 @@ def test_copy(test, device):
         wp.config.verify_autograd_array_access = saved_verify_autograd_array_access_setting
 
 
-# wp.matmul uses wp.record_func. Ensure array modes are propagated correctly.
-def test_matmul(test, device):
-    if device.is_cuda and not wp.context.runtime.core.is_cutlass_enabled():
-        test.skipTest("Warp was not built with CUTLASS support")
-
-    saved_verify_autograd_array_access_setting = wp.config.verify_autograd_array_access
-    try:
-        wp.config.verify_autograd_array_access = True
-
-        a = wp.ones((3, 3), dtype=float, requires_grad=True, device=device)
-        b = wp.ones_like(a)
-        c = wp.ones_like(a)
-        d = wp.zeros_like(a)
-
-        tape = wp.Tape()
-
-        with tape:
-            wp.matmul(a, b, c, d)
-
-        test.assertEqual(a._is_read, True)
-        test.assertEqual(b._is_read, True)
-        test.assertEqual(c._is_read, True)
-        test.assertEqual(d._is_read, False)
-
-    finally:
-        wp.config.verify_autograd_array_access = saved_verify_autograd_array_access_setting
-
-
-# wp.batched_matmul uses wp.record_func. Ensure array modes are propagated correctly.
-def test_batched_matmul(test, device):
-    if device.is_cuda and not wp.context.runtime.core.is_cutlass_enabled():
-        test.skipTest("Warp was not built with CUTLASS support")
-
-    saved_verify_autograd_array_access_setting = wp.config.verify_autograd_array_access
-    try:
-        wp.config.verify_autograd_array_access = True
-
-        a = wp.ones((1, 3, 3), dtype=float, requires_grad=True, device=device)
-        b = wp.ones_like(a)
-        c = wp.ones_like(a)
-        d = wp.zeros_like(a)
-
-        tape = wp.Tape()
-
-        with tape:
-            wp.batched_matmul(a, b, c, d)
-
-        test.assertEqual(a._is_read, True)
-        test.assertEqual(b._is_read, True)
-        test.assertEqual(c._is_read, True)
-        test.assertEqual(d._is_read, False)
-
-    finally:
-        wp.config.verify_autograd_array_access = saved_verify_autograd_array_access_setting
-
-
 # write after read warning with in-place operators within a kernel
 def test_in_place_operators_warning(test, device):
     saved_verify_autograd_array_access_setting = wp.config.verify_autograd_array_access
@@ -507,6 +450,50 @@ def test_kernel_read_func_write(test, device):
         wp.config.verify_autograd_array_access = saved_verify_autograd_array_access_setting
 
 
+@wp.func
+def atomic_func(
+    a: wp.array(dtype=wp.int32),
+    b: wp.array(dtype=wp.int32),
+    c: wp.array(dtype=wp.int32),
+    d: wp.array(dtype=wp.int32),
+    i: int,
+):
+    wp.atomic_add(a, i, 1)
+    wp.atomic_sub(b, i, 1)
+    wp.atomic_min(c, i, 1)
+    wp.atomic_max(d, i, 3)
+
+
+@wp.kernel(enable_backward=False)
+def atomic_kernel(
+    a: wp.array(dtype=wp.int32), b: wp.array(dtype=wp.int32), c: wp.array(dtype=wp.int32), d: wp.array(dtype=wp.int32)
+):
+    i = wp.tid()
+    atomic_func(a, b, c, d, i)
+
+
+# atomic operations should mark arrays as WRITE
+def test_atomic_operations(test, device):
+    saved_verify_autograd_array_access_setting = wp.config.verify_autograd_array_access
+    try:
+        wp.config.verify_autograd_array_access = True
+
+        a = wp.array((1, 2, 3), dtype=wp.int32, device=device)
+        b = wp.array((1, 2, 3), dtype=wp.int32, device=device)
+        c = wp.array((1, 2, 3), dtype=wp.int32, device=device)
+        d = wp.array((1, 2, 3), dtype=wp.int32, device=device)
+
+        wp.launch(atomic_kernel, dim=a.shape, inputs=(a, b, c, d), device=device)
+
+        test.assertEqual(atomic_kernel.adj.args[0].is_write, True)
+        test.assertEqual(atomic_kernel.adj.args[1].is_write, True)
+        test.assertEqual(atomic_kernel.adj.args[2].is_write, True)
+        test.assertEqual(atomic_kernel.adj.args[3].is_write, True)
+
+    finally:
+        wp.config.verify_autograd_array_access = saved_verify_autograd_array_access_setting
+
+
 class TestOverwrite(unittest.TestCase):
     pass
 
@@ -533,8 +520,7 @@ add_function_test(TestOverwrite, "test_views", test_views, devices=devices)
 add_function_test(TestOverwrite, "test_reset", test_reset, devices=devices)
 
 add_function_test(TestOverwrite, "test_copy", test_copy, devices=devices)
-add_function_test(TestOverwrite, "test_matmul", test_matmul, devices=devices)
-add_function_test(TestOverwrite, "test_batched_matmul", test_batched_matmul, devices=devices)
+add_function_test(TestOverwrite, "test_atomic_operations", test_atomic_operations, devices=devices)
 
 # Some warning are only issued during codegen, and codegen only runs on cuda_0 in the MGPU case.
 cuda_device = get_cuda_test_devices(mode="basic")

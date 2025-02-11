@@ -6,20 +6,14 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import unittest
+from typing import Any
 
 import numpy as np
 
 import warp as wp
 from warp.tests.unittest_utils import *
 
-np_signed_int_types = [
-    np.int8,
-    np.int16,
-    np.int32,
-    np.int64,
-    np.byte,
-]
-
+np_signed_int_types = [np.int8, np.int16, np.int32, np.int64, np.byte]
 np_float_types = [np.float16, np.float32, np.float64]
 
 
@@ -42,11 +36,7 @@ def getkernel(func, suffix=""):
 
 
 def get_select_kernel(dtype):
-    def output_select_kernel_fn(
-        input: wp.array(dtype=dtype),
-        index: int,
-        out: wp.array(dtype=dtype),
-    ):
+    def output_select_kernel_fn(input: wp.array(dtype=dtype), index: int, out: wp.array(dtype=dtype)):
         out[0] = input[index]
 
     return getkernel(output_select_kernel_fn, suffix=dtype.__name__)
@@ -61,33 +51,19 @@ def test_anon_constructor_error_shape_arg_missing(test, device):
         RuntimeError,
         r"the `shape` argument must be specified when initializing a matrix by value$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_anon_constructor_error_shape_mismatch(test, device):
     @wp.kernel
     def kernel():
-        wp.matrix(
-            wp.matrix(shape=(1, 2), dtype=float),
-            shape=(3, 4),
-            dtype=float,
-        )
+        wp.matrix(wp.matrix(shape=(1, 2), dtype=float), shape=(3, 4), dtype=float)
 
     with test.assertRaisesRegex(
         RuntimeError,
         r"incompatible matrix of shape \(3, 4\) given when copy constructing a matrix of shape \(1, 2\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_anon_constructor_error_type_mismatch(test, device):
@@ -99,12 +75,7 @@ def test_anon_constructor_error_type_mismatch(test, device):
         RuntimeError,
         r"the value used to fill this matrix is expected to be of the type `float16`$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_anon_constructor_error_invalid_arg_count(test, device):
@@ -116,12 +87,7 @@ def test_anon_constructor_error_invalid_arg_count(test, device):
         RuntimeError,
         r"incompatible number of values given \(3\) when constructing a matrix of shape \(2, 2\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_anon_xform_constructor_error_type_mismatch(test, device):
@@ -150,12 +116,7 @@ def test_tpl_constructor_error_incompatible_sizes(test, device):
         RuntimeError,
         r"incompatible matrix of shape \(3, 3\) given when copy constructing a matrix of shape \(2, 2\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_tpl_constructor_error_invalid_vector_count(test, device):
@@ -167,12 +128,7 @@ def test_tpl_constructor_error_invalid_vector_count(test, device):
         RuntimeError,
         r"incompatible number of column vectors given \(2\) when constructing a matrix of shape \(3, 3\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_tpl_constructor_error_invalid_vector_shape(test, device):
@@ -184,12 +140,7 @@ def test_tpl_constructor_error_invalid_vector_shape(test, device):
         RuntimeError,
         r"incompatible column vector lengths given when constructing a matrix of shape \(2, 2\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_tpl_constructor_error_invalid_arg_count(test, device):
@@ -201,12 +152,7 @@ def test_tpl_constructor_error_invalid_arg_count(test, device):
         RuntimeError,
         r"incompatible number of values given \(3\) when constructing a matrix of shape \(2, 2\)$",
     ):
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
 def test_py_arithmetic_ops(test, device, dtype):
@@ -438,6 +384,77 @@ def test_negation(test, device, dtype, register_kernels=False):
                     idx = idx + 1
 
 
+def test_matmul(test, device, dtype, register_kernels=False):
+    rng = np.random.default_rng(123)
+
+    tol = {
+        np.float16: 5.0e-3,
+        np.float32: 1.0e-6,
+        np.float64: 1.0e-12,
+    }.get(dtype, 0)
+
+    wptype = wp.types.np_dtype_to_warp_type[np.dtype(dtype)]
+    mat22 = wp.types.matrix(shape=(2, 2), dtype=wptype)
+    mat33 = wp.types.matrix(shape=(3, 3), dtype=wptype)
+    mat23 = wp.types.matrix(shape=(2, 3), dtype=wptype)
+    mat32 = wp.types.matrix(shape=(3, 2), dtype=wptype)
+    mat44 = wp.types.matrix(shape=(4, 4), dtype=wptype)
+
+    output_select_kernel = get_select_kernel(wptype)
+
+    def check_mat_mul(
+        i23: wp.array(dtype=mat23),
+        i32: wp.array(dtype=mat32),
+        i44: wp.array(dtype=mat44),
+        o22: wp.array(dtype=mat22),
+        o33: wp.array(dtype=mat33),
+        o44: wp.array(dtype=mat44),
+    ):
+        i = wp.tid()
+        o22[i] = i23[i] @ i32[i]
+        o33[i] = i32[i] @ i23[i]
+        o44[i] = i44[i] @ i44[i]
+
+    kernel = getkernel(check_mat_mul, suffix=dtype.__name__)
+
+    if register_kernels:
+        return
+
+    test_adj = dtype in np_float_types
+
+    i23 = wp.array(randvals(rng, [1, 2, 3], dtype), dtype=mat23, requires_grad=test_adj, device=device)
+    i32 = wp.array(randvals(rng, [1, 3, 2], dtype), dtype=mat32, requires_grad=test_adj, device=device)
+    i44 = wp.array(randvals(rng, [1, 4, 4], dtype), dtype=mat44, requires_grad=test_adj, device=device)
+    o22 = wp.array(randvals(rng, [1, 2, 2], dtype), dtype=mat22, requires_grad=test_adj, device=device)
+    o33 = wp.array(randvals(rng, [1, 3, 3], dtype), dtype=mat33, requires_grad=test_adj, device=device)
+    o44 = wp.array(randvals(rng, [1, 4, 4], dtype), dtype=mat44, requires_grad=test_adj, device=device)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(
+            kernel,
+            dim=1,
+            inputs=[i23, i32, i44],
+            outputs=[o22, o33, o44],
+            device=device,
+        )
+
+    assert_np_equal(o22.numpy(), i23.numpy() @ i32.numpy(), tol=tol)
+    assert_np_equal(o33.numpy(), i32.numpy() @ i23.numpy(), tol=tol)
+    assert_np_equal(o44.numpy(), i44.numpy() @ i44.numpy(), tol=tol)
+
+    if test_adj:
+        o22.grad.assign([np.eye(2)])
+        o33.grad.assign([np.eye(3)])
+        o44.grad.assign([np.eye(4)])
+
+        tape.backward()
+
+        assert_np_equal(i23.grad.numpy(), 2.0 * i32.numpy().T, tol=tol)
+        assert_np_equal(i32.grad.numpy(), 2.0 * i23.numpy().T, tol=tol)
+        assert_np_equal(i44.grad.numpy(), 2.0 * i44.numpy().T, tol=tol)
+
+
 def test_subtraction(test, device, dtype, register_kernels=False):
     rng = np.random.default_rng(123)
 
@@ -541,16 +558,7 @@ def test_subtraction(test, device, dtype, register_kernels=False):
                         wp.launch(
                             kernel,
                             dim=1,
-                            inputs=[
-                                s2,
-                                s3,
-                                s4,
-                                s5,
-                                v2,
-                                v3,
-                                v4,
-                                v5,
-                            ],
+                            inputs=[s2, s3, s4, s5, v2, v3, v4, v5],
                             outputs=[outcomponents],
                             device=device,
                         )
@@ -558,11 +566,11 @@ def test_subtraction(test, device, dtype, register_kernels=False):
                             output_select_kernel, dim=1, inputs=[outcomponents, idx], outputs=[out], device=device
                         )
                     tape.backward(loss=out)
-                    expectedresult = np.zeros((dim, dim), dtype=dtype)
-                    expectedresult[i, j] = 2
-                    assert_np_equal(tape.gradients[in2].numpy()[0], expectedresult, tol=10 * tol)
-                    expectedresult[i, j] = -2
-                    assert_np_equal(tape.gradients[in1].numpy()[0], expectedresult, tol=10 * tol)
+                    expected_result = np.zeros((dim, dim), dtype=dtype)
+                    expected_result[i, j] = 2
+                    assert_np_equal(tape.gradients[in2].numpy()[0], expected_result, tol=10 * tol)
+                    expected_result[i, j] = -2
+                    assert_np_equal(tape.gradients[in1].numpy()[0], expected_result, tol=10 * tol)
                     tape.zero()
 
                     idx = idx + 1
@@ -608,21 +616,7 @@ def test_determinant(test, device, dtype, register_kernels=False):
 
     tape = wp.Tape()
     with tape:
-        wp.launch(
-            kernel,
-            dim=1,
-            inputs=[
-                v2,
-                v3,
-                v4,
-            ],
-            outputs=[
-                det2,
-                det3,
-                det4,
-            ],
-            device=device,
-        )
+        wp.launch(kernel, dim=1, inputs=[v2, v3, v4], outputs=[det2, det3, det4], device=device)
 
     if dtype in np_float_types:
         assert_np_equal(det2.numpy()[0], 2 * np.linalg.det(v2.numpy()[0].astype(np.float64)), tol=100 * tol)
@@ -658,16 +652,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        wp.array(v2test, dtype=v2.dtype, requires_grad=True, device=device),
-                        v3,
-                        v4,
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[wp.array(v2test, dtype=v2.dtype, requires_grad=True, device=device), v3, v4],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dplus = det2.numpy()[0]
@@ -675,16 +661,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        wp.array(v2test, dtype=v2.dtype, requires_grad=True, device=device),
-                        v3,
-                        v4,
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[wp.array(v2test, dtype=v2.dtype, requires_grad=True, device=device), v3, v4],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dminus = det2.numpy()[0]
@@ -697,16 +675,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        v2,
-                        wp.array(v3test, dtype=v3.dtype, requires_grad=True, device=device),
-                        v4,
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[v2, wp.array(v3test, dtype=v3.dtype, requires_grad=True, device=device), v4],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dplus = det3.numpy()[0]
@@ -714,16 +684,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        v2,
-                        wp.array(v3test, dtype=v3.dtype, requires_grad=True, device=device),
-                        v4,
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[v2, wp.array(v3test, dtype=v3.dtype, requires_grad=True, device=device), v4],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dminus = det3.numpy()[0]
@@ -736,16 +698,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        v2,
-                        v3,
-                        wp.array(v4test, dtype=v4.dtype, requires_grad=True, device=device),
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[v2, v3, wp.array(v4test, dtype=v4.dtype, requires_grad=True, device=device)],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dplus = det4.numpy()[0]
@@ -753,16 +707,8 @@ def test_determinant(test, device, dtype, register_kernels=False):
                 wp.launch(
                     kernel,
                     dim=1,
-                    inputs=[
-                        v2,
-                        v3,
-                        wp.array(v4test, dtype=v4.dtype, requires_grad=True, device=device),
-                    ],
-                    outputs=[
-                        det2,
-                        det3,
-                        det4,
-                    ],
+                    inputs=[v2, v3, wp.array(v4test, dtype=v4.dtype, requires_grad=True, device=device)],
+                    outputs=[det2, det3, det4],
                     device=device,
                 )
                 dminus = det4.numpy()[0]
@@ -999,7 +945,7 @@ def test_svd(test, device, dtype, register_kernels=False):
     tol = {
         np.float16: 1.0e-3,
         np.float32: 1.0e-6,
-        np.float64: 1.0e-6,
+        np.float64: 1.0e-12,
     }.get(dtype, 0)
 
     wptype = wp.types.np_dtype_to_warp_type[np.dtype(dtype)]
@@ -1110,6 +1056,124 @@ def test_svd(test, device, dtype, register_kernels=False):
                 minusval = out.numpy()[0]
 
                 assert_np_equal((plusval - minusval) / (2 * dx), m3grads[ii, jj], tol=fdtol)
+
+
+def test_svd_2D(test, device, dtype, register_kernels=False):
+    rng = np.random.default_rng(123)
+
+    tol = {
+        np.float16: 1.0e-3,
+        np.float32: 1.0e-6,
+        np.float64: 1.0e-12,
+    }.get(dtype, 0)
+
+    wptype = wp.types.np_dtype_to_warp_type[np.dtype(dtype)]
+    vec2 = wp.types.vector(length=2, dtype=wptype)
+    mat22 = wp.types.matrix(shape=(2, 2), dtype=wptype)
+
+    def check_mat_svd2(
+        m2: wp.array(dtype=mat22),
+        Uout: wp.array(dtype=mat22),
+        sigmaout: wp.array(dtype=vec2),
+        Vout: wp.array(dtype=mat22),
+        outcomponents: wp.array(dtype=wptype),
+    ):
+        U = mat22()
+        sigma = vec2()
+        V = mat22()
+
+        wp.svd2(m2[0], U, sigma, V)  # Assuming there's a 2D SVD kernel
+
+        Uout[0] = U
+        sigmaout[0] = sigma
+        Vout[0] = V
+
+        # multiply outputs by 2 so we've got something to backpropagate:
+        idx = 0
+        for i in range(2):
+            for j in range(2):
+                outcomponents[idx] = wptype(2) * U[i, j]
+                idx = idx + 1
+
+        for i in range(2):
+            outcomponents[idx] = wptype(2) * sigma[i]
+            idx = idx + 1
+
+        for i in range(2):
+            for j in range(2):
+                outcomponents[idx] = wptype(2) * V[i, j]
+                idx = idx + 1
+
+    kernel = getkernel(check_mat_svd2, suffix=dtype.__name__)
+
+    output_select_kernel = get_select_kernel(wptype)
+
+    if register_kernels:
+        return
+
+    m2 = wp.array(randvals(rng, [1, 2, 2], dtype) + np.eye(2), dtype=mat22, requires_grad=True, device=device)
+
+    outcomponents = wp.zeros(2 * 2 * 2 + 2, dtype=wptype, requires_grad=True, device=device)
+    Uout = wp.zeros(1, dtype=mat22, requires_grad=True, device=device)
+    sigmaout = wp.zeros(1, dtype=vec2, requires_grad=True, device=device)
+    Vout = wp.zeros(1, dtype=mat22, requires_grad=True, device=device)
+
+    wp.launch(kernel, dim=1, inputs=[m2], outputs=[Uout, sigmaout, Vout, outcomponents], device=device)
+
+    Uout_np = Uout.numpy()[0].astype(np.float64)
+    sigmaout_np = np.diag(sigmaout.numpy()[0].astype(np.float64))
+    Vout_np = Vout.numpy()[0].astype(np.float64)
+
+    assert_np_equal(
+        np.matmul(Uout_np, np.matmul(sigmaout_np, Vout_np.T)), m2.numpy()[0].astype(np.float64), tol=30 * tol
+    )
+
+    if dtype == np.float16:
+        # Skip gradient check for float16 due to rounding errors
+        return
+
+    # Check gradients:
+    out = wp.zeros(1, dtype=wptype, requires_grad=True, device=device)
+    idx = 0
+    for idx in range(2 * 2 + 2 + 2 * 2):
+        tape = wp.Tape()
+        with tape:
+            wp.launch(kernel, dim=1, inputs=[m2], outputs=[Uout, sigmaout, Vout, outcomponents], device=device)
+            wp.launch(output_select_kernel, dim=1, inputs=[outcomponents, idx], outputs=[out], device=device)
+        tape.backward(out)
+        m2grads = 1.0 * tape.gradients[m2].numpy()[0]
+
+        tape.zero()
+
+        dx = 0.0001
+        fdtol = 5.0e-4 if dtype == np.float64 else 2.0e-2
+        for ii in range(2):
+            for jj in range(2):
+                m2test = 1.0 * m2.numpy()
+                m2test[0, ii, jj] += dx
+                wp.launch(
+                    kernel,
+                    dim=1,
+                    inputs=[wp.array(m2test, dtype=mat22, device=device)],
+                    outputs=[Uout, sigmaout, Vout, outcomponents],
+                    device=device,
+                )
+                wp.launch(output_select_kernel, dim=1, inputs=[outcomponents, idx], outputs=[out], device=device)
+                plusval = out.numpy()[0]
+
+                m2test = 1.0 * m2.numpy()
+                m2test[0, ii, jj] -= dx
+                wp.launch(
+                    kernel,
+                    dim=1,
+                    inputs=[wp.array(m2test, dtype=mat22, device=device)],
+                    outputs=[Uout, sigmaout, Vout, outcomponents],
+                    device=device,
+                )
+                wp.launch(output_select_kernel, dim=1, inputs=[outcomponents, idx], outputs=[out], device=device)
+                minusval = out.numpy()[0]
+
+                assert_np_equal((plusval - minusval) / (2 * dx), m2grads[ii, jj], tol=fdtol)
 
 
 def test_qr(test, device, dtype, register_kernels=False):
@@ -1559,13 +1623,12 @@ def test_transform_vector(test, device, dtype, register_kernels=False):
             tape.zero()
 
 
-def test_mat_array_type_indexing(test, device, dtype, register_kernels=False):
+def test_matrix_assign_inplace(test, device, dtype, register_kernels=False):
     np_type = np.dtype(dtype)
     wp_type = wp.types.np_dtype_to_warp_type[np_type]
 
     vec2 = wp.types.vector(length=2, dtype=wp_type)
     mat22 = wp.types.matrix(shape=(2, 2), dtype=wp_type)
-    mat33 = wp.types.matrix(shape=(3, 3), dtype=wp_type)
 
     def mattest_read_write_store(x: wp.array(dtype=wp_type), a: wp.array(dtype=mat22)):
         tid = wp.tid()
@@ -1582,17 +1645,8 @@ def test_mat_array_type_indexing(test, device, dtype, register_kernels=False):
         a[1, 1] = wp_type(3.0)
         x[i, j] = a
 
-    def mattest_in_register_overwrite(x: wp.array2d(dtype=mat22), y: wp.array(dtype=vec2)):
-        i, j = wp.tid()
-
-        a = mat22(wp_type(0.0))
-        a[0] = y[i]
-        a[0, 1] = wp_type(3.0)
-        x[i, j] = a
-
     kernel_read_write_store = getkernel(mattest_read_write_store, suffix=dtype.__name__)
     kernel_in_register = getkernel(mattest_in_register, suffix=dtype.__name__)
-    kernel_in_register_overwrite = getkernel(mattest_in_register_overwrite, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -1621,19 +1675,6 @@ def test_mat_array_type_indexing(test, device, dtype, register_kernels=False):
 
     assert_np_equal(x.numpy(), np.array([[[[1.0, 1.0], [0.0, 3.0]]]], dtype=np_type))
     assert_np_equal(y.grad.numpy(), np.array([[1.0, 1.0]], dtype=np_type))
-
-    tape.reset()
-
-    x = wp.zeros((1, 1), dtype=mat22, device=device, requires_grad=True)
-    y = wp.ones(1, dtype=vec2, device=device, requires_grad=True)
-
-    with tape:
-        wp.launch(kernel_in_register_overwrite, dim=(1, 1), inputs=[x, y], device=device)
-
-    tape.backward(grads={x: wp.ones_like(x, requires_grad=False)})
-
-    assert_np_equal(x.numpy(), np.array([[[[1.0, 3.0], [0.0, 0.0]]]], dtype=np_type))
-    assert_np_equal(y.grad.numpy(), np.array([[1.0, 0.0]], dtype=np_type))
 
 
 # Test matrix constructors using explicit type (float16)
@@ -1722,8 +1763,9 @@ def test_matrix_mutation(expected: wp.types.matrix(shape=(10, 3), dtype=float)):
     wp.expect_eq(m, expected)
 
 
-CONSTANT_SHAPE_ROWS = wp.constant(10)
-CONSTANT_SHAPE_COLS = wp.constant(10)
+# NOTE: Compile tile is highly sensitive to shape so we use small values now
+CONSTANT_SHAPE_ROWS = wp.constant(2)
+CONSTANT_SHAPE_COLS = wp.constant(2)
 
 
 # tests that we can use global constants in shape keyword argument
@@ -1735,6 +1777,145 @@ def test_constructors_constant_shape():
     for i in range(CONSTANT_SHAPE_ROWS):
         for j in range(CONSTANT_SHAPE_COLS):
             m[i, j] = float(i * j)
+
+
+Mat23 = wp.mat((2, 3), dtype=wp.float16)
+
+
+@wp.kernel
+def matrix_len_kernel(
+    m1: wp.mat22, m2: wp.mat((3, 3), float), m3: wp.mat((Any, Any), float), m4: Mat23, out: wp.array(dtype=int)
+):
+    length = wp.static(len(m1))
+    wp.expect_eq(len(m1), 2)
+    out[0] = len(m1)
+
+    length = len(m2)
+    wp.expect_eq(wp.static(len(m2)), 3)
+    out[1] = len(m2)
+
+    length = len(m3)
+    wp.expect_eq(len(m3), 4)
+    out[2] = wp.static(len(m3))
+
+    length = wp.static(len(m4))
+    wp.expect_eq(wp.static(len(m4)), 2)
+    out[3] = wp.static(len(m4))
+
+    foo = wp.mat22()
+    length = len(foo)
+    wp.expect_eq(len(foo), 2)
+    out[4] = len(foo)
+
+
+def test_matrix_len(test, device):
+    m1 = wp.mat22()
+    m2 = wp.mat33()
+    m3 = wp.mat44()
+    m4 = Mat23()
+    out = wp.empty(5, dtype=int, device=device)
+    wp.launch(matrix_len_kernel, dim=(1,), inputs=(m1, m2, m3, m4), outputs=(out,), device=device)
+
+    test.assertEqual(out.numpy()[0], 2)
+    test.assertEqual(out.numpy()[1], 3)
+    test.assertEqual(out.numpy()[2], 4)
+    test.assertEqual(out.numpy()[3], 2)
+    test.assertEqual(out.numpy()[4], 2)
+
+    test.assertEqual(len(m1), 2)
+    test.assertEqual(len(m2), 3)
+    test.assertEqual(len(m3), 4)
+    test.assertEqual(len(m4), 2)
+
+
+@wp.kernel
+def matrix_augassign_kernel(
+    a: wp.array(dtype=wp.mat22),
+    b: wp.array(dtype=wp.mat22),
+    x: wp.array(dtype=wp.vec2),
+    c: wp.array(dtype=wp.mat22),
+    d: wp.array(dtype=wp.mat22),
+    y: wp.array(dtype=wp.vec2),
+):
+    i = wp.tid()
+
+    m1 = wp.mat22()
+    m2 = b[i]
+    v2 = x[i]
+
+    m1[0] += v2
+    m1[1, 0] += m2[1, 0]
+    m1[1, 1] += m2[1, 1]
+
+    a[i] = m1
+
+    m3 = wp.mat22()
+    m4 = d[i]
+    v4 = y[i]
+
+    m3[0] -= v4
+    m3[1, 0] -= m4[1, 0]
+    m3[1, 1] -= m4[1, 1]
+
+    c[i] = m3
+
+
+def test_matrix_augassign(test, device):
+    N = 1
+
+    a = wp.zeros(N, dtype=wp.mat22, requires_grad=True, device=device)
+    b = wp.ones(N, dtype=wp.mat22, requires_grad=True, device=device)
+    x = wp.ones(N, dtype=wp.vec2, requires_grad=True, device=device)
+
+    c = wp.zeros(N, dtype=wp.mat22, requires_grad=True, device=device)
+    d = wp.ones(N, dtype=wp.mat22, requires_grad=True, device=device)
+    y = wp.ones(N, dtype=wp.vec2, requires_grad=True, device=device)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(matrix_augassign_kernel, N, inputs=[a, b, x, c, d, y], device=device)
+
+    tape.backward(grads={a: wp.ones_like(a), c: wp.ones_like(c)})
+
+    assert_np_equal(a.numpy(), wp.ones_like(a).numpy())
+    assert_np_equal(a.grad.numpy(), wp.ones_like(a).numpy())
+    assert_np_equal(b.grad.numpy(), np.array([[[0, 0], [1, 1]]], dtype=float))
+    assert_np_equal(x.grad.numpy(), np.array([[1, 1]], dtype=float))
+
+    assert_np_equal(c.numpy(), -wp.ones_like(c).numpy())
+    assert_np_equal(c.grad.numpy(), wp.ones_like(c).numpy())
+    assert_np_equal(d.grad.numpy(), np.array([[[0, 0], [-1, -1]]], dtype=float))
+    assert_np_equal(y.grad.numpy(), np.array([[-1, -1]], dtype=float))
+
+
+def test_matrix_assign_copy(test, device):
+    saved_enable_vector_component_overwrites_setting = wp.config.enable_vector_component_overwrites
+    try:
+        wp.config.enable_vector_component_overwrites = True
+
+        @wp.kernel
+        def mat_in_register_overwrite(x: wp.array2d(dtype=wp.mat22), y: wp.array(dtype=wp.vec2)):
+            i, j = wp.tid()
+
+            a = wp.mat22()
+            a[0] = y[i]
+            a[0, 1] = 3.0
+            x[i, j] = a
+
+        x = wp.zeros((1, 1), dtype=wp.mat22, device=device, requires_grad=True)
+        y = wp.ones(1, dtype=wp.vec2, device=device, requires_grad=True)
+
+        tape = wp.Tape()
+        with tape:
+            wp.launch(mat_in_register_overwrite, dim=(1, 1), inputs=[x, y], device=device)
+
+        tape.backward(grads={x: wp.ones_like(x, requires_grad=False)})
+
+        assert_np_equal(x.numpy(), np.array([[[[1.0, 3.0], [0.0, 0.0]]]], dtype=float))
+        assert_np_equal(y.grad.numpy(), np.array([[1.0, 0.0]], dtype=float))
+
+    finally:
+        wp.config.enable_vector_component_overwrites = saved_enable_vector_component_overwrites_setting
 
 
 devices = get_test_devices()
@@ -1789,6 +1970,9 @@ for dtype in np_signed_int_types + np_float_types:
     add_function_test_register_kernel(
         TestMat, f"test_subtraction_{dtype.__name__}", test_subtraction, devices=devices, dtype=dtype
     )
+    add_function_test_register_kernel(
+        TestMat, f"test_matmul_{dtype.__name__}", test_matmul, devices=devices, dtype=dtype
+    )
 
 add_function_test(
     TestMat,
@@ -1797,16 +1981,10 @@ add_function_test(
     devices=devices,
 )
 add_function_test(
-    TestMat,
-    "test_anon_constructor_error_shape_mismatch",
-    test_anon_constructor_error_shape_mismatch,
-    devices=devices,
+    TestMat, "test_anon_constructor_error_shape_mismatch", test_anon_constructor_error_shape_mismatch, devices=devices
 )
 add_function_test(
-    TestMat,
-    "test_anon_constructor_error_type_mismatch",
-    test_anon_constructor_error_type_mismatch,
-    devices=devices,
+    TestMat, "test_anon_constructor_error_type_mismatch", test_anon_constructor_error_type_mismatch, devices=devices
 )
 add_function_test(
     TestMat,
@@ -1856,6 +2034,9 @@ for dtype in np_float_types:
         TestMat, f"test_inverse_{dtype.__name__}", test_inverse, devices=devices, dtype=dtype
     )
     add_function_test_register_kernel(TestMat, f"test_svd_{dtype.__name__}", test_svd, devices=devices, dtype=dtype)
+    add_function_test_register_kernel(
+        TestMat, f"test_svd_2D{dtype.__name__}", test_svd_2D, devices=devices, dtype=dtype
+    )
     add_function_test_register_kernel(TestMat, f"test_qr_{dtype.__name__}", test_qr, devices=devices, dtype=dtype)
     add_function_test_register_kernel(TestMat, f"test_eig_{dtype.__name__}", test_eig, devices=devices, dtype=dtype)
     add_function_test_register_kernel(
@@ -1870,12 +2051,14 @@ for dtype in np_float_types:
     add_function_test_register_kernel(TestMat, f"test_skew_{dtype.__name__}", test_skew, devices=devices, dtype=dtype)
     add_function_test_register_kernel(
         TestMat,
-        f"test_mat_array_type_indexing_{dtype.__name__}",
-        test_mat_array_type_indexing,
+        f"test_matrix_assign_inplace_{dtype.__name__}",
+        test_matrix_assign_inplace,
         devices=devices,
         dtype=dtype,
     )
-
+add_function_test(TestMat, "test_matrix_len", test_matrix_len, devices=devices)
+add_function_test(TestMat, "test_matrix_augassign", test_matrix_augassign, devices=devices)
+add_function_test(TestMat, "test_matrix_assign_copy", test_matrix_assign_copy, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

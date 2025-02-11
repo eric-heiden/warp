@@ -79,37 +79,49 @@ def test_array_scan_error_unsupported_dtype(test, device):
 
 
 def test_radix_sort_pairs(test, device):
-    keys = wp.array((7, 2, 8, 4, 1, 6, 5, 3, 0, 0, 0, 0, 0, 0, 0, 0), dtype=int, device=device)
-    values = wp.array((1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0), dtype=int, device=device)
-    wp.utils.radix_sort_pairs(keys, values, 8)
-    assert_np_equal(keys.numpy()[:8], np.array((1, 2, 3, 4, 5, 6, 7, 8)))
-    assert_np_equal(values.numpy()[:8], np.array((5, 2, 8, 4, 7, 6, 1, 3)))
+    keyTypes = [int, wp.float32]
+
+    for keyType in keyTypes:
+        keys = wp.array((7, 2, 8, 4, 1, 6, 5, 3, 0, 0, 0, 0, 0, 0, 0, 0), dtype=keyType, device=device)
+        values = wp.array((1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0), dtype=int, device=device)
+        wp.utils.radix_sort_pairs(keys, values, 8)
+        assert_np_equal(keys.numpy()[:8], np.array((1, 2, 3, 4, 5, 6, 7, 8)))
+        assert_np_equal(values.numpy()[:8], np.array((5, 2, 8, 4, 7, 6, 1, 3)))
 
 
 def test_radix_sort_pairs_empty(test, device):
-    keys = wp.array((), dtype=int, device=device)
-    values = wp.array((), dtype=int, device=device)
-    wp.utils.radix_sort_pairs(keys, values, 0)
+    keyTypes = [int, wp.float32]
+
+    for keyType in keyTypes:
+        keys = wp.array((), dtype=keyType, device=device)
+        values = wp.array((), dtype=int, device=device)
+        wp.utils.radix_sort_pairs(keys, values, 0)
 
 
 def test_radix_sort_pairs_error_insufficient_storage(test, device):
-    keys = wp.array((1, 2, 3), dtype=int, device=device)
-    values = wp.array((1, 2, 3), dtype=int, device=device)
-    with test.assertRaisesRegex(
-        RuntimeError,
-        r"Array storage must be large enough to contain 2\*count elements$",
-    ):
-        wp.utils.radix_sort_pairs(keys, values, 3)
+    keyTypes = [int, wp.float32]
+
+    for keyType in keyTypes:
+        keys = wp.array((1, 2, 3), dtype=keyType, device=device)
+        values = wp.array((1, 2, 3), dtype=int, device=device)
+        with test.assertRaisesRegex(
+            RuntimeError,
+            r"Array storage must be large enough to contain 2\*count elements$",
+        ):
+            wp.utils.radix_sort_pairs(keys, values, 3)
 
 
 def test_radix_sort_pairs_error_unsupported_dtype(test, device):
-    keys = wp.array((1.0, 2.0, 3.0), dtype=float, device=device)
-    values = wp.array((1.0, 2.0, 3.0), dtype=float, device=device)
-    with test.assertRaisesRegex(
-        RuntimeError,
-        r"Unsupported data type$",
-    ):
-        wp.utils.radix_sort_pairs(keys, values, 1)
+    keyTypes = [int, wp.float32]
+
+    for keyType in keyTypes:
+        keys = wp.array((1.0, 2.0, 3.0), dtype=keyType, device=device)
+        values = wp.array((1.0, 2.0, 3.0), dtype=float, device=device)
+        with test.assertRaisesRegex(
+            RuntimeError,
+            r"Unsupported data type$",
+        ):
+            wp.utils.radix_sort_pairs(keys, values, 1)
 
 
 def test_array_sum(test, device):
@@ -268,7 +280,7 @@ class TestUtils(unittest.TestCase):
             wp.utils.warn("hello, world!")
             wp.utils.warn("hello, world!")
 
-        expected = "Warp UserWarning: hello, world!\n" "Warp UserWarning: hello, world!\n"
+        expected = "Warp UserWarning: hello, world!\nWarp UserWarning: hello, world!\n"
 
         self.assertEqual(f.getvalue(), expected)
 
@@ -308,7 +320,7 @@ class TestUtils(unittest.TestCase):
             wp.utils.warn("foo", category=DeprecationWarning)
             wp.utils.warn("bar", category=DeprecationWarning)
 
-        expected = "Warp DeprecationWarning: foo\n" "Warp DeprecationWarning: bar\n"
+        expected = "Warp DeprecationWarning: foo\nWarp DeprecationWarning: bar\n"
 
         self.assertEqual(f.getvalue(), expected)
 

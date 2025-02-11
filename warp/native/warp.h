@@ -32,8 +32,6 @@ extern "C"
     WP_API int is_cuda_enabled();
     // whether Warp was compiled with enhanced CUDA compatibility
     WP_API int is_cuda_compatibility_enabled();
-    // whether Warp was compiled with CUTLASS support
-    WP_API int is_cutlass_enabled();
     // whether Warp was compiled with MathDx support
     WP_API int is_mathdx_enabled();
     // whether Warp was compiled with debug support
@@ -67,21 +65,23 @@ extern "C"
     WP_API void memtile_host(void* dest, const void* src, size_t srcsize, size_t n);
     WP_API void memtile_device(void* context, void* dest, const void* src, size_t srcsize, size_t n);
 
-	WP_API uint64_t bvh_create_host(wp::vec3* lowers, wp::vec3* uppers, int num_items);
+	WP_API uint64_t bvh_create_host(wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type);
 	WP_API void bvh_destroy_host(uint64_t id);
     WP_API void bvh_refit_host(uint64_t id);
 
-	WP_API uint64_t bvh_create_device(void* context, wp::vec3* lowers, wp::vec3* uppers, int num_items);
+	WP_API uint64_t bvh_create_device(void* context, wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type);
 	WP_API void bvh_destroy_device(uint64_t id);
     WP_API void bvh_refit_device(uint64_t id);
 
     // create a user-accessible copy of the mesh, it is the 
     // users responsibility to keep-alive the points/tris data for the duration of the mesh lifetime
-	WP_API uint64_t mesh_create_host(wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, wp::array_t<int> tris, int num_points, int num_tris, int support_winding_number);
+	WP_API uint64_t mesh_create_host(wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, wp::array_t<int> tris, 
+        int num_points, int num_tris, int support_winding_number, int constructor_type);
 	WP_API void mesh_destroy_host(uint64_t id);
     WP_API void mesh_refit_host(uint64_t id);
 
-	WP_API uint64_t mesh_create_device(void* context, wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, wp::array_t<int> tris, int num_points, int num_tris, int support_winding_number);
+	WP_API uint64_t mesh_create_device(void* context, wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, 
+        wp::array_t<int> tris, int num_points, int num_tris, int support_winding_number, int constructor_type);
 	WP_API void mesh_destroy_device(uint64_t id);
     WP_API void mesh_refit_device(uint64_t id);
 
@@ -101,10 +101,6 @@ extern "C"
     WP_API void hash_grid_destroy_device(uint64_t id);
     WP_API void hash_grid_update_device(uint64_t id, float cell_width, const wp::array_t<wp::vec3>* points);
 
-    WP_API bool cutlass_gemm(void* context, int compute_capability, int m, int n, int k, const char* datatype,
-                             const void* a, const void* b, const void* c, void* d, float alpha, float beta,
-                             bool row_major_a, bool row_major_b, bool allow_tf32x3_arith, int batch_count);
-
     WP_API uint64_t volume_create_host(void* buf, uint64_t size, bool copy, bool owner);
     WP_API void volume_get_tiles_host(uint64_t id, void* buf);
     WP_API void volume_get_voxels_host(uint64_t id, void* buf);
@@ -115,9 +111,7 @@ extern "C"
     WP_API void volume_get_voxels_device(uint64_t id, void* buf);
     WP_API void volume_destroy_device(uint64_t id);
     
-    WP_API uint64_t volume_f_from_tiles_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space, float bg_value);
-    WP_API uint64_t volume_v_from_tiles_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space, float bg_value[3]);
-    WP_API uint64_t volume_i_from_tiles_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space, int bg_value);
+    WP_API uint64_t volume_from_tiles_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space, const void* bg_value, uint32_t bg_value_size, const char* bg_value_type);
     WP_API uint64_t volume_index_from_tiles_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space);
     WP_API uint64_t volume_from_active_voxels_device(void* context, void* points, int num_points, float transform[9], float translation[3], bool points_in_world_space);
 
@@ -159,6 +153,9 @@ extern "C"
     WP_API void radix_sort_pairs_int_host(uint64_t keys, uint64_t values, int n);
     WP_API void radix_sort_pairs_int_device(uint64_t keys, uint64_t values, int n);
 
+    WP_API void radix_sort_pairs_float_host(uint64_t keys, uint64_t values, int n);
+    WP_API void radix_sort_pairs_float_device(uint64_t keys, uint64_t values, int n);
+
     WP_API void runlength_encode_int_host(uint64_t values, uint64_t run_values, uint64_t run_lengths, uint64_t run_count, int n);
     WP_API void runlength_encode_int_device(uint64_t values, uint64_t run_values, uint64_t run_lengths, uint64_t run_count, int n);
 
@@ -171,6 +168,7 @@ extern "C"
         int* tpl_columns,
         void* tpl_values,
         bool prune_numerical_zeros,
+        bool masked,
         int* bsr_offsets,
         int* bsr_columns,
         void* bsr_values,
@@ -185,6 +183,7 @@ extern "C"
         int* tpl_columns,
         void* tpl_values,
         bool prune_numerical_zeros,
+        bool masked,
         int* bsr_offsets,
         int* bsr_columns,
         void* bsr_values,
@@ -199,6 +198,7 @@ extern "C"
         int* tpl_columns,
         void* tpl_values,
         bool prune_numerical_zeros,
+        bool masked,
         int* bsr_offsets,
         int* bsr_columns,
         void* bsr_values,
@@ -213,6 +213,7 @@ extern "C"
         int* tpl_columns,
         void* tpl_values,
         bool prune_numerical_zeros,
+        bool masked,
         int* bsr_offsets,
         int* bsr_columns,
         void* bsr_values,
@@ -266,8 +267,11 @@ extern "C"
     WP_API int cuda_device_get_pci_device_id(int ordinal);
     WP_API int cuda_device_is_uva(int ordinal);
     WP_API int cuda_device_is_mempool_supported(int ordinal);
+    WP_API int cuda_device_is_ipc_supported(int ordinal);
     WP_API int cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold);
     WP_API uint64_t cuda_device_get_mempool_release_threshold(int ordinal);
+    WP_API uint64_t cuda_device_get_mempool_used_mem_current(int ordinal);
+    WP_API uint64_t cuda_device_get_mempool_used_mem_high(int ordinal);
     WP_API void cuda_device_get_memory_info(int ordinal, size_t* free_mem, size_t* total_mem);
 
     WP_API void* cuda_context_get_current();
@@ -294,6 +298,13 @@ extern "C"
     WP_API int cuda_is_mempool_access_enabled(int target_ordinal, int peer_ordinal);
     WP_API int cuda_set_mempool_access_enabled(int target_ordinal, int peer_ordinal, int enable);
 
+    // inter-process communication
+    WP_API void cuda_ipc_get_mem_handle(void* ptr, char* out_buffer);
+    WP_API void* cuda_ipc_open_mem_handle(void* context, char* handle);
+    WP_API void cuda_ipc_close_mem_handle(void* ptr);
+    WP_API void cuda_ipc_get_event_handle(void* context, void* event, char* out_buffer);
+    WP_API void* cuda_ipc_open_event_handle(void* context, char* handle);
+
     WP_API void* cuda_stream_create(void* context, int priority);
     WP_API void cuda_stream_destroy(void* context, void* stream);
     WP_API void cuda_stream_register(void* context, void* stream);
@@ -317,9 +328,10 @@ extern "C"
     WP_API bool cuda_graph_launch(void* graph, void* stream);
     WP_API bool cuda_graph_destroy(void* context, void* graph);
 
-    WP_API size_t cuda_compile_program(const char* cuda_src, int arch, const char* include_dir, int num_cuda_include_dirs, const char** cuda_include_dirs, bool debug, bool verbose, bool verify_fp, bool fast_math, const char* output_path, size_t num_ltoirs, char** ltoirs, size_t* ltoir_sizes);
+    WP_API size_t cuda_compile_program(const char* cuda_src, const char* program_name, int arch, const char* include_dir, int num_cuda_include_dirs, const char** cuda_include_dirs, bool debug, bool verbose, bool verify_fp, bool fast_math, bool fuse_fp, bool lineinfo, const char* output_path, size_t num_ltoirs, char** ltoirs, size_t* ltoir_sizes, int* ltoir_input_types);
     WP_API bool cuda_compile_fft(const char* ltoir_output_path, const char* symbol_name, int num_include_dirs, const char** include_dirs, const char* mathdx_include_dir, int arch, int size, int elements_per_thread, int direction, int precision, int* shared_memory_size);
     WP_API bool cuda_compile_dot(const char* ltoir_output_path, const char* symbol_name, int num_include_dirs, const char** include_dirs, const char* mathdx_include_dir, int arch, int M, int N, int K, int precision_A, int precision_B, int precision_C, int type, int arrangement_A, int arrangement_B, int arrangement_C, int num_threads);
+    WP_API bool cuda_compile_solver(const char* fatbin_output_path, const char* ltoir_output_path, const char* symbol_name, int num_include_dirs, const char** include_dirs, const char* mathdx_include_dir, int arch, int M, int N, int function, int precision, int fill_mode, int num_threads);
 
     WP_API void* cuda_load_module(void* context, const char* ptx);
     WP_API void cuda_unload_module(void* context, void* module);

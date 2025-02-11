@@ -683,33 +683,42 @@ A native snippet may also include a return statement. If this is the case, you m
 Debugging Gradients
 ###################
 
-.. note::
-    We are continuously expanding the debugging section to provide tools to help users debug gradient computations in upcoming Warp releases.
-
-Measuring Gradient Accuracy
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 .. currentmodule:: warp.autograd
     
 Warp provides utility functions to evaluate the partial Jacobian matrices for input/output argument pairs given to kernel launches.
-:func:`jacobian` computes the Jacobian matrix of a kernel using Warp's automatic differentiation engine.
-:func:`jacobian_fd` computes the Jacobian matrix of a kernel using finite differences.
+:func:`jacobian` computes the Jacobian matrix of a Warp kernel, or any Python function calling Warp kernels and having Warp arrays as inputs and outputs, using Warp's automatic differentiation engine.
+:func:`jacobian_fd` computes the Jacobian matrix of a kernel or a function using finite differences.
 :func:`gradcheck` compares the Jacobian matrices computed by the autodiff engine and finite differences to measure the accuracy of the gradients.
 :func:`jacobian_plot` visualizes the Jacobian matrices returned by the :func:`jacobian` and :func:`jacobian_fd` functions.
 
+``warp.autograd.gradcheck``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 .. autofunction:: gradcheck
+
+``warp.autograd.gradcheck_tape``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. autofunction:: gradcheck_tape
 
+``warp.autograd.jacobian``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 .. autofunction:: jacobian
 
+``warp.autograd.jacobian_fd``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 .. autofunction:: jacobian_fd
+
+``warp.autograd.jacobian_plot``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. autofunction:: jacobian_plot
 
 
 Example usage
-"""""""""""""
+^^^^^^^^^^^^^
 
 .. code-block:: python
 
@@ -1017,7 +1026,7 @@ it is marked as having been read from. Later, if the same array is passed to a k
     Setting ``wp.config.verify_autograd_array_access = True`` will disable kernel caching and force the current module to rebuild.
 
 .. note::
-    Though in-place operations such as ``x[tid] += 1.0`` are technically ``read -> write``, the Warp graph specifically accommodates adjoint accumulation in these cases, so we mark them as write operations.
+    Though in-place operations such as ``x[tid] += 1.0`` and ``wp.atomic_add()`` are technically ``read -> write``, the Warp graph specifically accommodates adjoint accumulation in these cases, so we mark them as write operations.
 
 .. note::
     This feature does not yet support arrays packed in Warp structs.
@@ -1071,82 +1080,10 @@ A warning will be emitted during code generation if ``wp.config.verbose = True``
 Vector, Matrix, and Quaternion Component Assignment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Within a kernel, assigning a value to a locally defined vector, matrix, or quaternion component is differentiable. However,
-when possible, it is best to assign values all at once in the vector, matrix, or quaternion constructor.
-
-Consider the following two approaches:
-
-.. testcode::
-
-    @wp.kernel
-    def constructor_assignment(a: wp.array(dtype=wp.mat44)):
-        i = wp.tid()
-        m = wp.mat44(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0)
-        a[i] = m
-
-    a = wp.zeros(1, dtype=wp.mat44, requires_grad=True)
-
-    with wp.Tape() as tape:
-        wp.launch(constructor_assignment, 1, inputs=[a])
-
-    tape.backward(grads={a: wp.ones_like(a)})
-
-    print(f"a = {a}")
-
-.. testoutput::
-
-    a = [[[1. 0. 0. 0.]
-      [0. 1. 0. 0.]
-      [0. 0. 1. 0.]
-      [0. 0. 0. 1.]]]
-
-.. testcode::
-
-    @wp.kernel
-    def component_assignment(a: wp.array(dtype=wp.mat44)):
-        tid = wp.tid()
-        m = wp.mat44(0.0)
-        for i in range(4):
-            for j in range(4):
-                if i == j:
-                    m[i, j] = 1.0
-                else:
-                    m[i, j] = 0.0
-        a[tid] = m
-
-    a = wp.zeros(1, dtype=wp.mat44, requires_grad=True)
-
-    with wp.Tape() as tape:
-        wp.launch(component_assignment, 1, inputs=[a])
-
-    tape.backward(grads={a: wp.ones_like(a)})
-
-    print(f"a = {a}")
-
-.. testoutput::
-
-    a = [[[1. 0. 0. 0.]
-      [0. 1. 0. 0.]
-      [0. 0. 1. 0.]
-      [0. 0. 0. 1.]]]
-
-The outputs are the same, but let's compare compilation and run times:
-the first example compiled in 298.50 ms and ran in 69.18 ms,
-while the second example compiled in 600.64 ms and ran in 72.11 ms. Similar run times,
-but the second example took significantly longer to compile. This effect will scale with the size
-of the complex type object you are assigning values to. For instance, if in the above example
-you were to assign every element in a 9x9 matrix individually, compilation time would increase to 80,000 ms.
-
-To maintain differentiability, under the hood, complex type assignment requires a copy constructor.
-So while the first example only creates a single in-register matrix-adjoint pair, the second example
-will create 17. In general this will increase compilation time, and may increase run time as well.
-
-Lastly, if your script does not require automatic differentiation, be sure to set ``wp.config.enable_backward = False``.
-This will skip adjoint kernel generation and save on compilation time.
+Within a kernel, assigning a value to a locally defined vector, matrix, or quaternion component is differentiable, with one
+important caveat: each component may only be assigned a value once (not including default initialization). Each component may
+then be safely updated with in-place addition or subtraction (``+=`` or ``-=``) operations, but direct re-assignment (``=``)
+will invalidate gradient computations related to the vector, matrix, or quaternion.
 
 Dynamic Loops
 ^^^^^^^^^^^^^

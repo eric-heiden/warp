@@ -20,9 +20,6 @@ override example defaults so the example can run in less than ten seconds.
 Use {"usd_required": True} and {"torch_required": True} to skip running the test
 if usd-core or torch are not found in the Python environment.
 
-Use "cutlass_required": True} to skip the test if Warp needs to be built with
-CUTLASS.
-
 Use the "num_frames" and "train_iters" keys to control the number of steps.
 
 Use "test_timeout" to override the default test timeout threshold of 300 seconds.
@@ -44,7 +41,7 @@ from warp.tests.unittest_utils import (
 )
 from warp.utils import check_p2p
 
-wp.init()  # For wp.context.runtime.core.is_cutlass_enabled()
+wp.init()  # For wp.context.runtime.core.is_debug_enabled()
 
 
 def _build_command_line_options(test_options: Dict[str, Any]) -> list:
@@ -111,10 +108,6 @@ def add_example_test(
         if usd_required and not USD_AVAILABLE:
             test.skipTest("Requires usd-core")
 
-        cutlass_required = options.pop("cutlass_required", False)
-        if cutlass_required and not wp.context.runtime.core.is_cutlass_enabled():
-            test.skipTest("Warp was not built with CUTLASS support")
-
         # Find the current Warp cache
         warp_cache_path = wp.config.kernel_cache_dir
 
@@ -165,7 +158,9 @@ def add_example_test(
 
         # with wp.ScopedTimer(f"{name}_{sanitize_identifier(device)}"):
         # Run the script as a subprocess
-        result = subprocess.run(command, capture_output=True, text=True, env=env_vars, timeout=test_timeout)
+        result = subprocess.run(
+            command, capture_output=True, text=True, env=env_vars, timeout=test_timeout, check=False
+        )
 
         # Check the return code (0 is standard for success)
         test.assertEqual(
@@ -289,18 +284,14 @@ add_example_test(
     devices=test_devices,
     test_options={"headless": True, "train_iters": 50},
 )
-# NOTE: This example uses CUTLASS and will run orders of magnitude slower when Warp is built in debug mode
 add_example_test(
     TestOptimExamples,
-    name="optim.example_walker",
+    name="optim.example_softbody_properties",
     devices=test_devices,
-    test_options={"usd_required": True},
     test_options_cuda={
         "train_iters": 1 if warp.context.runtime.core.is_debug_enabled() else 3,
-        "num_frames": 1 if warp.context.runtime.core.is_debug_enabled() else 60,
-        "cutlass_required": True,
     },
-    test_options_cpu={"train_iters": 1, "num_frames": 30},
+    test_options_cpu={"train_iters": 1},
 )
 
 

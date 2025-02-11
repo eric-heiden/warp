@@ -281,20 +281,20 @@ def test_function_lookup(test, device):
 
     outputs = wp.empty(2, dtype=wp.float32)
 
-    for op in op_handlers.keys():
+    for _op, op_func in op_handlers.items():
 
         @wp.kernel
         def operate(input: wp.array(dtype=inputs.dtype, ndim=2), output: wp.array(dtype=wp.float32)):
             tid = wp.tid()
             a, b = input[tid, 0], input[tid, 1]
             # retrieve the right function to use for the captured dtype variable
-            output[tid] = wp.static(op_handlers[op])(a, b)  # noqa: B023
+            output[tid] = wp.static(op_func)(a, b)  # noqa: B023
 
         wp.launch(operate, dim=2, inputs=[inputs], outputs=[outputs])
         outputs_np = outputs.numpy()
         inputs_np = inputs.numpy()
         for i in range(len(outputs_np)):
-            test.assertEqual(outputs_np[i], op_handlers[op](float(inputs_np[i][0]), float(inputs_np[i][1])))
+            test.assertEqual(outputs_np[i], op_func(float(inputs_np[i][0]), float(inputs_np[i][1])))
 
 
 def count_ssa_occurrences(kernel: wp.Kernel, ssas: List[str]) -> Dict[str, int]:
@@ -536,6 +536,21 @@ def test_static_function_hash(test, _):
     test.assertEqual(hash1, hash3)
 
 
+@wp.kernel
+def static_len_query_kernel(v1: wp.vec2):
+    v2 = wp.vec3()
+    m = wp.identity(n=wp.static(len(v1) + len(v2) + 1), dtype=float)
+    wp.expect_eq(wp.ddot(m, m), 6.0)
+
+    t = wp.transform_identity(float)
+    wp.expect_eq(wp.static(len(t)), 7)
+
+
+def test_static_len_query(test, _):
+    v1 = wp.vec2()
+    wp.launch(static_len_query_kernel, 1, inputs=(v1,))
+
+
 devices = get_test_devices()
 
 
@@ -561,6 +576,7 @@ add_function_test(TestStatic, "test_static_if_else_elif", test_static_if_else_el
 
 add_function_test(TestStatic, "test_static_constant_hash", test_static_constant_hash, devices=None)
 add_function_test(TestStatic, "test_static_function_hash", test_static_function_hash, devices=None)
+add_function_test(TestStatic, "test_static_len_query", test_static_len_query, devices=None)
 
 
 if __name__ == "__main__":

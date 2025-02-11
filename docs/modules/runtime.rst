@@ -115,7 +115,6 @@ Additionally, data can be copied between arrays in different memory spaces using
     :undoc-members:
     :exclude-members: vars
 
-
 Multi-dimensional Arrays
 ########################
 
@@ -158,29 +157,7 @@ The following construction methods are provided for allocating zero-initialized 
 .. autofunction:: copy
 .. autofunction:: clone
 
-Matrix Multiplication
-#####################
-
-Matrix multiplication is built on NVIDIA's `CUTLASS <https://github.com/NVIDIA/cutlass>`_ library,
-which enables fast matrix multiplication of large arrays on the GPU.
-
-If no GPU is detected, matrix multiplication falls back to NumPy's implementation on the CPU.
-
-Matrix multiplication is fully differentiable and can be recorded on the tape::
-
-    tape = wp.Tape()
-    with tape:
-        wp.matmul(A, B, C, D)
-        wp.launch(loss_kernel, dim=(m, n), inputs=[D, loss])
-
-    tape.backward(loss=loss)
-    A_grad = A.grad.numpy()
-
-Using the ``@`` operator (``D = A @ B``) will default to the same CUTLASS algorithm used in ``wp.matmul``.
-
-.. autofunction:: matmul
-
-.. autofunction:: batched_matmul
+.. _Data_Types:
 
 Data Types
 ----------
@@ -621,6 +598,47 @@ Example: Using a struct in gradient computation
     [[1. 2. 3.]
      [4. 5. 6.]]
 
+Example: Defining Operator Overloads
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: python
+
+    @wp.struct
+    class Complex:
+        real: float
+        imag: float
+
+    @wp.func
+    def add(
+        a: Complex,
+        b: Complex,
+    ) -> Complex:
+        return Complex(a.real + b.real, a.imag + b.imag)
+
+    @wp.func
+    def mul(
+        a: Complex,
+        b: Complex,
+    ) -> Complex:
+        return Complex(
+            a.real * b.real - a.imag * b.imag,
+            a.real * b.imag + a.imag * b.real,
+        )
+
+    @wp.kernel
+    def kernel():
+        a = Complex(1.0, 2.0)
+        b = Complex(3.0, 4.0)
+
+        c = a + b
+        wp.printf("%.0f %+.0fi\n", c.real, c.imag)
+
+        d = a * b
+        wp.printf("%.0f %+.0fi\n", d.real, d.imag)
+
+    wp.launch(kernel, dim=(1,))
+    wp.synchronize()
+
 Type Conversions
 ################
 
@@ -1053,7 +1071,7 @@ to values in arbitrarily shaped arrays::
         f = wp.volume_sample_index(volume, q, wp.Volume.LINEAR, voxel_values, background_value)
 
 The coordinates of all indexable voxels can be recovered using :func:`get_voxels() <warp.Volume.get_voxels>`.
-NanoVDB grids may also contains embedded *blind* data arrays; those can be accessed with the 
+NanoVDB grids may also contain embedded *blind* data arrays; those can be accessed with the 
 :func:`feature_array() <warp.Volume.feature_array>` function.
 
 .. autoclass:: Volume
@@ -1198,3 +1216,45 @@ See :doc:`../profiling` documentation for more information.
 
 .. autoclass:: warp.ScopedTimer
     :noindex:
+
+Interprocess Communication (IPC)
+--------------------------------
+
+Interprocess communication can be used to share Warp arrays and events across
+processes without creating copies of the underlying data.
+
+Some basic requirements for using IPC include:
+
+* Linux operating system (note however that integrated devices like NVIDIA
+  Jetson do not support CUDA IPC)
+* The array must be allocated on a GPU device using the default memory allocator (see :doc:`allocators`)
+
+  The ``wp.ScopedMempool`` context manager is useful for temporarily disabling
+  memory pools for the purpose of allocating arrays that can be shared using IPC.
+
+Support for IPC on a device is indicated by the :attr:`is_ipc_supported <warp.context.Device.is_ipc_supported>`
+attribute of the :class:`Device <warp.context.Device>`. If the Warp library has
+been compiled with CUDA 11, this device attribute will be ``None`` to indicate
+that IPC support could not be determined using the CUDA API.
+
+To share a Warp array between processes, use :meth:`array.ipc_handle` in the
+originating process to obtain an IPC handle for the array's memory allocation.
+The handle is a ``bytes`` object with a length of 64.
+The IPC handle along with information about the array (data type, shape, and
+optionally strides) should be shared with another process, e.g. via shared
+memory or files.
+Another process can use this information to import the original array by
+calling :func:`from_ipc_handle`.
+
+Events can be shared in a similar manner, but they must be constructed with
+``interprocess=True``. Additionally, events cannot be created with both
+``interprocess=True`` and ``enable_timing=True``. Use :meth:`Event.ipc_handle`
+in the originating process to obtain an IPC handle for the event. Another
+process can use this information to import the original event by calling
+:func:`event_from_ipc_handle`.
+
+
+
+.. autofunction:: from_ipc_handle
+
+.. autofunction:: event_from_ipc_handle

@@ -5,13 +5,15 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+from __future__ import annotations
+
 import cProfile
 import ctypes
 import os
 import sys
 import time
 import warnings
-from typing import Any, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -39,8 +41,7 @@ def warp_showwarning(message, category, filename, lineno, file=None, line=None):
                 # and the import machinery don't work anymore
                 line = None
                 linecache = None
-        else:
-            line = line
+
         if line:
             line = line.strip()
             s += "  %s\n" % line
@@ -132,11 +133,15 @@ def radix_sort_pairs(keys, values, count: int):
     if keys.device.is_cpu:
         if keys.dtype == wp.int32 and values.dtype == wp.int32:
             runtime.core.radix_sort_pairs_int_host(keys.ptr, values.ptr, count)
+        elif keys.dtype == wp.float32 and values.dtype == wp.int32:
+            runtime.core.radix_sort_pairs_float_host(keys.ptr, values.ptr, count)
         else:
             raise RuntimeError("Unsupported data type")
     elif keys.device.is_cuda:
         if keys.dtype == wp.int32 and values.dtype == wp.int32:
             runtime.core.radix_sort_pairs_int_device(keys.ptr, values.ptr, count)
+        elif keys.dtype == wp.float32 and values.dtype == wp.int32:
+            runtime.core.radix_sort_pairs_float_device(keys.ptr, values.ptr, count)
         else:
             raise RuntimeError("Unsupported data type")
 
@@ -662,37 +667,38 @@ class ScopedTimer:
 
     def __init__(
         self,
-        name,
-        active=True,
-        print=True,
-        detailed=False,
-        dict=None,
-        use_nvtx=False,
-        color="rapids",
-        synchronize=False,
-        cuda_filter=0,
-        report_func=None,
-        skip_tape=False,
+        name: str,
+        active: bool = True,
+        print: bool = True,
+        detailed: bool = False,
+        dict: Optional[Dict[str, List[float]]] = None,
+        use_nvtx: bool = False,
+        color: Union[int, str] = "rapids",
+        synchronize: bool = False,
+        cuda_filter: int = 0,
+        report_func: Optional[Callable[[List[TimingResult], str], None]] = None,
+        skip_tape: bool = False,
     ):
         """Context manager object for a timer
 
         Parameters:
-            name (str): Name of timer
-            active (bool): Enables this timer
-            print (bool): At context manager exit, print elapsed time to sys.stdout
-            detailed (bool): Collects additional profiling data using cProfile and calls ``print_stats()`` at context exit
-            dict (dict): A dictionary of lists to which the elapsed time will be appended using ``name`` as a key
-            use_nvtx (bool): If true, timing functionality is replaced by an NVTX range
-            color (int or str): ARGB value (e.g. 0x00FFFF) or color name (e.g. 'cyan') associated with the NVTX range
-            synchronize (bool): Synchronize the CPU thread with any outstanding CUDA work to return accurate GPU timings
-            cuda_filter (int): Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
-            report_func (Callable): A callback function to print the activity report (``wp.timing_print()`` is used by default)
-            skip_tape (bool): If true, the timer will not be recorded in the tape
+            name: Name of timer
+            active: Enables this timer
+            print: At context manager exit, print elapsed time to ``sys.stdout``
+            detailed: Collects additional profiling data using cProfile and calls ``print_stats()`` at context exit
+            dict: A dictionary of lists to which the elapsed time will be appended using ``name`` as a key
+            use_nvtx: If true, timing functionality is replaced by an NVTX range
+            color: ARGB value (e.g. 0x00FFFF) or color name (e.g. 'cyan') associated with the NVTX range
+            synchronize: Synchronize the CPU thread with any outstanding CUDA work to return accurate GPU timings
+            cuda_filter: Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
+            report_func: A callback function to print the activity report.
+              If ``None``,  :func:`wp.timing_print() <timing_print>` will be used.
+            skip_tape: If true, the timer will not be recorded in the tape
 
         Attributes:
             extra_msg (str): Can be set to a string that will be added to the printout at context exit.
             elapsed (float): The duration of the ``with`` block used with this object
-            timing_results (list[TimingResult]): The list of activity timing results, if collection was requested using ``cuda_filter``
+            timing_results (List[TimingResult]): The list of activity timing results, if collection was requested using ``cuda_filter``
         """
         self.name = name
         self.active = active and self.enabled
@@ -779,16 +785,16 @@ class ScopedTimer:
                     print()
 
                 if self.extra_msg:
-                    print(f"{indent}{self.name} took {self.elapsed :.2f} ms {self.extra_msg}")
+                    print(f"{indent}{self.name} took {self.elapsed:.2f} ms {self.extra_msg}")
                 else:
-                    print(f"{indent}{self.name} took {self.elapsed :.2f} ms")
+                    print(f"{indent}{self.name} took {self.elapsed:.2f} ms")
 
                 ScopedTimer.indent -= 1
 
 
 # Allow temporarily enabling/disabling mempool allocators
 class ScopedMempool:
-    def __init__(self, device, enable: bool):
+    def __init__(self, device: Devicelike, enable: bool):
         self.device = wp.get_device(device)
         self.enable = enable
 
@@ -802,7 +808,7 @@ class ScopedMempool:
 
 # Allow temporarily enabling/disabling mempool access
 class ScopedMempoolAccess:
-    def __init__(self, target_device, peer_device, enable: bool):
+    def __init__(self, target_device: Devicelike, peer_device: Devicelike, enable: bool):
         self.target_device = target_device
         self.peer_device = peer_device
         self.enable = enable
@@ -817,7 +823,7 @@ class ScopedMempoolAccess:
 
 # Allow temporarily enabling/disabling peer access
 class ScopedPeerAccess:
-    def __init__(self, target_device, peer_device, enable: bool):
+    def __init__(self, target_device: Devicelike, peer_device: Devicelike, enable: bool):
         self.target_device = target_device
         self.peer_device = peer_device
         self.enable = enable
@@ -831,7 +837,7 @@ class ScopedPeerAccess:
 
 
 class ScopedCapture:
-    def __init__(self, device=None, stream=None, force_module_load=None, external=False):
+    def __init__(self, device: Devicelike = None, stream=None, force_module_load=None, external=False):
         self.device = device
         self.stream = stream
         self.force_module_load = force_module_load
@@ -855,27 +861,6 @@ class ScopedCapture:
                 self.graph = wp.capture_end(device=self.device, stream=self.stream)
             finally:
                 self.active = False
-
-
-# helper kernels for adj_matmul
-@wp.kernel
-def add_kernel_2d(x: wp.array2d(dtype=Any), acc: wp.array2d(dtype=Any), beta: Any):
-    i, j = wp.tid()
-
-    x[i, j] = x[i, j] + beta * acc[i, j]
-
-
-@wp.kernel
-def add_kernel_3d(x: wp.array3d(dtype=Any), acc: wp.array3d(dtype=Any), beta: Any):
-    i, j, k = wp.tid()
-
-    x[i, j, k] = x[i, j, k] + beta * acc[i, j, k]
-
-
-# explicit instantiations of generic kernels for adj_matmul
-for T in [wp.float16, wp.float32, wp.float64]:
-    wp.overload(add_kernel_2d, [wp.array2d(dtype=T), wp.array2d(dtype=T), T])
-    wp.overload(add_kernel_3d, [wp.array3d(dtype=T), wp.array3d(dtype=T), T])
 
 
 def check_p2p():
@@ -916,31 +901,28 @@ class timing_result_t(ctypes.Structure):
 
 
 class TimingResult:
-    """Timing result for a single activity.
-
-    Parameters:
-        raw_result (warp.utils.timing_result_t): The result structure obtained from C++ (internal use only)
-
-    Attributes:
-        device (warp.Device): The device where the activity was recorded.
-        name (str): The activity name.
-        filter (int): The type of activity (e.g., ``warp.TIMING_KERNEL``).
-        elapsed (float): The elapsed time in milliseconds.
-    """
+    """Timing result for a single activity."""
 
     def __init__(self, device, name, filter, elapsed):
-        self.device = device
-        self.name = name
-        self.filter = filter
-        self.elapsed = elapsed
+        self.device: warp.context.Device = device
+        """The device where the activity was recorded."""
+
+        self.name: str = name
+        """The activity name."""
+
+        self.filter: int = filter
+        """The type of activity (e.g., ``warp.TIMING_KERNEL``)."""
+
+        self.elapsed: float = elapsed
+        """The elapsed time in milliseconds."""
 
 
-def timing_begin(cuda_filter=TIMING_ALL, synchronize=True):
+def timing_begin(cuda_filter: int = TIMING_ALL, synchronize: bool = True) -> None:
     """Begin detailed activity timing.
 
     Parameters:
-        cuda_filter (int): Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
-        synchronize (bool): Whether to synchronize all CUDA devices before timing starts
+        cuda_filter: Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
+        synchronize: Whether to synchronize all CUDA devices before timing starts
     """
 
     if synchronize:
@@ -949,14 +931,14 @@ def timing_begin(cuda_filter=TIMING_ALL, synchronize=True):
     warp.context.runtime.core.cuda_timing_begin(cuda_filter)
 
 
-def timing_end(synchronize=True):
+def timing_end(synchronize: bool = True) -> List[TimingResult]:
     """End detailed activity timing.
 
     Parameters:
-        synchronize (bool): Whether to synchronize all CUDA devices before timing ends
+        synchronize: Whether to synchronize all CUDA devices before timing ends
 
     Returns:
-        list[TimingResult]: A list of ``TimingResult`` objects for all recorded activities.
+        A list of :class:`TimingResult` objects for all recorded activities.
     """
 
     if synchronize:
@@ -995,12 +977,12 @@ def timing_end(synchronize=True):
     return results
 
 
-def timing_print(results, indent=""):
+def timing_print(results: List[TimingResult], indent: str = "") -> None:
     """Print timing results.
 
     Parameters:
-        results (list[TimingResult]): List of ``TimingResult`` objects.
-        indent (str): Optional indentation for the output.
+        results: List of :class:`TimingResult` objects to print.
+        indent: Optional indentation to prepend to all output lines.
     """
 
     if not results:
@@ -1042,7 +1024,7 @@ def timing_print(results, indent=""):
             activity_agg.count += 1
             activity_agg.elapsed += r.elapsed
 
-        print(f"{indent}{r.elapsed :12.6f} ms | {r.device.alias :7s} | {r.name}")
+        print(f"{indent}{r.elapsed:12.6f} ms | {r.device.alias:7s} | {r.name}")
 
     print()
     print(f"{indent}CUDA activity summary:")
@@ -1050,7 +1032,7 @@ def timing_print(results, indent=""):
     print(f"{indent}Total time      | Count   | Activity")
     print(f"{indent}----------------+---------+{activity_dashes}")
     for name, agg in activity_totals.items():
-        print(f"{indent}{agg.elapsed :12.6f} ms | {agg.count :7d} | {name}")
+        print(f"{indent}{agg.elapsed:12.6f} ms | {agg.count:7d} | {name}")
 
     print()
     print(f"{indent}CUDA device summary:")
@@ -1058,4 +1040,4 @@ def timing_print(results, indent=""):
     print(f"{indent}Total time      | Count   | Device")
     print(f"{indent}----------------+---------+{activity_dashes}")
     for device, agg in device_totals.items():
-        print(f"{indent}{agg.elapsed :12.6f} ms | {agg.count :7d} | {device}")
+        print(f"{indent}{agg.elapsed:12.6f} ms | {agg.count:7d} | {device}")

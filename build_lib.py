@@ -19,6 +19,7 @@ import glob
 import os
 import platform
 import shutil
+import subprocess
 
 from warp.build_dll import build_dll, find_host_compiler, machine_architecture, set_msvc_env, verbose_cmd
 from warp.context import export_builtins
@@ -53,7 +54,7 @@ parser.add_argument("--fast_math", action="store_true", help="Enable fast math o
 parser.add_argument("--no_fast_math", dest="fast_math", action="store_false")
 parser.set_defaults(fast_math=False)
 
-parser.add_argument("--quick", action="store_true", help="Only generate PTX code, disable CUTLASS ops")
+parser.add_argument("--quick", action="store_true", help="Only generate PTX code")
 parser.set_defaults(quick=False)
 
 parser.add_argument("--build_llvm", action="store_true", help="Build Clang/LLVM compiler from source, default disabled")
@@ -124,61 +125,33 @@ def find_libmathdx():
         print(f"Using libmathdx path '{libmathdx_path}' provided through the 'LIBMATHDX_HOME' environment variable")
         return libmathdx_path
     else:
-        # First check if a libmathdx folder exists in the target location
-        extract_dir_base = os.path.join(".", "_build", "target-deps")
-        extract_dir = os.path.join(extract_dir_base, "libmathdx")
-
-        if os.path.isdir(extract_dir) and os.listdir(extract_dir):
-            # Directory is not empty, so let's try to use it
-            print(f"Using existing libmathdx at path '{os.path.abspath(extract_dir)}'")
-            return os.path.abspath(extract_dir)
-
-        base_url = "https://developer.nvidia.com/downloads/compute/cublasdx/redist/cublasdx"
-        libmathdx_ver = "0.1.0"
-
+        # Fetch libmathdx from https://developer.nvidia.com/cublasdx-downloads using Packman
         if platform.system() == "Windows":
-            source_url = f"{base_url}/libmathdx-{libmathdx_ver}-win64.zip"
+            packman = "tools\\packman\\packman.cmd"
         elif platform.system() == "Linux":
-            source_url = f"{base_url}/libmathdx-Linux-{machine_architecture()}-{libmathdx_ver}.tar.gz"
+            packman = "./tools/packman/packman"
         else:
-            return None
-
-        import urllib.request
+            raise RuntimeError(f"Unsupported platform for libmathdx: {platform.system()}")
 
         try:
-            local_filename, _ = urllib.request.urlretrieve(source_url)
-        except Exception as e:
-            print(f"Unable to download libmathdx from {source_url}, skipping: {e}")
-            return None
-
-        if platform.system() == "Windows":
-            import zipfile
-
-            try:
-                with zipfile.ZipFile(local_filename, "r") as zip_file:
-                    zip_file.extractall(extract_dir_base)
-
-            except Exception as e:
-                print(f"Unable to extract libmathdx to {extract_dir_base}, skipping: {e}")
-                return None
-
-            try:
-                os.rename(os.path.join(extract_dir_base, f"libmathdx-{libmathdx_ver}-win64"), extract_dir)
-            except Exception:
-                # Unable to rename to preferred directory name, return the intermediate one
-                return os.path.abspath(os.path.join(extract_dir_base, f"libmathdx-{libmathdx_ver}-win64"))
-        else:
-            import tarfile
-
-            try:
-                with tarfile.open(local_filename, "r:gz") as tar_file:
-                    tar_file.extractall(extract_dir_base, filter="data")
-            except Exception as e:
-                print(f"Unable to extract libmathdx to {extract_dir_base}, skipping: {e}")
-                return None
+            subprocess.check_output(
+                [
+                    packman,
+                    "pull",
+                    "--verbose",
+                    "--platform",
+                    f"{platform.system()}-{machine_architecture()}".lower(),
+                    os.path.join(base_path, "deps", "libmathdx-deps.packman.xml"),
+                ],
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(e.output)
+            raise e
 
         # Success
-        return os.path.abspath(extract_dir)
+        return os.path.join(base_path, "_build", "target-deps", "libmathdx", "libmathdx")
 
 
 # setup CUDA Toolkit path
@@ -257,7 +230,6 @@ try:
         "native/sparse.cpp",
         "native/volume.cpp",
         "native/marching.cpp",
-        "native/cutlass_gemm.cpp",
         "native/mathdx.cpp",
         "native/coloring.cpp",
     ]

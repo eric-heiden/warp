@@ -37,27 +37,26 @@ stages:
   stage: build
   image: ubuntu:20.04
   extends:
+    - .runner-build-linux-aarch64
     - .save_warp_bin_artifact
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_aarch64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/release-0.1.2/L1_Nightly/5/libmathdx-Linux-aarch64-0.1.2.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - ./tools/ci/building/build-linux-aarch64/build.sh --debug --no-docker
-  tags:
-    - arch/arm
 
 linux-x86_64 build:
   stage: build
-  image: ubuntu:20.04
+  image: ubuntu:22.04
   extends:
     - .save_warp_bin_artifact
     - .runner-large-build-linux-x86_64
@@ -66,11 +65,11 @@ linux-x86_64 build:
     - apt-get update && apt-get install build-essential curl --no-install-recommends -y
     - >
       curl -k -H "Authorization: Bearer $ARTIFACTORY_ACCESS_TOKEN"
-      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/sandbox/PostMerge/15/libmathdx_build_x86_64_rockylinux8_cuda12.0.0_release.tar.gz
+      $ARTIFACTORY_BASE_URL/sw-cuda-math-mathdx-generic-local/cicd/libmathdx/release-0.1.2/L1_Nightly/5/libmathdx-Linux-x86_64-0.1.2.tar.gz
       -o libmathdx.tar.gz
     - mkdir -p _build/target-deps
     - tar -xzf libmathdx.tar.gz -C _build/target-deps
-    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx-0.1.0-Linux"
+    - export LIBMATHDX_HOME="$CI_PROJECT_DIR/_build/target-deps/libmathdx"
     - gcc --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
@@ -87,12 +86,12 @@ windows-x86_64 build:
       $headers = @{
           "Authorization" = "Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("warp-cicd:${env:LIBMATHDX_REGISTRY_TOKEN}")))"
       }
-      $url = "${CI_API_V4_URL}/projects/141992/packages/generic/libmathdx/main/libmathdx-0.1.0-win64.zip"
+      $url = "${CI_API_V4_URL}/projects/141992/packages/generic/libmathdx/0-1-2-2/libmathdx-win64-x86_64-0.1.2.zip"
       $output = "libmathdx.zip"
       Invoke-WebRequest -Uri $url -Headers $headers -OutFile $output -ErrorAction Stop
     - Expand-Archive -Path libmathdx.zip -DestinationPath _build/target-deps -Force
     - Get-ChildItem -Path "${env:CI_PROJECT_DIR}\_build\target-deps"
-    - $env:LIBMATHDX_HOME = "${env:CI_PROJECT_DIR}\_build\target-deps\libmathdx-0.1.0-win64"
+    - $env:LIBMATHDX_HOME = "${env:CI_PROJECT_DIR}\_build\target-deps\libmathdx"
   script:
     - ./tools/ci/building/build-windows-x86_64/build.bat --debug
 
@@ -118,6 +117,7 @@ mac-x86_64 build:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
+    - .runner-test-linux-aarch64  # TODO: Change to .omni_devplat_arm_docker_gpu
     - .save_test_report_artifact
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
@@ -125,8 +125,6 @@ mac-x86_64 build:
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
-  tags:
-    - arch/arm
 
 linux-x86_64 test:
   stage: test
@@ -187,7 +185,7 @@ mac-x86_64 test:
     - python -m pip install --upgrade usd-core
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
-    - python -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
+    - python -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml -s autodetect --failfast
 
 # ==============================================================================
 # Packaging Jobs
