@@ -305,7 +305,7 @@ class FfiArg:
                 self.dtype_ndim = len(self.dtype_shape)
                 self.jax_scalar_type = wp.dtype_to_jax(type.dtype._wp_scalar_type_)
                 self.jax_ndim = type.ndim + self.dtype_ndim
-            elif type.dtype in wp.types.value_types:
+            elif type.dtype in wp.types.value_types or type.dtype == wp.bool:
                 self.dtype_ndim = 0
                 self.dtype_shape = ()
                 self.jax_scalar_type = wp.dtype_to_jax(type.dtype)
