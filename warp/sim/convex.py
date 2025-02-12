@@ -1,6 +1,5 @@
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
-
 import copy
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 import jax
 import mujoco
@@ -8,7 +7,7 @@ import numpy as np
 from absl.testing import absltest
 from jax import numpy as jp
 from mujoco import mjx
-from mujoco.mjx._src.types import Data, Model
+from mujoco.mjx._src.types import Model
 
 import warp as wp
 
@@ -18,11 +17,25 @@ import warp as wp
 # wp.config.verify_fp = True
 # wp.clear_kernel_cache()
 
+
+snippet = """
+    __syncthreads();
+    """
+
+
+@wp.func_native(snippet)
+def sync_threads():
+    """Synchronize threads."""
+    return
+
+
 wp.config.enable_backward = False
-wp.set_module_options({
-    "enable_backward": False,
-    "max_unroll": 1,
-})
+wp.set_module_options(
+    {
+        "enable_backward": False,
+        "max_unroll": 1,
+    }
+)
 
 mjxGEOM_PLANE = 0
 mjxGEOM_HFIELD = 1
@@ -953,8 +966,7 @@ def gjk_epa_pipeline(
                     j2 = (j + 1) % v1count
                     is_in = (
                         is_in
-                        and (v1[j2][0] - v1[j][0]) * (m1a[1] - v1[j][1])
-                        - (v1[j2][1] - v1[j][1]) * (m1a[0] - v1[j][0])
+                        and (v1[j2][0] - v1[j][0]) * (m1a[1] - v1[j][1]) - (v1[j2][1] - v1[j][1]) * (m1a[0] - v1[j][0])
                         >= 0.0
                     )
                     if not is_in:
@@ -1154,7 +1166,7 @@ def gjk_epa_pipeline(
         nmodel: int,
         max_contact_points_per_env: int,
         type_pair_env_id: wp.array(dtype=int),
-        type_pair_geom_id: wp.array(dtype=int),
+        type_pair_geom_id: wp.array(dtype=int, ndim=2),
         type_pair_count: wp.array(dtype=int),
         type_pair_offset: wp.array(dtype=int),
         geom_xpos: wp.array(dtype=wp.vec3),
@@ -1176,6 +1188,7 @@ def gjk_epa_pipeline(
         contact_normal: wp.array(dtype=wp.vec3),
     ):
         tid = wp.tid()
+
         npair = type_pair_count[group_key]
         if tid >= npair:
             return
@@ -1190,8 +1203,8 @@ def gjk_epa_pipeline(
             return
 
         model_id = env_id % nmodel
-        g1 = type_pair_geom_id[type_pair_id * 2]
-        g2 = type_pair_geom_id[type_pair_id * 2 + 1]
+        g1 = type_pair_geom_id[type_pair_id, 0]
+        g2 = type_pair_geom_id[type_pair_id, 1]
 
         simplex, normal = _gjk(
             env_id,
@@ -1206,6 +1219,7 @@ def gjk_epa_pipeline(
             convex_vert,
             convex_vert_offset,
         )
+
         # TODO(btaba): get depth from GJK, conditionally run EPA.
         depth, normal = _epa(
             env_id,
@@ -1270,7 +1284,7 @@ def gjk_epa_pipeline(
 
 
 def gjk_epa_dense(
-    geom_pair: wp.array(dtype=int),
+    geom_pair: wp.array(dtype=int, ndim=2),
     geom_xpos: wp.array(dtype=wp.vec3),
     geom_xmat: wp.array(dtype=wp.mat33),
     geom_size: wp.array(dtype=wp.vec3),
@@ -1544,7 +1558,6 @@ def gjk_epa(
         with wp.ScopedTimer("gjk_epa_dense_graph"):
             wp.capture_launch(graph)
 
-
     return dist.numpy(), pos.numpy(), normal.numpy()
 
 
@@ -1572,7 +1585,7 @@ def _narrowphase(
     n_geom_types: int,
     max_contact_points_per_env: int,
     type_pair_env_id: wp.array(dtype=int),
-    type_pair_geom_id: wp.array(dtype=int),
+    type_pair_geom_id: wp.array(dtype=int, ndim=2),
     type_pair_count: wp.array(dtype=int),
     type_pair_offset: wp.array(dtype=int),
     geom_xpos: wp.array(dtype=wp.vec3),
@@ -1594,13 +1607,16 @@ def _narrowphase(
     contact_normal: wp.array(dtype=wp.vec3),
 ):
     group_key = type1 + type2 * n_geom_types
-    npair = type_pair_count[group_key]
+    wp.synchronize()
+    type_pair_count_host = type_pair_count.numpy()
+    wp.synchronize()
+    npair = int(type_pair_count_host[group_key])
     if npair == 0:
         return
 
-    blockSize = 256
-    grid_size = (npair + blockSize - 1) / blockSize
-    ncon = max_contact_points_map[type1][type2]
+    blockSize = int(256)
+    grid_size = int((npair + blockSize - 1) // blockSize)
+    # ncon = max_contact_points_map[type1][type2]
     pipeline = gjk_epa_pipeline(
         type1,
         type2,
@@ -1644,11 +1660,78 @@ def _narrowphase(
     )
 
 
-# def narrowphase(cudaStream_t s, CollisionInput& in, CollisionOutput& out) {
-#     for t2 in range(mjxGEOM_size):
-#         for t1 in range(t1):
+def narrowphase(
+    gjk_iteration_count: int,
+    epa_iteration_count: int,
+    nenv: int,
+    ngeom: int,
+    nmodel: int,
+    n_geom_types: int,
+    max_contact_points_per_env: int,
+    type_pair_env_id: wp.array(dtype=int),
+    type_pair_geom_id: wp.array(dtype=int, ndim=2),
+    type_pair_count: wp.array(dtype=int),
+    type_pair_offset: wp.array(dtype=int),
+    geom_xpos: wp.array(dtype=wp.vec3),
+    geom_xmat: wp.array(dtype=wp.mat33),
+    geom_size: wp.array(dtype=wp.vec3),
+    geom_dataid: wp.array(dtype=wp.int32),
+    convex_vert: wp.array(dtype=wp.vec3),
+    convex_vert_offset: wp.array(dtype=int),
+    epa_best_count: int,
+    depth_extension: float,
+    multi_polygon_count: int,
+    multi_tilt_angle: float,
+    # outputs
+    env_contact_counter: wp.array(dtype=int),
+    contact_geom1: wp.array(dtype=int),
+    contact_geom2: wp.array(dtype=int),
+    contact_dist: wp.array(dtype=float),
+    contact_pos: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
+):
+    """
+    Perform the narrowphase collision detection based on geometry types.
 
-#             _narrowphase(t1, t2)(s, in, out, t1, t2)
+    Args:
+        s: CUDA stream.
+        input (CollisionInput): Input collision data.
+        output (CollisionOutput): Output collision data.
+    """
+
+    for t2 in range(mjxGEOM_size):
+        for t1 in range(t2 + 1):
+            _narrowphase(
+                t1,
+                t2,
+                gjk_iteration_count,
+                epa_iteration_count,
+                nenv,
+                ngeom,
+                nmodel,
+                n_geom_types,
+                max_contact_points_per_env,
+                type_pair_env_id,
+                type_pair_geom_id,
+                type_pair_count,
+                type_pair_offset,
+                geom_xpos,
+                geom_xmat,
+                geom_size,
+                geom_dataid,
+                convex_vert,
+                convex_vert_offset,
+                epa_best_count,
+                depth_extension,
+                multi_polygon_count,
+                multi_tilt_angle,
+                env_contact_counter,
+                contact_geom1,
+                contact_geom2,
+                contact_dist,
+                contact_pos,
+                contact_normal,
+            )
 
 
 def _collide(
