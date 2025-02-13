@@ -202,7 +202,7 @@ def jax_kernel_callback(call_frame):
                 metadata_ext.contents.metadata.contents.api_version.major_version = 0
                 metadata_ext.contents.metadata.contents.api_version.minor_version = 1
                 # Turn on CUDA graphs for this handler.
-                metadata_ext.contents.metadata.contents.traits = XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
+                # metadata_ext.contents.metadata.contents.traits = () #XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
                 return None
 
         if call_frame.contents.attrs.size != 1 or call_frame.contents.attrs.types[0] != XLA_FFI_AttrType.STRING:
@@ -465,9 +465,9 @@ class FfiCallable:
                     metadata_ext.contents.metadata.contents.api_version.major_version = 0
                     metadata_ext.contents.metadata.contents.api_version.minor_version = 1
                     # Turn on CUDA graphs for this handler.
-                    metadata_ext.contents.metadata.contents.traits = (
-                        XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
-                    )
+                    # metadata_ext.contents.metadata.contents.traits = (
+                    #     # XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
+                    # )
                     return None
 
             attrs = decode_attrs(call_frame.contents.attrs)
@@ -550,9 +550,9 @@ def register_ffi_callback(name, fn):
                     metadata_ext.contents.metadata.contents.api_version.major_version = 0
                     metadata_ext.contents.metadata.contents.api_version.minor_version = 1
                     # Turn on CUDA graphs for this handler.
-                    metadata_ext.contents.metadata.contents.traits = (
-                        XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
-                    )
+                    # metadata_ext.contents.metadata.contents.traits = (
+                    #     # XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
+                    # )
                     return None
 
             attrs = decode_attrs(call_frame.contents.attrs)
