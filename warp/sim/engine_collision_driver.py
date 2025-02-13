@@ -147,7 +147,7 @@ def get_body_pairs_nxn(
     body_weldid: wp.array(dtype=int),
     body_contype: wp.array(dtype=int),
     body_conaffinity: wp.array(dtype=int),
-    body_has_plane: wp.array(dtype=int),
+    body_has_plane: wp.array(dtype=bool),
     exclude_signature: wp.array(dtype=int),
     dyn_body_aamm: wp.array(dtype=float, ndim=2),
     col_body_pair: wp.array(dtype=int, ndim=2),
@@ -254,6 +254,14 @@ def transform_point(mat: Mat3x4, pos: wp.vec3) -> wp.vec3:
     z = wp.dot(wp.vec3(mat.row2[0], mat.row2[1], mat.row2[2]), pos) + mat.row2[3]
     return wp.vec3(x, y, z)
 
+@wp.func
+def max3(a: wp.vec3, b: wp.vec3):
+    return wp.vec3(wp.max(a.x, b.x), wp.max(a.y, b.y), wp.max(a.z, b.z))
+
+@wp.func
+def min3(a: wp.vec3, b: wp.vec3):
+    return wp.vec3(wp.min(a.x, b.x), wp.min(a.y, b.y), wp.min(a.z, b.z))
+
 
 @wp.kernel
 def get_dyn_geom_aabb(
@@ -273,7 +281,9 @@ def get_dyn_geom_aabb(
     env_id = tid // ngeom
     gid = tid % ngeom
 
-    mat = xposmat_to_float4(geom_xpos, geom_xmat, env_id * ngeom + gid)
+    # mat = xposmat_to_float4(geom_xpos, geom_xmat, env_id * ngeom + gid)
+    pos = geom_xpos[env_id * ngeom + gid]
+    rot = geom_xmat[env_id * ngeom + gid]
 
     aabb = wp.vec3(geom_aabb[gid, 3], geom_aabb[gid, 4], geom_aabb[gid, 5])
     aabb_pos = wp.vec3(geom_aabb[gid, 0], geom_aabb[gid, 1], geom_aabb[gid, 2])
@@ -289,16 +299,17 @@ def get_dyn_geom_aabb(
             corner.y = -corner.y
         if i < 4:
             corner.z = -corner.z
-        corner_world = transform_point(mat, corner + aabb_pos)
-        aabb_max = wp.max(aabb_max, corner_world)
-        aabb_min = wp.min(aabb_min, corner_world)
+        # corner_world = transform_point(mat, corner + aabb_pos)
+        corner_world = pos + rot @ (corner + aabb_pos)
+        aabb_max = max3(aabb_max, corner_world)
+        aabb_min = min3(aabb_min, corner_world)
 
-    dyn_aabb[tid, 0] = aabb_min[0]
-    dyn_aabb[tid, 1] = aabb_min[1]
-    dyn_aabb[tid, 2] = aabb_min[2]
-    dyn_aabb[tid, 3] = aabb_max[0]
-    dyn_aabb[tid, 4] = aabb_max[1]
-    dyn_aabb[tid, 5] = aabb_max[2]
+    dyn_aabb[tid, 0] = pos[0] + aabb_min[0]
+    dyn_aabb[tid, 1] = pos[1] + aabb_min[1]
+    dyn_aabb[tid, 2] = pos[2] + aabb_min[2]
+    dyn_aabb[tid, 3] = pos[0] + aabb_max[0]
+    dyn_aabb[tid, 4] = pos[1] + aabb_max[1]
+    dyn_aabb[tid, 5] = pos[2] + aabb_max[2]
 
 
 @wp.func
@@ -690,7 +701,7 @@ class CollisionInput:
         self.body_conaffinity = wp.array(m.body_conaffinity, dtype=wp.int32)
         self.body_geomadr = wp.array(m.body_geomadr, dtype=wp.int32)
         self.body_geomnum = wp.array(m.body_geomnum, dtype=wp.int32)
-        self.body_has_plane = wp.array(_get_body_has_plane(m), dtype=wp.int32)
+        self.body_has_plane = wp.array(_get_body_has_plane(m), dtype=bool)
         self.pair_geom1 = wp.array(m.pair_geom1, dtype=wp.int32)
         self.pair_geom2 = wp.array(m.pair_geom2, dtype=wp.int32)
         self.exclude_signature = wp.array(m.exclude_signature, dtype=wp.int32)
@@ -979,10 +990,55 @@ def collision(
     solreffriction: wp.array(dtype=float, ndim=2),
     solimp: wp.array(dtype=float, ndim=2),
 ):
+    print("collision")
+    print("ngeom", ngeom)
     if ngeom == 0:
         return True
 
     device = contact_dist.device
+
+    print("init...")
+
+    # XXX this is annoying
+    geom_xpos = geom_xpos.reshape(-1)
+    geom_xmat = geom_xmat.reshape(-1)
+    geom_size = geom_size.reshape(-1)
+    geom_type = geom_type.reshape(-1)
+    geom_contype = geom_contype.reshape(-1)
+    geom_conaffinity = geom_conaffinity.reshape(-1)
+    geom_priority = geom_priority.reshape(-1)
+    geom_margin = geom_margin.reshape(-1)
+    geom_gap = geom_gap.reshape(-1)
+    geom_solmix = geom_solmix.reshape(-1)
+    geom_friction = geom_friction.reshape((-1, 3))
+    geom_solref = geom_solref.reshape((-1, 2))
+    geom_solimp = geom_solimp.reshape((-1, 5))
+    geom_aabb = geom_aabb.reshape((-1, 6))
+    geom_rbound = geom_rbound.reshape(-1)
+    geom_dataid = geom_dataid.reshape(-1)
+    body_parentid = body_parentid.reshape(-1)
+    body_weldid = body_weldid.reshape(-1)
+    body_contype = body_contype.reshape(-1)
+    body_conaffinity = body_conaffinity.reshape(-1)
+    body_geomadr = body_geomadr.reshape(-1)
+    body_geomnum = body_geomnum.reshape(-1)
+    body_has_plane = body_has_plane.reshape(-1)
+    exclude_signature = exclude_signature.reshape(-1)
+    convex_vert = convex_vert.reshape(-1)
+    convex_vert_offset = convex_vert_offset.reshape(-1)
+    type_pair_offset = type_pair_offset.reshape(-1)
+    type_pair_count = type_pair_count.reshape(-1)
+
+    contact_geom1 = contact_geom1.reshape(-1)
+    contact_geom2 = contact_geom2.reshape(-1)
+    contact_dist = contact_dist.reshape(-1)
+    contact_pos = contact_pos.reshape(-1)
+    contact_normal = contact_normal.reshape(-1)
+    includemargin = includemargin.reshape(-1)
+    friction = friction.reshape((-1, 5))
+    solref = solref.reshape((-1, 2))
+    solreffriction = solreffriction.reshape((-1, 2))
+    solimp = solimp.reshape((-1, 5))
 
     # Initialize the output data
     wp.launch(
