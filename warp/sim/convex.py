@@ -204,10 +204,14 @@ def gjk_support_sphere(
     support_pt = info.pos + info.radius * dir
     return wp.dot(support_pt, dir), support_pt
 
+@wp.func
+def sign(x: float):
+    # XXX we have to match the sign function from CUDA here
+    return wp.where(x > 0, 1.0, -1.0)
 
 @wp.func
 def sign(x: wp.vec3):
-    return wp.vec3(wp.sign(x[0]), wp.sign(x[1]), wp.sign(x[2]))
+    return wp.vec3(sign(x[0]), sign(x[1]), sign(x[2]))
 
 
 @wp.func
@@ -232,7 +236,7 @@ def gjk_support_capsule(
     # start with sphere
     res = local_dir * info.radius
     # add cylinder contribution
-    res[2] += wp.sign(local_dir[2]) * info.halfsize
+    res[2] += sign(local_dir[2]) * info.halfsize
     support_pt = info.rot @ res + info.pos
     return wp.dot(support_pt, dir), support_pt
 
@@ -269,7 +273,7 @@ def gjk_support_cylinder(
         res[1] = local_dir[1] / d * info.radius
 
     # set result in Z direction
-    res[2] = wp.sign(local_dir[2]) * info.halfsize
+    res[2] = sign(local_dir[2]) * info.halfsize
     support_pt = info.rot @ res + info.pos
     return wp.dot(support_pt, dir), support_pt
 
@@ -1172,7 +1176,7 @@ def gjk_epa_pipeline(
         geom_xpos: wp.array(dtype=wp.vec3),
         geom_xmat: wp.array(dtype=wp.mat33),
         geom_size: wp.array(dtype=wp.vec3),
-        geom_dataid: wp.array(dtype=wp.int32),
+        geom_dataid: wp.array(dtype=int),
         convex_vert: wp.array(dtype=wp.vec3),
         convex_vert_offset: wp.array(dtype=int),
         epa_best_count: int,
@@ -1205,6 +1209,7 @@ def gjk_epa_pipeline(
         model_id = env_id % nmodel
         g1 = type_pair_geom_id[type_pair_id, 0]
         g2 = type_pair_geom_id[type_pair_id, 1]
+        wp.printf("g1: %d, g2: %d\n", g1, g2)
 
         simplex, normal = _gjk(
             env_id,
@@ -1614,8 +1619,9 @@ def _narrowphase(
     if npair == 0:
         return
 
-    blockSize = int(256)
-    grid_size = int((npair + blockSize - 1) // blockSize)
+    # blockSize = int(256)
+    # grid_size = int((npair + blockSize - 1) // blockSize)
+    grid_size = npair
     # ncon = max_contact_points_map[type1][type2]
     pipeline = gjk_epa_pipeline(
         type1,
@@ -1623,6 +1629,7 @@ def _narrowphase(
         gjk_iteration_count,
         epa_iteration_count,
     )
+    # print("type_pair_geom_id:", type_pair_geom_id.numpy())
     wp.launch(
         pipeline.gjk_epa_sparse,
         grid_size,
@@ -1656,7 +1663,7 @@ def _narrowphase(
             contact_normal,
         ],
         device=geom_xpos.device,
-        block_dim=blockSize,
+        # block_dim=blockSize,
     )
 
 
@@ -1903,36 +1910,36 @@ class EngineCollisionConvexTest(absltest.TestCase):
     #     pos = pos[idx]
     #     np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
-    # _CONVEX_CONVEX = """
-    #     <mujoco>
-    #         <asset>
-    #             <mesh name="poly"
-    #             vertex="0.3 0 0  0 0.5 0  -0.3 0 0  0 -0.5 0  0 -1 1  0 1 1"
-    #             face="0 1 5  0 5 4  0 4 3  3 4 2  2 4 5  1 2 5  0 2 1  0 3 2"/>
-    #         </asset>
-    #         <worldbody>
-    #             <body pos="0.0 2.0 0.35" euler="0 0 90">
-    #                 <freejoint/>
-    #                 <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-    #             </body>
-    #             <body pos="0.0 2.0 2.281" euler="180 0 0">
-    #                 <freejoint/>
-    #                 <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
-    #             </body>
-    #         </worldbody>
-    #     </mujoco>
-    # """
+    _CONVEX_CONVEX = """
+        <mujoco>
+            <asset>
+                <mesh name="poly"
+                vertex="0.3 0 0  0 0.5 0  -0.3 0 0  0 -0.5 0  0 -1 1  0 1 1"
+                face="0 1 5  0 5 4  0 4 3  3 4 2  2 4 5  1 2 5  0 2 1  0 3 2"/>
+            </asset>
+            <worldbody>
+                <body pos="0.0 2.0 0.35" euler="0 0 90">
+                    <freejoint/>
+                    <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
+                </body>
+                <body pos="0.0 2.0 2.281" euler="180 0 0">
+                    <freejoint/>
+                    <geom size="0.2 0.2 0.2" type="mesh" mesh="poly"/>
+                </body>
+            </worldbody>
+        </mujoco>
+    """
 
-    # def test_convex_convex(self):
-    #     """Tests convex-convex collisions."""
-    #     d, (dist, pos, n) = _collide(self._CONVEX_CONVEX)
+    def test_convex_convex(self):
+        """Tests convex-convex collisions."""
+        d, (dist, pos, n) = _collide(self._CONVEX_CONVEX)
 
-    #     np.testing.assert_array_less(dist, 0)
-    #     np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
-    #     np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
-    #     idx = np.lexsort((pos[:, 0], pos[:, 1]))
-    #     pos = pos[idx]
-    #     np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
+        np.testing.assert_array_less(dist, 0)
+        np.testing.assert_array_almost_equal(dist[0], d.contact.dist)
+        np.testing.assert_array_almost_equal(n.squeeze(), d.contact.frame[0, :3], decimal=5)
+        idx = np.lexsort((pos[:, 0], pos[:, 1]))
+        pos = pos[idx]
+        np.testing.assert_array_almost_equal(pos[0], d.contact.pos[0])
 
     _SPHERE_SPHERE = """
         <mujoco>
@@ -2064,7 +2071,8 @@ if __name__ == "__main__":
     assert wp.is_cuda_available(), "CUDA is not available."
 
     # absltest.main()
-    # test = EngineCollisionConvexTest()
+    test = EngineCollisionConvexTest()
+    test.test_convex_convex()
     # test.test_call_batched_model_and_data()
 
     # profile_gjk_epa(8)
@@ -2074,7 +2082,7 @@ if __name__ == "__main__":
     # profile_gjk_epa(1)
     # profile_gjk_epa(100)
     # profile_gjk_epa(10000)
-    profile_gjk_epa(100000)
+    # profile_gjk_epa(100000)
     # profile_gjk_epa(1000000)
     # profile_gjk_epa(1000000)
     # profile_gjk_epa(10000000)
