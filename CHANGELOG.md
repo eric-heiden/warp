@@ -10,6 +10,14 @@
   ([GH-446](https://github.com/NVIDIA/warp/issues/446)).
 - Add 2D SVD `svd2` to support 2d simulations ([GH-436](https://github.com/NVIDIA/warp/issues/436)).
 - Add JAX FFI support ([GH-511](https://github.com/NVIDIA/warp/issues/511)).
+- Add `Launch` object support for to storing and replaying adjoint kernel launches
+  ([GH-449](https://github.com/NVIDIA/warp/issues/449)).
+- Add [documentation](https://nvidia.github.io/warp/modules/runtime.html#launch-objects) for `Launch` objects
+  ([GH-428](https://github.com/NVIDIA/warp/issues/428)).
+- Add Array Overwrites section to Differentiability documentation ([docs](https://nvidia.github.io/warp/modules/differentiability.html#array-overwrites)).
+- Add `wp.randu()` for random uint32 generation.
+- Add `wp.matrix_from_cols()` and `wp.matrix_from_rows()` ([GH-728](https://github.com/NVIDIA/warp/issues/278)).
+- Add a `wp.transform_from_matrix()` built-in ([GH-211](https://github.com/NVIDIA/warp/issues/211)).
 
 ### Changed
 
@@ -18,7 +26,13 @@
 - `warp.fem.interpolate()` can now build Jacobian sparse matrices of interpolated functions with respect to a trial field
 - Vector/matrix/quaternion component assignment operations compile and run faster in the backward pass. Assignment should only happen once per component.
 - Multiple warp.sparse routines (`bsr_set_from_triplets`, `bsr_assign`, `bsr_axpy`, `bsr_mm`) now accept a `masked` flag to discard any non-zero not already present in the destination matrix
+- `warp.sparse.bsr_assign()` no longer requires source and destination block shapes to evenly divide each other
+- `warp.sim.Control` no longer has a `model` attribute ([GH-487](https://github.com/NVIDIA/warp/issues/487))..
+- `warp.sim.Control.reset()` now zeros-out the controls and is deprecated. Use `warp.sim.Control.clear()` instead.
 - `warp.sparse.bsr_assign()` now longer requires source and destination block shapes to evenly divide each other
+- Deprecate constructing a matrix from vectors using `wp.matrix()`.
+- Extend `wp.expect_near()` to support all vectors and quaternions.
+- Extend `wp.quat_from_matrix()` to support 4x4 matrices.
 
 ### Fixed
 
@@ -27,6 +41,17 @@
 - Fix rendering of arrows with different `up_axis`, `color` in `OpenGLRenderer` ([GH-448](https://github.com/NVIDIA/warp/issues/448)).
 - Fix fp64 accuracy of thread-level matrix-matrix multiplications ([GH-489](https://github.com/NVIDIA/warp/issues/489))
 - Fix an error causing `verify_autograd_array_access` config setting to fail to detect overwrites in generic Warp functions.
+- Fix an error in capturing the VBDIntegrator with CUDA graphs when `handle_self_contact` is enabled ([GH-441](https://github.com/NVIDIA/warp/issues/441)).
+- Fix `wp.randi()` documentation to show correct output range of `[-2^31, 2^31)`.
+- Fix `wp.array()` not initializing from arrays defining a CUDA array interface when the target device is CPU.
+- Fix for unaligned loads with offset 2D tiles in `wp.tile_load()`
+- 
+- Fix an error of AABB computation in `wp.collide.TriMeshCollisionDetector`.
+- Fix URDF-imported planar joints not being set with the intended `target_ke`, `target_kd`, and `mode` parameters
+  ([GH-454](https://github.com/NVIDIA/warp/issues/454)).
+- Fix `ModelBuilder.add_builder()` to use correct offsets for `ModelBuilder.joint_parent` and `ModelBuilder.joint_child` ([GH-432](https://github.com/NVIDIA/warp/issues/432))
+- Fix incorrect contact point allocation resulting from `count_contact_points()` for box-sphere and box-capsule collisions.
+- Fix capsule error when using DLPack interop after `jax_kernel()` ([GH-547](https://github.com/NVIDIA/warp/issues/547)).
 
 ## [1.6.0] - 2025-02-03
 

@@ -364,9 +364,14 @@ class Control:
     should generally be created using the :func:`Model.control()` function.
     """
 
-    def __init__(self, model: Model):
-        self.model: Model = model
-        """Model to use as a reference for the control inputs."""
+    def __init__(self, model: Model = None):
+        if model:
+            wp.utils.warn(
+                "Passing arguments to Control's __init__ is deprecated\n"
+                "and will be disallowed in a future version. Use Control() without arguments\ninstead.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
 
         self.joint_act: Optional[wp.array] = None
         """Array of joint control inputs with shape ``(joint_axis_count,)`` and type ``float``."""
@@ -380,17 +385,28 @@ class Control:
         self.muscle_activations: Optional[wp.array] = None
         """Array of muscle activations with shape ``(muscle_count,)`` and type ``float``."""
 
-    def reset(self) -> None:
-        """Reset the control inputs to their initial state defined in :attr:`model`."""
+    def clear(self) -> None:
+        """Reset the control inputs to zero."""
 
         if self.joint_act is not None:
-            self.joint_act.assign(self.model.joint_act)
+            self.joint_act.zero_()
         if self.tri_activations is not None:
-            self.tri_activations.assign(self.model.tri_activations)
+            self.tri_activations.zero_()
         if self.tet_activations is not None:
-            self.tet_activations.assign(self.model.tet_activations)
+            self.tet_activations.zero_()
         if self.muscle_activations is not None:
-            self.muscle_activations.assign(self.model.muscle_activations)
+            self.muscle_activations.zero_()
+
+    def reset(self) -> None:
+        """Reset the control inputs to zero."""
+
+        wp.utils.warn(
+            "Control.reset() is deprecated and will be removed\nin a future version. Use Control.clear() instead.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+
+        self.clear()
 
 
 def compute_shape_mass(type, scale, src, density, is_solid, thickness):
@@ -870,7 +886,7 @@ class Model:
         Returns:
             Control: The control object
         """
-        c = Control(self)
+        c = Control()
         if requires_grad is None:
             requires_grad = self.requires_grad
         if clone_variables:
@@ -1399,6 +1415,8 @@ class ModelBuilder:
                 # apply offset transform to root bodies
                 if xform is not None:
                     self.shape_transform.append(xform * builder.shape_transform[s])
+                else:
+                    self.shape_transform.append(builder.shape_transform[s])
 
         for b, shapes in builder.body_shapes.items():
             self.body_shapes[b + start_body_idx] = [s + start_shape_idx for s in shapes]
@@ -1421,18 +1439,16 @@ class ModelBuilder:
 
             # offset the indices
             self.articulation_start.extend([a + self.joint_count for a in builder.articulation_start])
-            self.joint_parent.extend([p + self.joint_count if p != -1 else -1 for p in builder.joint_parent])
-            self.joint_child.extend([c + self.joint_count for c in builder.joint_child])
+            self.joint_parent.extend([p + self.body_count if p != -1 else -1 for p in builder.joint_parent])
+            self.joint_child.extend([c + self.body_count for c in builder.joint_child])
 
             self.joint_q_start.extend([c + self.joint_coord_count for c in builder.joint_q_start])
             self.joint_qd_start.extend([c + self.joint_dof_count for c in builder.joint_qd_start])
 
             self.joint_axis_start.extend([a + self.joint_axis_total_count for a in builder.joint_axis_start])
 
-        joint_children = set(builder.joint_child)
         for i in range(builder.body_count):
-            if xform is not None and i not in joint_children:
-                # rigid body is not attached to a joint, so apply input transform directly
+            if xform is not None:
                 self.body_q.append(xform * builder.body_q[i])
             else:
                 self.body_q.append(builder.body_q[i])

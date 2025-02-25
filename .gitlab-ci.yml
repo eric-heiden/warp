@@ -220,12 +220,12 @@ linux-aarch64 test:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
-    - .runner-test-linux-aarch64  # TODO: Change to .omni_devplat_arm_docker_gpu
+    - .omni_devplat_arm_docker_gpu
     - .test_common_main
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install coverage[toml]==7.6.10  # 7.6.11 seems to have a bug
+    - python -m pip install -U "coverage[toml]" "jax[cuda12]"
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
@@ -244,7 +244,7 @@ linux-aarch64 test jetson:
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install -U "jax[cuda12]"
+    - python -m pip install -U "jax[cuda12]" 
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
@@ -276,6 +276,11 @@ linux-x86_64 test:
     - export WARP_DISABLE_P2P_TESTS=1
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    # Upload report to Codecov
+    - git config --global --add safe.directory $CI_PROJECT_DIR
+    - python -m pip install codecov-cli
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --plugin pycoverage -F unittests -f coverage.xml
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --report-type test_results -f rspec.xml
 
 # Note that for throughput reasons this runs on a single-GPU runner
 windows-x86_64 test:
@@ -299,6 +304,12 @@ windows-x86_64 test:
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    # Upload report to Codecov
+    - git config --global --add safe.directory $env:CI_PROJECT_DIR
+    - python -m pip install codecov-cli
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --plugin pycoverage -F unittests -f coverage.xml
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --report-type test_results -f rspec.xml
+
 
 mac-x86_64 test:
   stage: test
@@ -366,6 +377,7 @@ windows-x86_64 test mgpu:
     - if: $CI_COMMIT_TAG
     - when: manual # Can be triggered in all other scenarios
       allow_failure: true
+  allow_failure: true # GitLab runners are too unstable to run this job
   before_script:
     - !reference [.snippets, define-powershell-GetTime]
     - Write-Output "$([char]27)[0Ksection_start:$(GetTime):install_dependencies[collapsed=true]$([char]13)$([char]27)[0KInstalling dependencies"
@@ -502,17 +514,19 @@ linux-x86_64 asv:
     - source _venv/bin/activate
     - python -m pip install --upgrade pip
     - python -m pip install asv
-    - export GIT_LFS_SKIP_SMUDGE=1
-    - git config --global --add safe.directory '*' 
-    - git fetch origin main
-    # Make sure the main branch can be checked out by asv
-    - git checkout -f main
+    - GIT_LFS_SKIP_SMUDGE=1
+    # Make sure the comparison ref can be checked out by asv
+    - COMPARE_REF="${CI_MERGE_REQUEST_TARGET_BRANCH_SHA:-${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}}"
+    - 'echo "COMPARE_REF value: ${COMPARE_REF}"' 
+    - git config --global --add safe.directory $CI_PROJECT_DIR
+    - git fetch origin $COMPARE_REF
+    - git checkout -f $COMPARE_REF
     - git checkout -f $CI_COMMIT_SHA
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - cd asv
     - asv machine --yes
-    - asv continuous --interleave-rounds --append-samples --no-only-changed -f 1.15 --bench '^(?!api)' main $CI_COMMIT_SHA
+    - asv continuous --interleave-rounds --append-samples --no-only-changed -f 1.15 --bench '^(?!api)' $COMPARE_REF $CI_COMMIT_SHA
   allow_failure: True # Can make success required after we have tested this job more
 
 # ==============================================================================
@@ -604,6 +618,31 @@ cuda 11 build and test:
   needs: [trigger cuda 11 pipeline]
   trigger:
     include: /.gitlab/ci/cuda-11-build-and-test.yml
+  extends:
+    - .trigger_common
+
+trigger kit extensions pipeline:
+  stage: test
+  image: busybox
+  extends:
+    - .runner-utility-linux-x86_64
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH =~ /^release-.*/
+    - when: manual # Can be triggered in all other scenarios
+      allow_failure: true
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - echo "Run this job to test the kit extensions."
+
+# Kit Extensions
+kit extensions:
+  stage: child pipelines
+  needs: [trigger kit extensions pipeline]
+  trigger:
+    include: /.gitlab/ci/kit-extensions.yml
   extends:
     - .trigger_common
 

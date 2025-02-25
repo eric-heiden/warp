@@ -63,6 +63,15 @@ pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
 
 Note that the nightly builds are built with the CUDA 12 runtime and are not published for macOS.
 
+If you plan to install nightly builds regularly, you can simplify future installations by adding NVIDIA's package
+repository as an extra index via the `PIP_EXTRA_INDEX_URL` environment variable. For example:
+
+```text
+export PIP_EXTRA_INDEX_URL="https://pypi.nvidia.com"
+```
+
+This ensures the index is automatically used for `pip` commands, avoiding the need to specify it explicitly.
+
 ### CUDA Requirements
 
 * Warp packages built with CUDA Toolkit 11.x require NVIDIA driver 470 or newer.
@@ -279,25 +288,13 @@ python -m warp.tests
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_inverse_kinematics.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_inverse_kinematics.png"></a></td>
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_spring_cage.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_spring_cage.png"></a></td>
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_trajectory.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_trajectory.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_walker.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_softbody_properties.png"></a></td>
         </tr>
         <tr>
             <td align="center">inverse kinematics</td>
             <td align="center">spring cage</td>
             <td align="center">trajectory</td>
-            <td align="center">walker</td>
-        </tr>
-        <tr>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_softbody_properties.png"></a></td>
-            <td></td>
-            <td></td>
-            <td></td>
-        </tr>
-        <tr>
             <td align="center">soft body properties</td>
-            <td align="center"></td>
-            <td align="center"></td>
-            <td align="center"></td>
         </tr>
     </tbody>
 </table>
@@ -353,6 +350,23 @@ python -m warp.tests
             <td align="center"></td>
             <td align="center"></td>
             <td align="center"></td>
+        </tr>
+    </tbody>
+</table>
+
+### warp/examples/tile
+
+<table>
+    <tbody>
+        <tr>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_mlp.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_nbody.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_nbody.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_walker.png"></a></td>
+        </tr>
+        <tr>
+            <td align="center">mlp</td>
+            <td align="center">nbody</td>
+            <td align="center">walker</td>
         </tr>
     </tbody>
 </table>
