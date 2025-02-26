@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Collision driver in CUDA."""
+"""JAX interoperability tools for collision pipeline."""
 
 import collections
 import itertools
@@ -21,6 +21,7 @@ from typing import Iterator, Tuple, Union
 import jax
 import mujoco
 import numpy as np
+from convex import gjk_epa_dense
 from engine_collision_driver import collision
 from jax import numpy as jp
 from mujoco.mjx._src.math import make_frame
@@ -28,34 +29,41 @@ from mujoco.mjx._src.types import Contact, Data, DisableBit, GeomType, Model
 
 from warp.jax_experimental.ffi import jax_callable
 
-jax_collision = jax_callable(collision, num_outputs=10, vmap_method="legacy_vectorized")
+_jax_gjk_epa = jax_callable(gjk_epa_dense, num_outputs=3, vmap_method="legacy_vectorized")
+_jax_collision = jax_callable(collision, num_outputs=10, vmap_method="legacy_vectorized")
 
 
+# def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
+#     convex_vert, convex_vert_offset = [], [0]
+#     nvert = 0
+#     batch_dim = 0
+#     for mesh in m.mesh_convex:
+#         if mesh is not None:
+#             if mesh.vert.ndim == 3:
+#                 batch_dim = mesh.vert.shape[0]
+#                 assert batch_dim == 1
+#                 nvert += mesh.vert.shape[1]
+#                 convex_vert.append(mesh.vert[0])
+#             else:
+#                 nvert += mesh.vert.shape[0]
+#                 convex_vert.append(mesh.vert)
+#         convex_vert_offset.append(nvert)
+
+#     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
+#     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
+#     return convex_vert, convex_vert_offset
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     convex_vert, convex_vert_offset = [], [0]
     nvert = 0
-    batch_dim = 0
     for mesh in m.mesh_convex:
         if mesh is not None:
-            if mesh.vert.ndim == 3:
-                batch_dim = mesh.vert.shape[0]
-                assert batch_dim == 1
-                nvert += mesh.vert.shape[1]
-                convex_vert.append(mesh.vert[0])
-            else:
-                nvert += mesh.vert.shape[0]
-                convex_vert.append(mesh.vert)
-        convex_vert_offset.append(nvert)
+            nvert += mesh.vert.shape[0]
+            convex_vert.append(mesh.vert)
+    convex_vert_offset.append(nvert)
 
-    # if batch_dim:
-    #     assert batch_dim == 1
-    #     convex_vert = jp.concatenate(convex_vert, axis=1) if nvert else jp.array([])
-    #     # TODO handle convex_vert_offset
-    # else:
     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
-    return convex_vert, convex_vert_offset
-
+    return convex_vert.reshape((-1, 3)), convex_vert_offset
 
 def _get_body_has_plane(m: Model) -> np.ndarray:
     # Determine which bodies have plane geoms
@@ -162,6 +170,79 @@ def _get_ngeom_pair_type_offset(m: Model) -> np.ndarray:
     return np.cumsum(offsets)[:-1]
 
 
+def gjk_epa_jax(
+    m: Model,
+    d: Data,
+    geom_pair: jax.Array,
+    types: Tuple[int, int],
+    ncon: int,
+    ngeom: int,
+    depth_extension: float,
+    gjk_iter: int,
+    epa_iter: int,
+    epa_best_count: int,
+    multi_polygon_count: int,
+    multi_tilt_angle: float,
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    """GJK/EPA narrowphase routine."""
+    if ngeom <= 0:
+        raise ValueError(f'ngeom should be positive, got "{ngeom}".')
+    if ncon <= 0:
+        raise ValueError(f'ncon should be positive, got "{ncon}".')
+    if len(d.geom_xpos.shape) != 2:
+        raise ValueError(f'd.geom_xpos should have 2d shape, got "{len(d.geom_xpos.shape)}".')
+    if len(d.geom_xmat.shape) != 3:
+        raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
+    if m.geom_size.shape[0] != ngeom:
+        raise ValueError(f'm.geom_size.shape[0] should be ngeom ({ngeom}), got "{m.geom_size.shape[0]}".')
+    if m.geom_dataid.shape != (ngeom,):
+        raise ValueError(f'm.geom_dataid.shape should be (ngeom,) == ({ngeom},), got "({m.geom_dataid.shape[0]},)".')
+    if len(geom_pair.shape) != 2:
+        raise ValueError("Expecting 2D geom_pair.")
+    if geom_pair.shape[1] != 2:
+        raise ValueError(f'geom_pair.shape[1] should be 2, got "{geom_pair.shape[1]}".')
+
+    npair = geom_pair.shape[0]
+    n_points = ncon * npair
+    # out_types = (
+    #     jax.ShapeDtypeStruct((n_points,), dtype=jp.float32),  # dist
+    #     jax.ShapeDtypeStruct((n_points, 3), dtype=jp.float32),  # pos
+    #     jax.ShapeDtypeStruct((npair, 3), dtype=jp.float32),  # normal
+    #     jax.ShapeDtypeStruct((npair, 12), dtype=jp.float32),  # simplex
+    # )
+    output_dims = {
+        "dist": (n_points,),
+        "pos": (n_points, 3),
+        "normal": (npair, 3),
+    }
+
+    # TODO(btaba): consider passing in sliced geom_xpos/xmat instead for perf.
+    convex_vert, convex_vert_offset = get_convex_vert(m)
+    dist, pos, normal = _jax_gjk_epa(
+        geom_pair,
+        d.geom_xpos,
+        d.geom_xmat,
+        m.geom_size,
+        m.geom_dataid,
+        convex_vert,
+        convex_vert_offset,
+        np.uint32(ngeom),
+        np.uint32(npair),
+        np.uint32(ncon),
+        np.uint32(types[0]),
+        np.uint32(types[1]),
+        np.float32(depth_extension),
+        np.uint32(gjk_iter),
+        np.uint32(epa_iter),
+        np.uint32(epa_best_count),
+        np.uint32(multi_polygon_count),
+        np.float32(multi_tilt_angle),
+        output_dims=output_dims,
+    )
+
+    return dist, pos, normal
+
+
 def collision_jax(
     m: Model,
     d: Data,
@@ -177,18 +258,16 @@ def collision_jax(
 
     if not (m.geom_condim[0] == m.geom_condim).all():
         raise NotImplementedError(
-            "m.geom_condim should be the same for all geoms. Different condim per" " geom is not supported yet."
+            "m.geom_condim should be the same for all geoms. Different condim per geom is not supported yet."
         )
     if len(d.geom_xpos.shape) != 2:
         raise ValueError(f'd.geom_xpos should have 2d shape, got "{len(d.geom_xpos.shape)}".')
     if len(d.geom_xmat.shape) != 3:
         raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
     if m.geom_size.shape[0] != ngeom:
-        raise ValueError(f"m.geom_size.shape[0] should be ngeom ({ngeom}), " f'got "{m.geom_size.shape[0]}".')
+        raise ValueError(f'm.geom_size.shape[0] should be ngeom ({ngeom}), got "{m.geom_size.shape[0]}".')
     if m.geom_dataid.shape != (ngeom,):
-        raise ValueError(
-            f"m.geom_dataid.shape should be (ngeom,) == ({ngeom},), got" f' "({m.geom_dataid.shape[0]},)".'
-        )
+        raise ValueError(f'm.geom_dataid.shape should be (ngeom,) == ({ngeom},), got "({m.geom_dataid.shape[0]},)".')
     if m.npair > 0:
         raise NotImplementedError("m.npair > 0 is not supported.")
 
@@ -270,7 +349,7 @@ def collision_jax(
         solref,
         solreffriction,
         solimp,
-    ) = jax_collision(
+    ) = _jax_collision(
         d.geom_xpos,
         d.geom_xmat,
         m.geom_size,

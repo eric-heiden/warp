@@ -11,6 +11,7 @@ from mujoco.mjx._src.types import Model
 
 import warp as wp
 
+
 # wp.set_device("cpu")
 
 # wp.config.verify_cuda = True
@@ -204,10 +205,12 @@ def gjk_support_sphere(
     support_pt = info.pos + info.radius * dir
     return wp.dot(support_pt, dir), support_pt
 
+
 @wp.func
 def sign(x: float):
     # XXX we have to match the sign function from CUDA here
-    return wp.where(x > 0, 1.0, -1.0)
+    return where(x < 0.0, -1.0, 1.0)
+
 
 @wp.func
 def sign(x: wp.vec3):
@@ -1311,11 +1314,10 @@ def gjk_epa_dense(
     dist: wp.array(dtype=float),
     pos: wp.array(dtype=wp.vec3),
     normal: wp.array(dtype=wp.vec3),
-    simplex: wp.array(dtype=mat43),
 ):
     # Get the batch size of mjx.Data.
     nenv = 1
-    for i in range(geom_xpos.ndim):
+    for i in range(geom_xpos.ndim):  # note: geom_xpos is 2D in JAX, 1D in Warp for the unbatched case
         nenv *= geom_xpos.shape[i]
     nenv //= ngeom
     if nenv == 0:
@@ -1323,7 +1325,7 @@ def gjk_epa_dense(
 
     # Get the batch size of mjx.Model.
     nmodel = 1
-    for i in range(geom_size.ndim):
+    for i in range(geom_size.ndim):  # note: geom_size is 2D in JAX, 1D in Warp for the unbatched case
         nmodel *= geom_size.shape[i]
     nmodel //= ngeom
     if nmodel == 0:
@@ -1350,7 +1352,21 @@ def gjk_epa_dense(
     # gjk_epa_init
     dist.fill_(1e12)
 
+    # ensure proper shapes
+    geom_pair = geom_pair.reshape((-1, 2))
+    geom_xpos = geom_xpos.flatten()
+    geom_xmat = geom_xmat.flatten()
+    geom_size = geom_size.flatten()
+    geom_dataid = geom_dataid.flatten()
+
+    dist = dist.flatten()
+    pos = pos.flatten()
+    normal = normal.flatten()
+
     grid_size = npair * nenv
+    # we allocate the simplex array here since it is never used as an output
+    simplex = wp.empty((grid_size,), dtype=mat43)
+
     with wp.ScopedTimer("gjk_dense", use_nvtx=True):
         wp.launch(
             pipeline.gjk_dense,
@@ -1451,6 +1467,27 @@ def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     return convex_vert, convex_vert_offset
 
 
+# def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
+#     convex_vert, convex_vert_offset = [], [0]
+#     nvert = 0
+#     batch_dim = 0
+#     for mesh in m.mesh_convex:
+#         if mesh is not None:
+#             if mesh.vert.ndim == 3:
+#                 batch_dim = mesh.vert.shape[0]
+#                 assert batch_dim == 1
+#                 nvert += mesh.vert.shape[1]
+#                 convex_vert.append(mesh.vert[0])
+#             else:
+#                 nvert += mesh.vert.shape[0]
+#                 convex_vert.append(mesh.vert)
+#         convex_vert_offset.append(nvert)
+
+#     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
+#     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
+#     return convex_vert, convex_vert_offset
+
+
 def gjk_epa(
     m: mujoco.MjModel,
     d: mujoco.MjData,
@@ -1476,9 +1513,7 @@ def gjk_epa(
     if len(d.geom_xmat.shape) != 3:
         raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
     if m.geom_dataid.shape != (m.ngeom,):
-        raise ValueError(
-            f"m.geom_dataid.shape should be (ngeom,) == ({m.ngeom},), got" f' "({m.geom_dataid.shape[0]},)".'
-        )
+        raise ValueError(f'm.geom_dataid.shape should be (ngeom,) == ({m.ngeom},), got "({m.geom_dataid.shape[0]},)".')
     if len(geom_pair.shape) != 2:
         raise ValueError("Expecting 2D geom_pair.")
     if geom_pair.shape[1] != 2:
@@ -1504,7 +1539,6 @@ def gjk_epa(
         dist = wp.empty((n_points,), dtype=wp.float32)
         pos = wp.empty((n_points,), dtype=wp.vec3)
         normal = wp.empty((n_points,), dtype=wp.vec3)
-        simplex = wp.empty((n_points,), dtype=mat43)
 
         with wp.ScopedTimer("gjk_epa_dense"):
             gjk_epa_dense(
@@ -1529,39 +1563,37 @@ def gjk_epa(
                 dist,
                 pos,
                 normal,
-                simplex,
             )
 
-        with wp.ScopedCapture() as capture:
-            with wp.ScopedTimer("gjk_epa_dense_capture"):
-                gjk_epa_dense(
-                    wp_geom_pair,
-                    wp_geom_xpos,
-                    wp_geom_xmat,
-                    wp_geom_size,
-                    wp_geom_dataid,
-                    wp_convex_vert,
-                    wp_convex_vert_offset,
-                    ngeom,
-                    npair,
-                    ncon,
-                    types[0],
-                    types[1],
-                    wp.float32(depth_extension),
-                    gjk_iter,
-                    epa_iter,
-                    epa_best_count,
-                    multi_polygon_count,
-                    wp.float32(multi_tilt_angle),
-                    dist,
-                    pos,
-                    normal,
-                    simplex,
-                )
+        # with wp.ScopedCapture() as capture:
+        #     with wp.ScopedTimer("gjk_epa_dense_capture"):
+        #         gjk_epa_dense(
+        #             wp_geom_pair,
+        #             wp_geom_xpos,
+        #             wp_geom_xmat,
+        #             wp_geom_size,
+        #             wp_geom_dataid,
+        #             wp_convex_vert,
+        #             wp_convex_vert_offset,
+        #             ngeom,
+        #             npair,
+        #             ncon,
+        #             types[0],
+        #             types[1],
+        #             wp.float32(depth_extension),
+        #             gjk_iter,
+        #             epa_iter,
+        #             epa_best_count,
+        #             multi_polygon_count,
+        #             wp.float32(multi_tilt_angle),
+        #             dist,
+        #             pos,
+        #             normal,
+        #         )
 
-        graph = capture.graph
-        with wp.ScopedTimer("gjk_epa_dense_graph"):
-            wp.capture_launch(graph)
+        # graph = capture.graph
+        # with wp.ScopedTimer("gjk_epa_dense_graph"):
+        #     wp.capture_launch(graph)
 
     return dist.numpy(), pos.numpy(), normal.numpy()
 
@@ -2070,9 +2102,9 @@ if __name__ == "__main__":
     wp.init()
     assert wp.is_cuda_available(), "CUDA is not available."
 
-    # absltest.main()
-    test = EngineCollisionConvexTest()
-    test.test_convex_convex()
+    absltest.main()
+    # test = EngineCollisionConvexTest()
+    # test.test_convex_convex()
     # test.test_call_batched_model_and_data()
 
     # profile_gjk_epa(8)
