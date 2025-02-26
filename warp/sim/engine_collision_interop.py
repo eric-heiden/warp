@@ -67,7 +67,7 @@ def _get_body_has_plane(m: Model) -> np.ndarray:
             if m.geom_type[g] == GeomType.PLANE:
                 body_has_plane[i] = True
                 break
-    return np.array(body_has_plane, dtype=np.bool)
+    return np.array(body_has_plane)
 
 
 def _body_pairs(
