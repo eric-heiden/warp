@@ -33,26 +33,6 @@ _jax_gjk_epa = jax_callable(gjk_epa_dense, num_outputs=3, vmap_method="legacy_ve
 _jax_collision = jax_callable(collision, num_outputs=10, vmap_method="legacy_vectorized")
 
 
-# def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
-#     convex_vert, convex_vert_offset = [], [0]
-#     nvert = 0
-#     batch_dim = 0
-#     for mesh in m.mesh_convex:
-#         if mesh is not None:
-#             if mesh.vert.ndim == 3:
-#                 batch_dim = mesh.vert.shape[0]
-#                 assert batch_dim == 1
-#                 nvert += mesh.vert.shape[1]
-#                 convex_vert.append(mesh.vert[0])
-#             else:
-#                 nvert += mesh.vert.shape[0]
-#                 convex_vert.append(mesh.vert)
-#         convex_vert_offset.append(nvert)
-
-
-#     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
-#     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
-#     return convex_vert, convex_vert_offset
 def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     convex_vert, convex_vert_offset = [], [0]
     nvert = 0
@@ -60,7 +40,7 @@ def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
         if mesh is not None:
             nvert += mesh.vert.shape[0]
             convex_vert.append(mesh.vert)
-    convex_vert_offset.append(nvert)
+        convex_vert_offset.append(nvert)
 
     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
@@ -325,7 +305,8 @@ def collision_jax(
         raise RuntimeError("nmodel cannot be zero.")
 
     # output shapes
-    npts = nenv * max_contact_points
+    # npts = nenv * max_contact_points
+    npts = max_contact_points  # XXX nenv is batched, so we only need max_contact_points
     output_dims = {
         "contact_geom1": (npts,),
         "contact_geom2": (npts,),
