@@ -967,14 +967,10 @@ def collision(
     solreffriction: wp.array(dtype=float, ndim=2),
     solimp: wp.array(dtype=float, ndim=2),
 ):
-    print("collision")
-    print("ngeom", ngeom)
     if ngeom == 0:
         return True
 
     device = contact_dist.device
-
-    print("init...")
 
     # XXX this is annoying
     geom_xpos = geom_xpos.reshape(-1)
@@ -1203,7 +1199,7 @@ def collision(
     )
 
     # Initialize the env contact counter
-    env_contact_count = wp.zeros(nenv, dtype=wp.int32)
+    env_contact_counter = wp.zeros(nenv, dtype=wp.int32)
 
     # Dispatch to narrowphase collision functions
     max_contact_points_per_env = max_contact_points
@@ -1229,7 +1225,7 @@ def collision(
         depth_extension,
         multi_polygon_count,
         multi_tilt_angle,
-        env_contact_count,
+        env_contact_counter,
         contact_geom1,
         contact_geom2,
         contact_dist,
@@ -1238,7 +1234,7 @@ def collision(
     )
 
     env_contact_offset = wp.zeros(nenv, dtype=wp.int32)
-    wp.utils.array_scan(env_contact_count, env_contact_offset, False)
+    wp.utils.array_scan(env_contact_counter, env_contact_offset, False)
 
     wp.launch(
         finalize_sum,
@@ -1246,7 +1242,7 @@ def collision(
         inputs=[
             nenv,
             env_contact_offset,
-            env_contact_count,
+            env_contact_counter,
         ],
         outputs=[tmp_count],
         device=device,
