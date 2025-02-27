@@ -49,6 +49,7 @@ _jax_collision = jax_callable(collision, num_outputs=10, vmap_method="legacy_vec
 #                 convex_vert.append(mesh.vert)
 #         convex_vert_offset.append(nvert)
 
+
 #     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
 #     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
 #     return convex_vert, convex_vert_offset
@@ -64,6 +65,7 @@ def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
     return convex_vert.reshape((-1, 3)), convex_vert_offset
+
 
 def _get_body_has_plane(m: Model) -> np.ndarray:
     # Determine which bodies have plane geoms
@@ -309,14 +311,14 @@ def collision_jax(
     type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.int32)
 
     nenv = 1
-    for i in range(d.geom_xpos.ndim - 1):
+    for i in range(d.geom_xpos.ndim):  # note: geom_xpos is 2D in JAX, 1D in Warp for the unbatched case
         nenv *= d.geom_xpos.shape[i]
     nenv //= ngeom
     if nenv == 0:
         raise RuntimeError("nenv cannot be zero.")
 
     nmodel = 1
-    for i in range(m.geom_size.ndim - 1):
+    for i in range(m.geom_size.ndim):  # note: geom_size is 2D in JAX, 1D in Warp for the unbatched case
         nmodel *= m.geom_size.shape[i]
     nmodel /= ngeom
     if nmodel == 0:

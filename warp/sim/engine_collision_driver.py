@@ -34,32 +34,6 @@ from mujoco.mjx._src.types import Contact, Data, DisableBit, GeomType, Model
 import warp as wp
 
 
-def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
-    convex_vert, convex_vert_offset = [], [0]
-    nvert = 0
-    batch_dim = 0
-    for mesh in m.mesh_convex:
-        if mesh is not None:
-            if mesh.vert.ndim == 3:
-                batch_dim = mesh.vert.shape[0]
-                assert batch_dim == 1
-                nvert += mesh.vert.shape[1]
-                convex_vert.append(mesh.vert[0])
-            else:
-                nvert += mesh.vert.shape[0]
-                convex_vert.append(mesh.vert)
-        convex_vert_offset.append(nvert)
-
-    # if batch_dim:
-    #     assert batch_dim == 1
-    #     convex_vert = jp.concatenate(convex_vert, axis=1) if nvert else jp.array([])
-    #     # TODO handle convex_vert_offset
-    # else:
-    convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
-    convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.uint32)
-    return convex_vert, convex_vert_offset
-
-
 # @wp.kernel
 # def init_buffers(
 #     nenv: int,
@@ -104,14 +78,13 @@ def get_dyn_body_aamm(
     # Iterate over all geometries associated with the body
     for i in range(body_geomnum[bid]):
         g = body_geomadr[bid] + i
+        pos = geom_xpos[(env_id * ngeom + g)]
+        rbound = geom_rbound[model_id * ngeom + g]
+        margin = geom_margin[model_id * ngeom + g]
 
         for j in range(3):
-            pos = geom_xpos[(env_id * ngeom + g)][j]
-            rbound = geom_rbound[model_id * ngeom + g]
-            margin = geom_margin[model_id * ngeom + g]
-
-            min_val = pos - rbound - margin
-            max_val = pos + rbound + margin
+            min_val = pos[j] - rbound - margin
+            max_val = pos[j] + rbound + margin
 
             aamm_min[j] = wp.min(aamm_min[j], min_val)
             aamm_max[j] = wp.max(aamm_max[j], max_val)
@@ -150,6 +123,7 @@ def get_body_pairs_nxn(
     body_has_plane: wp.array(dtype=bool),
     exclude_signature: wp.array(dtype=int),
     dyn_body_aamm: wp.array(dtype=float, ndim=2),
+    # outputs
     col_body_pair: wp.array(dtype=int, ndim=2),
     col_body_pair_count: wp.array(dtype=int),
 ):
@@ -300,7 +274,8 @@ def get_dyn_geom_aabb(
         if i < 4:
             corner.z = -corner.z
         # corner_world = transform_point(mat, corner + aabb_pos)
-        corner_world = pos + rot @ (corner + aabb_pos)
+        # corner_world = pos + rot @ (corner + aabb_pos)
+        corner_world = rot @ (corner + aabb_pos)
         aabb_max = max3(aabb_max, corner_world)
         aabb_min = min3(aabb_min, corner_world)
 
@@ -313,10 +288,12 @@ def get_dyn_geom_aabb(
 
 
 @wp.func
-def bisection(x: wp.array(dtype=int), v: int, a: int, b: int) -> int:
+def bisection(x: wp.array(dtype=int), v: int, a_: int, b_: int) -> int:
     # Binary search for the largest index i such that x[i] <= v
     # x is a sorted array
     # a and b are the start and end indices within x to search
+    a = int(a_)
+    b = int(b_)
     c = int(0)
     while b - a > 1:
         c = (a + b) // 2
@@ -343,10 +320,10 @@ def get_geom_pairs_nxn(
     geom_type: wp.array(dtype=int),
     geom_margin: wp.array(dtype=float),
     dyn_geom_aabb: wp.array(dtype=float, ndim=2),
-    # outputs
     col_body_pair: wp.array(dtype=int, ndim=2),
     col_body_pair_count: wp.array(dtype=int),
     col_body_pair_offset: wp.array(dtype=int),
+    # outputs
     col_geom_pair: wp.array(dtype=int, ndim=2),
     col_geom_pair_count: wp.array(dtype=int),
 ):
@@ -652,119 +629,119 @@ def unsqueeze_array(a: Union[np.ndarray, jax.Array], batch_dim) -> jax.Array:
     return a.reshape(*new_shape)
 
 
-class CollisionInput:
-    def __init__(
-        self,
-        m: Model,
-        d: Data,
-        nenv: int,
-        nmodel: int,
-        depth_extension: float,
-        gjk_iter: int,
-        epa_iter: int,
-        epa_best_count: int,
-        multi_polygon_count: int,
-        multi_tilt_angle: float,
-        device,
-    ):
-        max_contact_points = d.contact.pos.shape[0]
-        # n_pts = max_contact_points
-        #  = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
-        n_geom_pair = _get_ngeom_pair(m)
+# class CollisionInput:
+#     def __init__(
+#         self,
+#         m: Model,
+#         d: Data,
+#         nenv: int,
+#         nmodel: int,
+#         depth_extension: float,
+#         gjk_iter: int,
+#         epa_iter: int,
+#         epa_best_count: int,
+#         multi_polygon_count: int,
+#         multi_tilt_angle: float,
+#         device,
+#     ):
+#         max_contact_points = d.contact.pos.shape[0]
+#         # n_pts = max_contact_points
+#         #  = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
+#         n_geom_pair = _get_ngeom_pair(m)
 
-        # n_geom_types = len(GeomType)
-        # n_geom_type_pairs = n_geom_types * n_geom_types
-        # type_pair_offset = _get_ngeom_pair_type_offset(m)
-        # type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
-        convex_vert, convex_vert_offset = get_convex_vert(m)
+#         # n_geom_types = len(GeomType)
+#         # n_geom_type_pairs = n_geom_types * n_geom_types
+#         # type_pair_offset = _get_ngeom_pair_type_offset(m)
+#         # type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
+#         convex_vert, convex_vert_offset = get_convex_vert(m)
 
-        self.geom_xpos = wp.from_jax(squeeze_array(d.geom_xpos, 2), dtype=wp.vec3).to(device)
-        self.geom_xmat = wp.from_jax(squeeze_array(d.geom_xmat, 3), dtype=wp.mat33).to(device)
-        self.geom_size = wp.from_jax(squeeze_array(m.geom_size, 2), dtype=wp.vec3).to(device)
-        self.geom_type = wp.array(m.geom_type, dtype=wp.int32)
-        self.geom_contype = wp.array(m.geom_contype, dtype=wp.int32)
-        self.geom_conaffinity = wp.array(m.geom_conaffinity, dtype=wp.int32)
-        self.geom_priority = wp.array(m.geom_priority, dtype=wp.int32)
-        self.geom_margin = wp.array(squeeze_array(m.geom_margin, 1), dtype=wp.float32)
-        self.geom_gap = wp.array(squeeze_array(m.geom_gap, 1), dtype=wp.float32)
-        self.geom_solmix = wp.array(squeeze_array(m.geom_solmix, 1), dtype=wp.float32)
-        self.geom_friction = wp.array(squeeze_array(m.geom_friction, 2), dtype=wp.float32)
-        self.geom_solref = wp.array(squeeze_array(m.geom_solref, 2), dtype=wp.float32)
-        self.geom_solimp = wp.array(squeeze_array(m.geom_solimp, 2), dtype=wp.float32)
-        self.geom_aabb = wp.array(m.geom_aabb.reshape((-1, 6)), dtype=wp.float32)
-        self.geom_rbound = wp.array(squeeze_array(m.geom_rbound, 1), dtype=wp.float32)
-        self.geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
-        self.geom_bodyid = wp.array(m.geom_bodyid, dtype=wp.int32)
-        self.body_parentid = wp.array(m.body_parentid, dtype=wp.int32)
-        self.body_weldid = wp.array(m.body_weldid, dtype=wp.int32)
-        self.body_contype = wp.array(m.body_contype, dtype=wp.int32)
-        self.body_conaffinity = wp.array(m.body_conaffinity, dtype=wp.int32)
-        self.body_geomadr = wp.array(m.body_geomadr, dtype=wp.int32)
-        self.body_geomnum = wp.array(m.body_geomnum, dtype=wp.int32)
-        self.body_has_plane = wp.array(_get_body_has_plane(m), dtype=bool)
-        self.pair_geom1 = wp.array(m.pair_geom1, dtype=wp.int32)
-        self.pair_geom2 = wp.array(m.pair_geom2, dtype=wp.int32)
-        self.exclude_signature = wp.array(m.exclude_signature, dtype=wp.int32)
-        self.pair_margin = wp.array(m.pair_margin, dtype=wp.float32)
-        self.pair_gap = wp.array(m.pair_gap, dtype=wp.float32)
-        self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
-        # self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
-        # self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
-        self.convex_vert = wp.from_jax(convex_vert, dtype=wp.vec3).to(device)
-        self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32).to(device)
-        self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
-        self.ngeom = len(m.geom_type)
-        self.npair = m.npair
-        self.nbody = m.nbody
-        self.nexclude = m.nexclude
-        self.max_contact_points = max_contact_points
-        self.n_geom_pair = n_geom_pair
-        self.n_geom_types = len(GeomType)
-        self.filter_parent = not (m.opt.disableflags & DisableBit.FILTERPARENT)
-        self.depth_extension = depth_extension
-        self.gjk_iteration_count = gjk_iter
-        self.epa_iteration_count = epa_iter
-        self.epa_best_count = epa_best_count
-        self.multi_polygon_count = multi_polygon_count
-        self.multi_tilt_angle = wp.float32(multi_tilt_angle)
-        self.nenv = nenv
-        self.nmodel = nmodel
+#         self.geom_xpos = wp.from_jax(squeeze_array(d.geom_xpos, 2), dtype=wp.vec3).to(device)
+#         self.geom_xmat = wp.from_jax(squeeze_array(d.geom_xmat, 3), dtype=wp.mat33).to(device)
+#         self.geom_size = wp.from_jax(squeeze_array(m.geom_size, 2), dtype=wp.vec3).to(device)
+#         self.geom_type = wp.array(m.geom_type, dtype=wp.int32)
+#         self.geom_contype = wp.array(m.geom_contype, dtype=wp.int32)
+#         self.geom_conaffinity = wp.array(m.geom_conaffinity, dtype=wp.int32)
+#         self.geom_priority = wp.array(m.geom_priority, dtype=wp.int32)
+#         self.geom_margin = wp.array(squeeze_array(m.geom_margin, 1), dtype=wp.float32)
+#         self.geom_gap = wp.array(squeeze_array(m.geom_gap, 1), dtype=wp.float32)
+#         self.geom_solmix = wp.array(squeeze_array(m.geom_solmix, 1), dtype=wp.float32)
+#         self.geom_friction = wp.array(squeeze_array(m.geom_friction, 2), dtype=wp.float32)
+#         self.geom_solref = wp.array(squeeze_array(m.geom_solref, 2), dtype=wp.float32)
+#         self.geom_solimp = wp.array(squeeze_array(m.geom_solimp, 2), dtype=wp.float32)
+#         self.geom_aabb = wp.array(m.geom_aabb.reshape((-1, 6)), dtype=wp.float32)
+#         self.geom_rbound = wp.array(squeeze_array(m.geom_rbound, 1), dtype=wp.float32)
+#         self.geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
+#         self.geom_bodyid = wp.array(m.geom_bodyid, dtype=wp.int32)
+#         self.body_parentid = wp.array(m.body_parentid, dtype=wp.int32)
+#         self.body_weldid = wp.array(m.body_weldid, dtype=wp.int32)
+#         self.body_contype = wp.array(m.body_contype, dtype=wp.int32)
+#         self.body_conaffinity = wp.array(m.body_conaffinity, dtype=wp.int32)
+#         self.body_geomadr = wp.array(m.body_geomadr, dtype=wp.int32)
+#         self.body_geomnum = wp.array(m.body_geomnum, dtype=wp.int32)
+#         self.body_has_plane = wp.array(_get_body_has_plane(m), dtype=bool)
+#         self.pair_geom1 = wp.array(m.pair_geom1, dtype=wp.int32)
+#         self.pair_geom2 = wp.array(m.pair_geom2, dtype=wp.int32)
+#         self.exclude_signature = wp.array(m.exclude_signature, dtype=wp.int32)
+#         self.pair_margin = wp.array(m.pair_margin, dtype=wp.float32)
+#         self.pair_gap = wp.array(m.pair_gap, dtype=wp.float32)
+#         self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
+#         # self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
+#         # self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
+#         self.convex_vert = wp.from_jax(convex_vert, dtype=wp.vec3).to(device)
+#         self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32).to(device)
+#         self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
+#         self.ngeom = len(m.geom_type)
+#         self.npair = m.npair
+#         self.nbody = m.nbody
+#         self.nexclude = m.nexclude
+#         self.max_contact_points = max_contact_points
+#         self.n_geom_pair = n_geom_pair
+#         self.n_geom_types = len(GeomType)
+#         self.filter_parent = not (m.opt.disableflags & DisableBit.FILTERPARENT)
+#         self.depth_extension = depth_extension
+#         self.gjk_iteration_count = gjk_iter
+#         self.epa_iteration_count = epa_iter
+#         self.epa_best_count = epa_best_count
+#         self.multi_polygon_count = multi_polygon_count
+#         self.multi_tilt_angle = wp.float32(multi_tilt_angle)
+#         self.nenv = nenv
+#         self.nmodel = nmodel
 
 
-class CollisionOutput:
-    def __init__(
-        self,
-        n_points: int,
-        nenv: int,
-        nbody: int,
-        ngeom: int,
-        n_geom_pair: int,
-        n_geom_types: int,
-        mjNREF: int,
-        mjNIMP: int,
-    ):
-        self.dist = wp.empty(n_points, dtype=wp.float32)
-        self.pos = wp.empty(n_points, dtype=wp.vec3)
-        self.normal = wp.empty(n_points, dtype=wp.vec3)
-        self.g1 = wp.empty(n_points, dtype=wp.int32)
-        self.g2 = wp.empty(n_points, dtype=wp.int32)
-        self.includemargin = wp.empty(n_points, dtype=wp.float32)
-        self.friction = wp.empty((n_points, 5), dtype=wp.float32)
-        self.solref = wp.empty((n_points, mjNREF), dtype=wp.float32)
-        self.solreffriction = wp.empty((n_points, mjNREF), dtype=wp.float32)
-        self.solimp = wp.empty((n_points, mjNIMP), dtype=wp.float32)
-        self.dyn_body_aamm = wp.empty((nenv * nbody, 6), dtype=wp.float32)
-        self.col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
-        self.env_counter = wp.empty(nenv, dtype=wp.int32)
-        self.env_counter2 = wp.empty(nenv, dtype=wp.int32)
-        self.env_offset = wp.empty(nenv, dtype=wp.int32)
-        self.dyn_geom_aabb = wp.empty((nenv * ngeom, 6), dtype=wp.float32)
-        self.col_geom_pair = wp.empty((n_geom_pair, 2), dtype=wp.int32)
-        self.type_pair_env_id = wp.empty(n_geom_pair, dtype=wp.int32)
-        self.type_pair_geom_id = wp.empty((n_geom_pair, 2), dtype=wp.int32)
-        self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
-        self.tmp_count = wp.empty(1, dtype=wp.int32)
-        # self.simplex = wp.empty(n_points, dtype=wp.types.matrix(shape=(4, 3), dtype=float))
+# class CollisionOutput:
+#     def __init__(
+#         self,
+#         n_points: int,
+#         nenv: int,
+#         nbody: int,
+#         ngeom: int,
+#         n_geom_pair: int,
+#         n_geom_types: int,
+#         mjNREF: int,
+#         mjNIMP: int,
+#     ):
+#         self.dist = wp.empty(n_points, dtype=wp.float32)
+#         self.pos = wp.empty(n_points, dtype=wp.vec3)
+#         self.normal = wp.empty(n_points, dtype=wp.vec3)
+#         self.g1 = wp.empty(n_points, dtype=wp.int32)
+#         self.g2 = wp.empty(n_points, dtype=wp.int32)
+#         self.includemargin = wp.empty(n_points, dtype=wp.float32)
+#         self.friction = wp.empty((n_points, 5), dtype=wp.float32)
+#         self.solref = wp.empty((n_points, mjNREF), dtype=wp.float32)
+#         self.solreffriction = wp.empty((n_points, mjNREF), dtype=wp.float32)
+#         self.solimp = wp.empty((n_points, mjNIMP), dtype=wp.float32)
+#         self.dyn_body_aamm = wp.empty((nenv * nbody, 6), dtype=wp.float32)
+#         self.col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
+#         self.env_counter = wp.empty(nenv, dtype=wp.int32)
+#         self.env_counter2 = wp.empty(nenv, dtype=wp.int32)
+#         self.env_offset = wp.empty(nenv, dtype=wp.int32)
+#         self.dyn_geom_aabb = wp.empty((nenv * ngeom, 6), dtype=wp.float32)
+#         self.col_geom_pair = wp.empty((n_geom_pair, 2), dtype=wp.int32)
+#         self.type_pair_env_id = wp.empty(n_geom_pair, dtype=wp.int32)
+#         self.type_pair_geom_id = wp.empty((n_geom_pair, 2), dtype=wp.int32)
+#         self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
+#         self.tmp_count = wp.empty(1, dtype=wp.int32)
+#         # self.simplex = wp.empty(n_points, dtype=wp.types.matrix(shape=(4, 3), dtype=float))
 
 
 @wp.kernel
@@ -831,7 +808,7 @@ def orthogonals(a: wp.vec3) -> OrthoBasis:
     b = where((-0.5 < a[1]) and (a[1] < 0.5), y, z)
     b = b - a * wp.dot(a, b)
     b = wp.normalize(b)
-    if a == wp.vec3(0.0, 0.0, 0.0):
+    if wp.length(a) == 0.0:
         b = wp.vec3(0.0, 0.0, 0.0)
     c = wp.cross(a, b)
 
@@ -1063,20 +1040,17 @@ def collision(
         device=device,
     )
 
-    # Initialize environment buffers
-    env_counter = wp.zeros(nenv, dtype=wp.int32)
-    env_counter2 = wp.zeros(nenv, dtype=wp.int32)
-    env_offset = wp.zeros(nenv, dtype=wp.int32)
-
     dyn_body_aamm = wp.empty((nenv * nbody, 6), dtype=wp.float32)
     dyn_geom_aabb = wp.empty((nenv * ngeom, 6), dtype=wp.float32)
-    col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
-    col_geom_pair = wp.empty((n_geom_pair, 2), dtype=wp.int32)
+    nbody_pair_buf_size = ((nbody * (nbody - 1) // 2 + 15) // 16) * 16
+    col_body_pair = wp.empty((nenv * nbody_pair_buf_size, 2), dtype=wp.int32)
+    # col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
+    col_geom_pair = wp.empty((nenv * n_geom_pair, 2), dtype=wp.int32)
 
-    type_pair_env_id = wp.empty(n_geom_pair, dtype=wp.int32)
-    type_pair_geom_id = wp.empty((n_geom_pair, 2), dtype=wp.int32)
-    type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
-    tmp_count = wp.empty(1, dtype=wp.int32)
+    type_pair_env_id = wp.zeros(nenv * n_geom_pair, dtype=wp.int32)
+    type_pair_geom_id = wp.zeros((nenv * n_geom_pair, 2), dtype=wp.int32)
+    type_pair_count = wp.zeros(n_geom_types * n_geom_types, dtype=wp.int32)
+    tmp_count = wp.zeros(1, dtype=wp.int32)
 
     # Generate body AAMMs
     wp.launch(
@@ -1100,7 +1074,7 @@ def collision(
     )
 
     # Generate body pairs (broadphase)
-    col_body_pair_count = env_counter
+    col_body_pair_count = wp.zeros(nenv, dtype=wp.int32)
     wp.launch(
         get_body_pairs_nxn,
         dim=[nenv * nbody * nbody],
@@ -1115,9 +1089,9 @@ def collision(
             body_conaffinity,
             body_has_plane,
             exclude_signature,
+            dyn_body_aamm,
         ],
         outputs=[
-            dyn_body_aamm,
             col_body_pair,
             col_body_pair_count,
         ],
@@ -1142,7 +1116,7 @@ def collision(
         device=device,
     )
 
-    body_pair_offset = env_offset
+    body_pair_offset = wp.zeros(nenv, dtype=wp.int32)
     wp.utils.array_scan(col_body_pair_count, body_pair_offset, False)
 
     wp.launch(
@@ -1157,8 +1131,8 @@ def collision(
         device=device,
     )
 
-    total_body_pairs = tmp_count.numpy()[0]
-    col_geom_pair_count = env_counter2
+    total_body_pairs = int(tmp_count.numpy()[0])
+    col_geom_pair_count = wp.zeros(nenv, dtype=wp.int32)
 
     wp.launch(
         get_geom_pairs_nxn,
@@ -1174,12 +1148,12 @@ def collision(
             geom_conaffinity,
             geom_type,
             geom_margin,
-        ],
-        outputs=[
             dyn_geom_aabb,
             col_body_pair,
-            env_counter,
+            col_body_pair_count,
             body_pair_offset,
+        ],
+        outputs=[
             col_geom_pair,
             col_geom_pair_count,
         ],
@@ -1189,7 +1163,7 @@ def collision(
     # Initialize type pair count
     type_pair_count.zero_()
 
-    col_geom_pair_offset = env_offset
+    col_geom_pair_offset = wp.zeros(nenv, dtype=wp.int32)
     wp.utils.array_scan(col_geom_pair_count, col_geom_pair_offset, False)
 
     wp.launch(
@@ -1204,7 +1178,8 @@ def collision(
         device=device,
     )
 
-    total_geom_pairs = tmp_count.numpy()[0]
+    total_geom_pairs = int(tmp_count.numpy()[0])
+    assert total_geom_pairs > 0
 
     wp.launch(
         group_contacts_by_type,
@@ -1228,8 +1203,7 @@ def collision(
     )
 
     # Initialize the env contact counter
-    env_contact_count = env_counter
-    env_contact_count.zero_()
+    env_contact_count = wp.zeros(nenv, dtype=wp.int32)
 
     # Dispatch to narrowphase collision functions
     max_contact_points_per_env = max_contact_points
@@ -1255,7 +1229,7 @@ def collision(
         depth_extension,
         multi_polygon_count,
         multi_tilt_angle,
-        env_counter,
+        env_contact_count,
         contact_geom1,
         contact_geom2,
         contact_dist,
@@ -1263,7 +1237,7 @@ def collision(
         contact_normal,
     )
 
-    env_contact_offset = env_offset
+    env_contact_offset = wp.zeros(nenv, dtype=wp.int32)
     wp.utils.array_scan(env_contact_count, env_contact_offset, False)
 
     wp.launch(
