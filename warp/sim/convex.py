@@ -19,24 +19,7 @@ import warp as wp
 # wp.clear_kernel_cache()
 
 
-snippet = """
-    __syncthreads();
-    """
-
-
-@wp.func_native(snippet)
-def sync_threads():
-    """Synchronize threads."""
-    return
-
-
 wp.config.enable_backward = False
-wp.set_module_options(
-    {
-        "enable_backward": False,
-        "max_unroll": 1,
-    }
-)
 
 mjxGEOM_PLANE = 0
 mjxGEOM_HFIELD = 1
