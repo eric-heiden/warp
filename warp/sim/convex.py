@@ -1636,20 +1636,13 @@ def _narrowphase(
     if npair == 0:
         return
 
-    # blockSize = int(256)
-    # grid_size = int((npair + blockSize - 1) // blockSize)
     grid_size = npair
-    # ncon = max_contact_points_map[type1][type2]
     pipeline = gjk_epa_pipeline(
         type1,
         type2,
         gjk_iteration_count,
         epa_iteration_count,
     )
-    print("-----------------------------------------")
-    print(f"launching gjk_epa_sparse  (group_key: {group_key})")
-    print("-----------------------------------------")
-    # print("type_pair_geom_id:", type_pair_geom_id.numpy())
     wp.launch(
         pipeline.gjk_epa_sparse,
         grid_size,
