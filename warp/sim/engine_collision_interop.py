@@ -291,16 +291,16 @@ def collision_jax(
     type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.int32)
 
     nenv = 1
-    for i in range(d.geom_xpos.ndim):  # note: geom_xpos is 2D in JAX, 1D in Warp for the unbatched case
+    for i in range(d.geom_xpos.ndim - 1):
         nenv *= d.geom_xpos.shape[i]
     nenv //= ngeom
     if nenv == 0:
         raise RuntimeError("nenv cannot be zero.")
 
     nmodel = 1
-    for i in range(m.geom_size.ndim):  # note: geom_size is 2D in JAX, 1D in Warp for the unbatched case
+    for i in range(m.geom_size.ndim - 1):
         nmodel *= m.geom_size.shape[i]
-    nmodel /= ngeom
+    nmodel //= ngeom
     if nmodel == 0:
         raise RuntimeError("nmodel cannot be zero.")
 
