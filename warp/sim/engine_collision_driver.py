@@ -64,8 +64,6 @@ def get_dyn_body_aamm(
     dyn_body_aamm: wp.array(dtype=float, ndim=2),
 ):
     tid = wp.tid()
-    if tid >= nenv * nbody:
-        return
 
     bid = tid % nbody
     env_id = tid // nbody
@@ -939,8 +937,8 @@ def collision(
     convex_vert_offset: wp.array(dtype=int),
     type_pair_offset: wp.array(dtype=int),
     type_pair_count: wp.array(dtype=int),
-    nenv: int,
-    nmodel: int,
+    # nenv: int,
+    # nmodel: int,
     ngeom: int,
     # npair: int,
     nbody: int,
@@ -1012,6 +1010,22 @@ def collision(
     solref = solref.reshape((-1, 2))
     solreffriction = solreffriction.reshape((-1, 2))
     solimp = solimp.reshape((-1, 5))
+
+    # Get the batch size of mjx.Data.
+    nenv = 1
+    for i in range(geom_xpos.ndim):  # note: geom_xpos is 2D in JAX, 1D in Warp for the unbatched case
+        nenv *= geom_xpos.shape[i]
+    nenv //= ngeom
+    if nenv == 0:
+        raise RuntimeError("Batch size of mjx.Data calculated in LaunchKernel_GJK_EPA is 0.")
+
+    # Get the batch size of mjx.Model.
+    nmodel = 1
+    for i in range(geom_size.ndim):  # note: geom_size is 2D in JAX, 1D in Warp for the unbatched case
+        nmodel *= geom_size.shape[i]
+    nmodel //= ngeom
+    if nmodel == 0:
+        raise RuntimeError("Batch size of mjx.Model calculated in LaunchKernel_GJK_EPA is 0.")
 
     # Initialize the output data
     wp.launch(

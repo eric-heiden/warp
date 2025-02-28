@@ -290,20 +290,6 @@ def collision_jax(
     type_pair_offset = _get_ngeom_pair_type_offset(m)
     type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.int32)
 
-    nenv = 1
-    for i in range(d.geom_xpos.ndim - 1):
-        nenv *= d.geom_xpos.shape[i]
-    nenv //= ngeom
-    if nenv == 0:
-        raise RuntimeError("nenv cannot be zero.")
-
-    nmodel = 1
-    for i in range(m.geom_size.ndim - 1):
-        nmodel *= m.geom_size.shape[i]
-    nmodel //= ngeom
-    if nmodel == 0:
-        raise RuntimeError("nmodel cannot be zero.")
-
     # output shapes
     # npts = nenv * max_contact_points
     npts = max_contact_points  # XXX nenv is batched, so we only need max_contact_points
@@ -370,8 +356,8 @@ def collision_jax(
         convex_vert_offset,
         type_pair_offset.astype(np.int32),
         type_pair_count,
-        int(nenv),
-        int(nmodel),
+        # int(nenv),
+        # int(nmodel),
         int(ngeom),
         # int(m.npair),
         int(m.nbody),
