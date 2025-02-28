@@ -292,6 +292,8 @@ def gjk_support_convex(
     max_dist = float(FLOAT_MIN)
     # exhaustive search over all vertices
     # TODO(robotics-simulation): consider hill-climb over graphdata.
+    # wp.printf("gjk_support_convex--- vert_offset: %d, vert_count: %d\n", info.vert_offset, info.vert_count)
+    # wp.printf("                      local_dir: %f %f %f\n", local_dir[0], local_dir[1], local_dir[2])
     for i in range(info.vert_count):
         vert = convex_vert[info.vert_offset + i]
         dist = wp.dot(vert, local_dir)
@@ -431,6 +433,7 @@ def gjk_epa_pipeline(
         size2 = geom_size[model_id * ngeom + g2]
         gid1 = env_id * ngeom + g1
         gid2 = env_id * ngeom + g2
+        # wp.printf("dataid1: %d, dataid2: %d\n", dataid1, dataid2)
         info1 = wp.static(get_info(type1))(gid1, dataid1, geom_xpos, geom_xmat, size1, convex_vert_offset)
         info2 = wp.static(get_info(type2))(gid2, dataid2, geom_xpos, geom_xmat, size2, convex_vert_offset)
 
@@ -450,6 +453,7 @@ def gjk_epa_pipeline(
         # sd = wp.normalize(simplex0 - simplex1)
         sd = simplex0 - simplex1
         dir = orthonormal(sd)
+        # wp.printf("dir = orthonormal(sd): %f %f %f\n", dir[0], dir[1], dir[2])
 
         dist_max, simplex3 = wp.static(gjk_support(type1, type2))(info1, info2, dir, convex_vert)
         # Initialize a 2-simplex with simplex[2]==simplex[1]. This ensures the
@@ -469,7 +473,8 @@ def gjk_epa_pipeline(
             normal = dir_n
 
         plane = mat43()
-        for _ in range(gjk_iteration_count):
+        for _it in range(gjk_iteration_count):
+            # wp.printf("  GJK iteration %d\n", _it)
             # Winding orders: plane[0] ccw, plane[1] cw, plane[2] ccw, plane[3] cw.
             plane[0] = wp.cross(simplex[3] - simplex[2], simplex[1] - simplex[2])
             plane[1] = wp.cross(simplex[3] - simplex[0], simplex[2] - simplex[0])
@@ -506,7 +511,9 @@ def gjk_epa_pipeline(
                 break
 
             # Add new support point to the simplex.
+            # wp.printf("    index: %d\n", index)
             dist, simplex_i = wp.static(gjk_support(type1, type2))(info1, info2, plane[index], convex_vert)
+            # wp.printf("    dist: %f\n", dist)
             simplex[index] = simplex_i
             if dist < depth:
                 depth = dist
@@ -517,6 +524,7 @@ def gjk_epa_pipeline(
             index1 = (index + 1) & 3
             index2 = (index + 2) & 3
             swap = simplex[index1]
+            # wp.printf("    swap: %f %f %f\n", swap[0], swap[1], swap[2])
             simplex[index1] = simplex[index2]
             simplex[index2] = swap
             # wp.printf("simplex[0]: %f %f %f\n", simplex[0, 0], simplex[0, 1], simplex[0, 2])
@@ -1212,8 +1220,10 @@ def gjk_epa_pipeline(
         model_id = env_id % nmodel
         g1 = type_pair_geom_id[type_pair_id, 0]
         g2 = type_pair_geom_id[type_pair_id, 1]
-        wp.printf("g1: %d, g2: %d\n", g1, g2)
+        # wp.printf("g1: %d, g2: %d\n", g1, g2)
+        # wp.printf("type_pair_id: %d, env_id: %d\n", type_pair_id, env_id)
 
+        # print("GJK")
         simplex, normal = _gjk(
             env_id,
             model_id,
@@ -1227,6 +1237,13 @@ def gjk_epa_pipeline(
             convex_vert,
             convex_vert_offset,
         )
+
+        # print("simplex:")
+        # print(simplex)
+        # print("normal:")
+        # print(normal)
+
+        # print("EPA")
 
         # TODO(btaba): get depth from GJK, conditionally run EPA.
         depth, normal = _epa(
@@ -1246,6 +1263,10 @@ def gjk_epa_pipeline(
             simplex,
             normal,
         )
+
+        # print("normal:")
+        # print(normal)
+        # wp.printf("depth: %f\n", depth)
 
         # TODO(btaba): add support for margin here.
         if depth < 0.0:
@@ -1467,27 +1488,6 @@ def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
     return convex_vert, convex_vert_offset
 
 
-# def get_convex_vert(m: Model) -> Tuple[jax.Array, jax.Array]:
-#     convex_vert, convex_vert_offset = [], [0]
-#     nvert = 0
-#     batch_dim = 0
-#     for mesh in m.mesh_convex:
-#         if mesh is not None:
-#             if mesh.vert.ndim == 3:
-#                 batch_dim = mesh.vert.shape[0]
-#                 assert batch_dim == 1
-#                 nvert += mesh.vert.shape[1]
-#                 convex_vert.append(mesh.vert[0])
-#             else:
-#                 nvert += mesh.vert.shape[0]
-#                 convex_vert.append(mesh.vert)
-#         convex_vert_offset.append(nvert)
-
-#     convex_vert = jp.concatenate(convex_vert) if nvert else jp.array([])
-#     convex_vert_offset = jp.array(convex_vert_offset, dtype=jp.int32)
-#     return convex_vert, convex_vert_offset
-
-
 def gjk_epa(
     m: mujoco.MjModel,
     d: mujoco.MjData,
@@ -1598,19 +1598,6 @@ def gjk_epa(
     return dist.numpy(), pos.numpy(), normal.numpy()
 
 
-max_contact_points_map = [
-    # PLANE  HFIELD SPHERE CAPSULE ELLIPSOID CYLINDER BOX  CONVEX
-    [0, 0, 1, 2, 1, 3, 4, 4],  # PLANE
-    [0, 0, 1, 2, 1, 3, 4, 4],  # HFIELD
-    [0, 0, 1, 1, 1, 1, 1, 4],  # SPHERE
-    [0, 0, 0, 1, 1, 2, 2, 2],  # CAPSULE
-    [0, 0, 0, 0, 1, 1, 1, 1],  # ELLIPSOID
-    [0, 0, 0, 0, 0, 3, 3, 3],  # CYLINDER
-    [0, 0, 0, 0, 0, 0, 4, 4],  # BOX
-    [0, 0, 0, 0, 0, 0, 0, 4],  # CONVEX
-]
-
-
 def _narrowphase(
     type1: int,
     type2: int,
@@ -1644,9 +1631,7 @@ def _narrowphase(
     contact_normal: wp.array(dtype=wp.vec3),
 ):
     group_key = type1 + type2 * n_geom_types
-    wp.synchronize()
     type_pair_count_host = type_pair_count.numpy()
-    wp.synchronize()
     npair = int(type_pair_count_host[group_key])
     if npair == 0:
         return
@@ -1661,6 +1646,9 @@ def _narrowphase(
         gjk_iteration_count,
         epa_iteration_count,
     )
+    print("-----------------------------------------")
+    print(f"launching gjk_epa_sparse  (group_key: {group_key})")
+    print("-----------------------------------------")
     # print("type_pair_geom_id:", type_pair_geom_id.numpy())
     wp.launch(
         pipeline.gjk_epa_sparse,

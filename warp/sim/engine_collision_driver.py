@@ -25,29 +25,12 @@ import mujoco
 import numpy as np
 
 # from convex import gjk_epa_dense
-from convex import narrowphase, where, mjxGEOM_size
-from jax import numpy as jp
+from convex import narrowphase, where
 
 # pylint: disable=g-importing-member
-from mujoco.mjx._src.types import Contact, Data, DisableBit, GeomType, Model
+from mujoco.mjx._src.types import DisableBit, GeomType, Model
 
 import warp as wp
-
-
-# @wp.kernel
-# def init_buffers(
-#     nenv: int,
-#     col_body_pair_count: wp.array(dtype=int),
-#     col_body_pair_offset: wp.array(dtype=int),
-#     col_geom_pair_count: wp.array(dtype=int),
-# ):
-#     tid = wp.tid()
-#     if tid >= nenv:
-#         return
-
-#     col_body_pair_offset[tid] = 0
-#     col_body_pair_count[tid] = 0
-#     col_geom_pair_count[tid] = 0
 
 
 @wp.kernel
@@ -155,16 +138,6 @@ def get_body_pairs_nxn(
     if filter_parent and w1 != 0 and w2 != 0 and (w1 == w2_p or w2 == w1_p):
         return
 
-    # aamm1 = dyn_body_aamm[(env_id * nbody + body1) * 6 : (env_id * nbody + body1) * 6 + 6]
-    # aamm2 = dyn_body_aamm[(env_id * nbody + body2) * 6 : (env_id * nbody + body2) * 6 + 6]
-    # separating = (
-    #     (aamm1[0] > aamm2[3]) or
-    #     (aamm1[1] > aamm2[4]) or
-    #     (aamm1[2] > aamm2[5]) or
-    #     (aamm2[0] > aamm1[3]) or
-    #     (aamm2[1] > aamm1[4]) or
-    #     (aamm2[2] > aamm1[5])
-    # )
     b1 = env_id * nbody + body1
     b2 = env_id * nbody + body2
     separating = (
@@ -192,33 +165,6 @@ class Mat3x4:
     row2: wp.vec4
 
 
-# @wp.func
-# def xposmat_to_float4(xpos: wp.array(dtype=wp.vec3), xmat: wp.array(dtype=wp.float32), gi: int) -> Mat3x4:
-#     result = Mat3x4()
-#     pos = xpos[gi]
-#     result.row0 = wp.vec4(xmat[gi * 9 + 0], xmat[gi * 9 + 1], xmat[gi * 9 + 2],
-#                           pos.x)
-#     result.row1 = wp.vec4(xmat[gi * 9 + 3], xmat[gi * 9 + 4], xmat[gi * 9 + 5],
-#                           pos.y)
-#     result.row2 = wp.vec4(xmat[gi * 9 + 6], xmat[gi * 9 + 7], xmat[gi * 9 + 8],
-#                           pos.z)
-#     return result
-@wp.func
-def xposmat_to_float4(xpos: wp.array(dtype=wp.vec3), xmat: wp.array(dtype=wp.mat33), gi: int) -> Mat3x4:
-    result = Mat3x4()
-    pos = xpos[gi]
-    mat = xmat[gi]
-
-    result.row0 = wp.vec4(mat[0][0], mat[0][1], mat[0][2], pos.x)
-    result.row1 = wp.vec4(mat[1][0], mat[1][1], mat[1][2], pos.y)
-    result.row2 = wp.vec4(mat[2][0], mat[2][1], mat[2][2], pos.z)
-    # result.row0 = wp.vec4(mat[0][0], mat[1][0], mat[2][0], pos.x)
-    # result.row1 = wp.vec4(mat[0][1], mat[1][1], mat[2][1], pos.y)
-    # result.row2 = wp.vec4(mat[0][2], mat[1][2], mat[2][2], pos.z)
-
-    return result
-
-
 @wp.func
 def transform_point(mat: Mat3x4, pos: wp.vec3) -> wp.vec3:
     x = wp.dot(wp.vec3(mat.row0[0], mat.row0[1], mat.row0[2]), pos) + mat.row0[3]
@@ -226,9 +172,11 @@ def transform_point(mat: Mat3x4, pos: wp.vec3) -> wp.vec3:
     z = wp.dot(wp.vec3(mat.row2[0], mat.row2[1], mat.row2[2]), pos) + mat.row2[3]
     return wp.vec3(x, y, z)
 
+
 @wp.func
 def max3(a: wp.vec3, b: wp.vec3):
     return wp.vec3(wp.max(a.x, b.x), wp.max(a.y, b.y), wp.max(a.z, b.z))
+
 
 @wp.func
 def min3(a: wp.vec3, b: wp.vec3):
@@ -253,7 +201,6 @@ def get_dyn_geom_aabb(
     env_id = tid // ngeom
     gid = tid % ngeom
 
-    # mat = xposmat_to_float4(geom_xpos, geom_xmat, env_id * ngeom + gid)
     pos = geom_xpos[env_id * ngeom + gid]
     rot = geom_xmat[env_id * ngeom + gid]
 
@@ -352,12 +299,6 @@ def get_geom_pairs_nxn(
             skip_con = not (
                 (geom_contype[geom1] & geom_conaffinity[geom2]) or (geom_contype[geom2] & geom_conaffinity[geom1])
             )
-
-            # aabb1 = dyn_geom_aabb[(env_id * ngeom + geom1) * 6:(env_id * ngeom + geom1) * 6 + 6]
-            # aabb2 = dyn_geom_aabb[(env_id * ngeom + geom2) * 6:(env_id * ngeom + geom2) * 6 + 6]
-            # separating = ((aabb1[0] > aabb2[3]) or (aabb1[1] > aabb2[4]) or
-            #               (aabb1[2] > aabb2[5]) or (aabb2[0] > aabb1[3]) or
-            #               (aabb2[1] > aabb1[4]) or (aabb2[2] > aabb1[5]))
 
             eg1 = env_id * ngeom + geom1
             eg2 = env_id * ngeom + geom2
@@ -627,121 +568,6 @@ def unsqueeze_array(a: Union[np.ndarray, jax.Array], batch_dim) -> jax.Array:
     return a.reshape(*new_shape)
 
 
-# class CollisionInput:
-#     def __init__(
-#         self,
-#         m: Model,
-#         d: Data,
-#         nenv: int,
-#         nmodel: int,
-#         depth_extension: float,
-#         gjk_iter: int,
-#         epa_iter: int,
-#         epa_best_count: int,
-#         multi_polygon_count: int,
-#         multi_tilt_angle: float,
-#         device,
-#     ):
-#         max_contact_points = d.contact.pos.shape[0]
-#         # n_pts = max_contact_points
-#         #  = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
-#         n_geom_pair = _get_ngeom_pair(m)
-
-#         # n_geom_types = len(GeomType)
-#         # n_geom_type_pairs = n_geom_types * n_geom_types
-#         # type_pair_offset = _get_ngeom_pair_type_offset(m)
-#         # type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
-#         convex_vert, convex_vert_offset = get_convex_vert(m)
-
-#         self.geom_xpos = wp.from_jax(squeeze_array(d.geom_xpos, 2), dtype=wp.vec3).to(device)
-#         self.geom_xmat = wp.from_jax(squeeze_array(d.geom_xmat, 3), dtype=wp.mat33).to(device)
-#         self.geom_size = wp.from_jax(squeeze_array(m.geom_size, 2), dtype=wp.vec3).to(device)
-#         self.geom_type = wp.array(m.geom_type, dtype=wp.int32)
-#         self.geom_contype = wp.array(m.geom_contype, dtype=wp.int32)
-#         self.geom_conaffinity = wp.array(m.geom_conaffinity, dtype=wp.int32)
-#         self.geom_priority = wp.array(m.geom_priority, dtype=wp.int32)
-#         self.geom_margin = wp.array(squeeze_array(m.geom_margin, 1), dtype=wp.float32)
-#         self.geom_gap = wp.array(squeeze_array(m.geom_gap, 1), dtype=wp.float32)
-#         self.geom_solmix = wp.array(squeeze_array(m.geom_solmix, 1), dtype=wp.float32)
-#         self.geom_friction = wp.array(squeeze_array(m.geom_friction, 2), dtype=wp.float32)
-#         self.geom_solref = wp.array(squeeze_array(m.geom_solref, 2), dtype=wp.float32)
-#         self.geom_solimp = wp.array(squeeze_array(m.geom_solimp, 2), dtype=wp.float32)
-#         self.geom_aabb = wp.array(m.geom_aabb.reshape((-1, 6)), dtype=wp.float32)
-#         self.geom_rbound = wp.array(squeeze_array(m.geom_rbound, 1), dtype=wp.float32)
-#         self.geom_dataid = wp.array(m.geom_dataid, dtype=wp.int32)
-#         self.geom_bodyid = wp.array(m.geom_bodyid, dtype=wp.int32)
-#         self.body_parentid = wp.array(m.body_parentid, dtype=wp.int32)
-#         self.body_weldid = wp.array(m.body_weldid, dtype=wp.int32)
-#         self.body_contype = wp.array(m.body_contype, dtype=wp.int32)
-#         self.body_conaffinity = wp.array(m.body_conaffinity, dtype=wp.int32)
-#         self.body_geomadr = wp.array(m.body_geomadr, dtype=wp.int32)
-#         self.body_geomnum = wp.array(m.body_geomnum, dtype=wp.int32)
-#         self.body_has_plane = wp.array(_get_body_has_plane(m), dtype=bool)
-#         self.pair_geom1 = wp.array(m.pair_geom1, dtype=wp.int32)
-#         self.pair_geom2 = wp.array(m.pair_geom2, dtype=wp.int32)
-#         self.exclude_signature = wp.array(m.exclude_signature, dtype=wp.int32)
-#         self.pair_margin = wp.array(m.pair_margin, dtype=wp.float32)
-#         self.pair_gap = wp.array(m.pair_gap, dtype=wp.float32)
-#         self.pair_friction = wp.array(m.pair_friction, dtype=wp.float32)
-#         # self.pair_solref = wp.array(m.pair_solref, dtype=wp.float32)
-#         # self.pair_solimp = wp.array(m.pair_solimp, dtype=wp.float32)
-#         self.convex_vert = wp.from_jax(convex_vert, dtype=wp.vec3).to(device)
-#         self.convex_vert_offset = wp.from_jax(convex_vert_offset, dtype=wp.int32).to(device)
-#         self.type_pair_offset = wp.array(_get_ngeom_pair_type_offset(m), dtype=wp.int32)
-#         self.ngeom = len(m.geom_type)
-#         self.npair = m.npair
-#         self.nbody = m.nbody
-#         self.nexclude = m.nexclude
-#         self.max_contact_points = max_contact_points
-#         self.n_geom_pair = n_geom_pair
-#         self.n_geom_types = len(GeomType)
-#         self.filter_parent = not (m.opt.disableflags & DisableBit.FILTERPARENT)
-#         self.depth_extension = depth_extension
-#         self.gjk_iteration_count = gjk_iter
-#         self.epa_iteration_count = epa_iter
-#         self.epa_best_count = epa_best_count
-#         self.multi_polygon_count = multi_polygon_count
-#         self.multi_tilt_angle = wp.float32(multi_tilt_angle)
-#         self.nenv = nenv
-#         self.nmodel = nmodel
-
-
-# class CollisionOutput:
-#     def __init__(
-#         self,
-#         n_points: int,
-#         nenv: int,
-#         nbody: int,
-#         ngeom: int,
-#         n_geom_pair: int,
-#         n_geom_types: int,
-#         mjNREF: int,
-#         mjNIMP: int,
-#     ):
-#         self.dist = wp.empty(n_points, dtype=wp.float32)
-#         self.pos = wp.empty(n_points, dtype=wp.vec3)
-#         self.normal = wp.empty(n_points, dtype=wp.vec3)
-#         self.g1 = wp.empty(n_points, dtype=wp.int32)
-#         self.g2 = wp.empty(n_points, dtype=wp.int32)
-#         self.includemargin = wp.empty(n_points, dtype=wp.float32)
-#         self.friction = wp.empty((n_points, 5), dtype=wp.float32)
-#         self.solref = wp.empty((n_points, mjNREF), dtype=wp.float32)
-#         self.solreffriction = wp.empty((n_points, mjNREF), dtype=wp.float32)
-#         self.solimp = wp.empty((n_points, mjNIMP), dtype=wp.float32)
-#         self.dyn_body_aamm = wp.empty((nenv * nbody, 6), dtype=wp.float32)
-#         self.col_body_pair = wp.empty((nenv * nbody * nbody, 2), dtype=wp.int32)
-#         self.env_counter = wp.empty(nenv, dtype=wp.int32)
-#         self.env_counter2 = wp.empty(nenv, dtype=wp.int32)
-#         self.env_offset = wp.empty(nenv, dtype=wp.int32)
-#         self.dyn_geom_aabb = wp.empty((nenv * ngeom, 6), dtype=wp.float32)
-#         self.col_geom_pair = wp.empty((n_geom_pair, 2), dtype=wp.int32)
-#         self.type_pair_env_id = wp.empty(n_geom_pair, dtype=wp.int32)
-#         self.type_pair_geom_id = wp.empty((n_geom_pair, 2), dtype=wp.int32)
-#         self.type_pair_count = wp.empty(n_geom_types * n_geom_types, dtype=wp.int32)
-#         self.tmp_count = wp.empty(1, dtype=wp.int32)
-#         # self.simplex = wp.empty(n_points, dtype=wp.types.matrix(shape=(4, 3), dtype=float))
-
-
 @wp.kernel
 def finalize_sum(
     nenv: int, scan: wp.array(dtype=wp.int32), data_before_scan: wp.array(dtype=wp.int32), sum: wp.array(dtype=wp.int32)
@@ -836,67 +662,7 @@ def make_frame(
     )
     # fmt: on
 
-    # m[0][0] = a_normalized.x
-    # m[0][1] = a_normalized.y
-    # m[0][2] = a_normalized.z
-    # m[1][0] = basis.b.x
-    # m[1][1] = basis.b.y
-    # m[1][2] = basis.b.z
-    # m[2][0] = basis.c.x
-    # m[2][1] = basis.c.y
-    # m[2][2] = basis.c.z
-
     frame[tid] = m
-
-
-# def _narrowphase2(s, input, output, t1, t2):
-#     _narrowphase(
-#         t1,
-#         t2,
-#         input.gjk_iteration_count,
-#         input.epa_iteration_count,
-#         input.nenv,
-#         input.ngeom,
-#         input.nmodel,
-#         input.n_geom_types,
-#         input.max_contact_points,  # ncon,
-#         output.type_pair_env_id,
-#         output.type_pair_geom_id,
-#         output.type_pair_count,
-#         input.type_pair_offset,
-#         input.geom_xpos,
-#         input.geom_xmat,
-#         input.geom_size,
-#         input.geom_dataid,
-#         input.convex_vert,
-#         input.convex_vert_offset,
-#         input.epa_best_count,
-#         input.depth_extension,
-#         input.multi_polygon_count,
-#         input.multi_tilt_angle,
-#         # outputs
-#         output.env_counter,
-#         output.g1,
-#         output.g2,
-#         output.dist,
-#         output.pos,
-#         output.normal,
-#     )
-
-
-# def narrowphase2(s, input, output):
-#     """
-#     Perform the narrowphase collision detection based on geometry types.
-
-#     Args:
-#         s: CUDA stream.
-#         input (CollisionInput): Input collision data.
-#         output (CollisionOutput): Output collision data.
-#     """
-
-#     for t2 in range(mjxGEOM_size):
-#         for t1 in range(t2 + 1):
-#             _narrowphase2(s, input, output, t1, t2)
 
 
 def collision(
@@ -1295,275 +1061,3 @@ def collision(
     )
 
     return True
-
-
-# def collision2(
-#     m: Model,
-#     d: Data,
-#     depth_extension: float,
-#     gjk_iter: int,
-#     epa_iter: int,
-#     epa_best_count: int,
-#     multi_polygon_count: int,
-#     multi_tilt_angle: float,
-#     device="cuda",
-# ) -> Contact:
-#     """GJK/EPA narrowphase routine."""
-#     ngeom = m.ngeom
-#     nenv = 1
-#     nmodel = 1
-
-#     if not (m.geom_condim[0] == m.geom_condim).all():
-#         raise NotImplementedError(
-#             "m.geom_condim should be the same for all geoms. Different condim per geom is not supported yet."
-#         )
-#     if d.geom_xpos.ndim == 3:
-#         # batching is used (i.e. vmap)
-#         nenv = d.geom_xpos.shape[0]
-#         # squeeze first two dimensions
-#         # d.geom_xpos = d.geom_xpos.reshape(nenv * ngeom, 3)
-#         # d.geom_xmat = d.geom_xmat.reshape(nenv * ngeom, 3, 3)
-#         # d.geom_size = d.geom_size.reshape(nenv * ngeom)
-#         assert d.contact.pos.shape[0] == nenv
-#         max_contact_points = nenv * d.contact.pos.shape[1]
-#     else:
-#         if len(d.geom_xpos.shape) != 2:
-#             raise ValueError(f'd.geom_xpos should have 2d shape, got "{d.geom_xpos.shape}".')
-#         if len(d.geom_xmat.shape) != 3:
-#             raise ValueError(f'd.geom_xmat should have 3d shape, got "{d.geom_xmat.shape}".')
-#         if m.geom_size.shape[0] != ngeom:
-#             raise ValueError(f'm.geom_size.shape[0] should be ngeom ({ngeom}), got "{m.geom_size.shape[0]}".')
-#         max_contact_points = d.contact.pos.shape[0]
-#     if m.geom_dataid.shape != (ngeom,):
-#         raise ValueError(f'm.geom_dataid.shape should be (ngeom,) == ({ngeom},), got "({m.geom_dataid.shape[0]},)".')
-#     if m.npair > 0:
-#         raise NotImplementedError("m.npair > 0 is not supported.")
-
-#     with wp.ScopedDevice(device):
-#         n_pts = max_contact_points
-#         body_pair_size = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
-#         n_geom_pair = _get_ngeom_pair(m)
-
-#         n_geom_types = len(GeomType)
-#         n_geom_type_pairs = n_geom_types * n_geom_types
-#         type_pair_offset = _get_ngeom_pair_type_offset(m)
-#         type_pair_count = wp.zeros(n_geom_type_pairs, dtype=wp.int32)
-#         # convex_vert, convex_vert_offset = engine_collision_convex.get_convex_vert(m)
-
-#         mjNREF = int(2)
-#         mjNIMP = int(5)
-#         mjMINVAL = float(1e-15)
-
-#         # Initialize input and output structures
-#         input = CollisionInput(
-#             m,
-#             d,
-#             nenv,
-#             nmodel,
-#             depth_extension,
-#             gjk_iter,
-#             epa_iter,
-#             epa_best_count,
-#             multi_polygon_count,
-#             multi_tilt_angle,
-#             device=device,
-#         )
-#         output = CollisionOutput(
-#             n_pts,
-#             nenv=nenv,
-#             nbody=m.nbody,
-#             ngeom=ngeom,
-#             n_geom_pair=n_geom_pair,
-#             n_geom_types=n_geom_types,
-#             mjNREF=mjNREF,
-#             mjNIMP=mjNIMP,
-#         )
-
-#         # Call the collision function using Warp kernels
-#         _collision(input, output)
-
-#         # Assuming output.normal is a Warp array of wp.vec3
-#         n_frames = len(output.normal)
-
-#         # Allocate memory for the frame
-#         frame = wp.zeros(n_frames, dtype=wp.mat33)
-
-#         # Launch the make_frame kernel
-#         wp.launch(make_frame, dim=n_frames, inputs=[n_frames, output.normal], outputs=[frame])
-
-#         # Synchronize to ensure the kernel has completed
-#         wp.synchronize()
-
-#         c = Contact(
-#             dist=wp.to_jax(output.dist),
-#             pos=wp.to_jax(output.pos),
-#             frame=wp.to_jax(frame),
-#             includemargin=wp.to_jax(output.includemargin),
-#             friction=wp.to_jax(output.friction),
-#             solref=wp.to_jax(output.solref),
-#             solreffriction=wp.to_jax(output.solreffriction),
-#             solimp=wp.to_jax(output.solimp),
-#             geom1=wp.to_jax(output.g1),
-#             geom2=wp.to_jax(output.g2),
-#             geom=jp.array([wp.to_jax(output.g1), wp.to_jax(output.g2)]).T,
-#             efc_address=np.array([d.contact.efc_address]),
-#             dim=np.array([d.contact.dim]),
-#         )
-
-#     return c
-
-
-# def collision(
-#     m: Model,
-#     d: Data,
-#     depth_extension: float,
-#     gjk_iter: int,
-#     epa_iter: int,
-#     epa_best_count: int,
-#     multi_polygon_count: int,
-#     multi_tilt_angle: float,
-# ) -> Contact:
-#     """GJK/EPA narrowphase routine."""
-#     ngeom = m.ngeom
-
-#     if not (m.geom_condim[0] == m.geom_condim).all():
-#         raise NotImplementedError(
-#             "m.geom_condim should be the same for all geoms. Different condim per" " geom is not supported yet."
-#         )
-#     if len(d.geom_xpos.shape) != 2:
-#         raise ValueError(f'd.geom_xpos should have 2d shape, got "{len(d.geom_xpos.shape)}".')
-#     if len(d.geom_xmat.shape) != 3:
-#         raise ValueError(f'd.geom_xmat should have 3d shape, got "{len(d.geom_xmat.shape)}".')
-#     if m.geom_size.shape[0] != ngeom:
-#         raise ValueError(f"m.geom_size.shape[0] should be ngeom ({ngeom}), " f'got "{m.geom_size.shape[0]}".')
-#     if m.geom_dataid.shape != (ngeom,):
-#         raise ValueError(
-#             f"m.geom_dataid.shape should be (ngeom,) == ({ngeom},), got" f' "({m.geom_dataid.shape[0]},)".'
-#         )
-#     if m.npair > 0:
-#         raise NotImplementedError("m.npair > 0 is not supported.")
-
-#     # TODO(btaba): geom_margin/gap are not supported, we should throw an error in
-#     #   put_model.
-
-#     max_contact_points = d.contact.pos.shape[0]
-#     n_pts = max_contact_points
-#     body_pair_size = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
-#     n_geom_pair = _get_ngeom_pair(m)
-#     out_types = (
-#         # Output buffers.
-#         jax.ShapeDtypeStruct((n_pts,), dtype=jp.float32),  # dist
-#         jax.ShapeDtypeStruct((n_pts, 3), dtype=jp.float32),  # pos
-#         jax.ShapeDtypeStruct((n_pts, 3), dtype=jp.float32),  # normal
-#         jax.ShapeDtypeStruct((n_pts,), dtype=jp.int32),  # g1
-#         jax.ShapeDtypeStruct((n_pts,), dtype=jp.int32),  # g2
-#         jax.ShapeDtypeStruct((n_pts,), dtype=jp.float32),  # includemargin
-#         jax.ShapeDtypeStruct((n_pts, 5), dtype=jp.float32),  # friction
-#         jax.ShapeDtypeStruct((n_pts, mujoco.mjNREF), dtype=jp.float32),  # solref
-#         jax.ShapeDtypeStruct((n_pts, mujoco.mjNREF), dtype=jp.float32),  # solreffriction
-#         jax.ShapeDtypeStruct((n_pts, mujoco.mjNIMP), dtype=jp.float32),  # solimp
-#         # Buffers used for intermediate results.
-#         # TODO(btaba): combine and re-use buffers instead of having so many.
-#         jax.ShapeDtypeStruct((m.nbody, 6), dtype=jp.float32),  # dyn_body_aamm
-#         jax.ShapeDtypeStruct((body_pair_size, 2), dtype=jp.int32),  # col_body_pair
-#         jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_counter
-#         jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_counter2
-#         jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_offset
-#         jax.ShapeDtypeStruct((ngeom, 6), dtype=jp.float32),  # dyn_geom_aabb
-#         jax.ShapeDtypeStruct((n_geom_pair, 2), dtype=jp.int32),  # col_geom_pair
-#         jax.ShapeDtypeStruct((n_geom_pair,), dtype=jp.uint32),  # type_pair_env_id
-#         jax.ShapeDtypeStruct((n_geom_pair * 2,), dtype=jp.uint32),  # type_pair_geom_id
-#     )
-
-#     n_geom_types = len(GeomType)
-#     n_geom_type_pairs = n_geom_types * n_geom_types
-#     type_pair_offset = _get_ngeom_pair_type_offset(m)
-#     type_pair_count = np.zeros(n_geom_type_pairs, dtype=np.uint32)
-
-#     convex_vert, convex_vert_offset = engine_collision_convex.get_convex_vert(m)
-#     (
-#         dist,
-#         pos,
-#         normal,
-#         g1,
-#         g2,
-#         includemargin,
-#         friction,
-#         solref,
-#         solreffriction,
-#         solimp,
-#         *_,
-#     ) = ffi.ffi_call(
-#         "collision_driver_cuda",
-#         out_types,
-#         d.geom_xpos,
-#         d.geom_xmat,
-#         m.geom_size,
-#         m.geom_type,
-#         m.geom_contype,
-#         m.geom_conaffinity,
-#         m.geom_priority,
-#         m.geom_margin,
-#         m.geom_gap,
-#         m.geom_solmix,
-#         m.geom_friction,
-#         m.geom_solref,
-#         m.geom_solimp,
-#         # TODO(btaba): allow vmapping over sizes via geom_aabb/rbound jax.Array.
-#         m.geom_aabb,
-#         m.geom_rbound,
-#         m.geom_dataid,
-#         m.geom_bodyid,
-#         m.body_parentid,
-#         m.body_weldid,
-#         m.body_contype,
-#         m.body_conaffinity,
-#         m.body_geomadr,
-#         m.body_geomnum.astype(np.uint32),
-#         _get_body_has_plane(m),
-#         m.pair_geom1,
-#         m.pair_geom2,
-#         m.exclude_signature,
-#         m.pair_margin,
-#         m.pair_gap,
-#         m.pair_friction,
-#         m.pair_solref,
-#         m.pair_solimp,
-#         convex_vert,
-#         convex_vert_offset,
-#         type_pair_offset.astype(np.uint32),
-#         type_pair_count,
-#         ngeom=np.uint32(ngeom),
-#         npair=np.uint32(m.npair),
-#         nbody=np.uint32(m.nbody),
-#         nexclude=np.uint32(m.nexclude),
-#         max_contact_points=np.uint32(max_contact_points),
-#         n_geom_pair=np.uint32(n_geom_pair),
-#         n_geom_types=np.uint32(n_geom_types),
-#         filter_parent=not (m.opt.disableflags & DisableBit.FILTERPARENT),
-#         depth_extension=np.float32(depth_extension),
-#         gjk_iteration_count=np.uint32(gjk_iter),
-#         epa_iteration_count=np.uint32(epa_iter),
-#         epa_best_count=np.uint32(epa_best_count),
-#         multi_polygon_count=np.uint32(multi_polygon_count),
-#         multi_tilt_angle=np.float32(multi_tilt_angle),
-#         vectorized=True,
-#     )
-
-#     c = Contact(
-#         dist=dist,
-#         pos=pos,
-#         frame=jax.vmap(math.make_frame)(normal),
-#         includemargin=includemargin,
-#         friction=friction,
-#         solref=solref,
-#         solreffriction=solreffriction,
-#         solimp=solimp,
-#         geom1=g1,
-#         geom2=g2,
-#         geom=jp.array([g1, g2]).T,
-#         efc_address=d.contact.efc_address,
-#         dim=d.contact.dim,
-#     )
-
-#     return c

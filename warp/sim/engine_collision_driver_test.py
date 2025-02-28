@@ -28,7 +28,7 @@ import warp as wp
 
 wp.config.verify_cuda = True
 wp.config.verify_fp = True
-wp.config.verbose = True
+# wp.config.verbose = True
 
 wp.set_device("cpu")
 
@@ -336,14 +336,14 @@ class EngineCollisionDriverTest(absltest.TestCase):
 
 
 if __name__ == "__main__":
-    # absltest.main()
-    test = EngineCollisionDriverTest()
-    print("test_shapes")
-    test.test_shapes()
-    print("test_contacts_batched_model_data")
-    test.test_contacts_batched_model_data()
-    print("test_contacts_batched_data")
-    test.test_contacts_batched_data()
-    print("test_solparams")
-    test.test_solparams()
-    print("done")
+    absltest.main()
+    # test = EngineCollisionDriverTest()
+    # print("test_shapes")
+    # test.test_shapes()
+    # print("test_contacts_batched_model_data")
+    # test.test_contacts_batched_model_data()
+    # print("test_contacts_batched_data")
+    # test.test_contacts_batched_data()
+    # print("test_solparams")
+    # test.test_solparams()
+    # print("done")

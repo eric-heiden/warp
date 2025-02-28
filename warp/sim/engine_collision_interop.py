@@ -186,12 +186,6 @@ def gjk_epa_jax(
 
     npair = geom_pair.shape[0]
     n_points = ncon * npair
-    # out_types = (
-    #     jax.ShapeDtypeStruct((n_points,), dtype=jp.float32),  # dist
-    #     jax.ShapeDtypeStruct((n_points, 3), dtype=jp.float32),  # pos
-    #     jax.ShapeDtypeStruct((npair, 3), dtype=jp.float32),  # normal
-    #     jax.ShapeDtypeStruct((npair, 12), dtype=jp.float32),  # simplex
-    # )
     output_dims = {
         "dist": (n_points,),
         "pos": (n_points, 3),
@@ -260,30 +254,6 @@ def collision_jax(
     # n_pts = max_contact_points
     # body_pair_size = int((m.nbody * (m.nbody - 1) / 2 + 15) / 16) * 16
     n_geom_pair = _get_ngeom_pair(m)
-    # out_types = (
-    #     # Output buffers.
-    #     jax.ShapeDtypeStruct((n_pts,), dtype=jp.float32),  # dist
-    #     jax.ShapeDtypeStruct((n_pts, 3), dtype=jp.float32),  # pos
-    #     jax.ShapeDtypeStruct((n_pts, 3), dtype=jp.float32),  # normal
-    #     jax.ShapeDtypeStruct((n_pts,), dtype=jp.int32),  # g1
-    #     jax.ShapeDtypeStruct((n_pts,), dtype=jp.int32),  # g2
-    #     jax.ShapeDtypeStruct((n_pts,), dtype=jp.float32),  # includemargin
-    #     jax.ShapeDtypeStruct((n_pts, 5), dtype=jp.float32),  # friction
-    #     jax.ShapeDtypeStruct((n_pts, mujoco.mjNREF), dtype=jp.float32),  # solref
-    #     jax.ShapeDtypeStruct((n_pts, mujoco.mjNREF), dtype=jp.float32),  # solreffriction
-    #     jax.ShapeDtypeStruct((n_pts, mujoco.mjNIMP), dtype=jp.float32),  # solimp
-    #     # Buffers used for intermediate results.
-    #     # TODO(btaba): combine and re-use buffers instead of having so many.
-    #     jax.ShapeDtypeStruct((m.nbody, 6), dtype=jp.float32),  # dyn_body_aamm
-    #     jax.ShapeDtypeStruct((body_pair_size, 2), dtype=jp.int32),  # col_body_pair
-    #     jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_counter
-    #     jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_counter2
-    #     jax.ShapeDtypeStruct((1,), dtype=jp.uint32),  # env_offset
-    #     jax.ShapeDtypeStruct((ngeom, 6), dtype=jp.float32),  # dyn_geom_aabb
-    #     jax.ShapeDtypeStruct((n_geom_pair, 2), dtype=jp.int32),  # col_geom_pair
-    #     jax.ShapeDtypeStruct((n_geom_pair,), dtype=jp.uint32),  # type_pair_env_id
-    #     jax.ShapeDtypeStruct((n_geom_pair * 2,), dtype=jp.uint32),  # type_pair_geom_id
-    # )
 
     n_geom_types = len(GeomType)
     n_geom_type_pairs = n_geom_types * n_geom_types
