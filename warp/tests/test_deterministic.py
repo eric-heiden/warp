@@ -162,6 +162,16 @@ def _det_closure_transform_b(x: wp.float32) -> wp.float32:
     return x + wp.float32(2.0)
 
 
+@wp.func
+def _det_helper_atomic_add(output: wp.array(dtype=wp.float32), index: int, value: wp.float32):
+    wp.atomic_add(output, index, value)
+
+
+@wp.func
+def _det_helper_counter_alloc(counter: wp.array(dtype=wp.int32)) -> int:
+    return wp.atomic_add(counter, 0, 1)
+
+
 def _make_deterministic_closure_kernel(transform_func):
     @wp.kernel(deterministic=True, module="unique")
     def _deterministic_closure_kernel(
@@ -172,6 +182,31 @@ def _make_deterministic_closure_kernel(transform_func):
         wp.atomic_add(output, tid % 8, transform_func(data[tid]))
 
     return _deterministic_closure_kernel
+
+
+def _make_deterministic_helper_scatter_kernel(transform_func):
+    @wp.kernel(deterministic=True, module="unique")
+    def _deterministic_helper_scatter_kernel(
+        data: wp.array(dtype=wp.float32),
+        output: wp.array(dtype=wp.float32),
+    ):
+        tid = wp.tid()
+        _det_helper_atomic_add(output, tid % 8, transform_func(data[tid]))
+
+    return _deterministic_helper_scatter_kernel
+
+
+@wp.kernel(deterministic=True, module="unique")
+def helper_counter_kernel(
+    data: wp.array(dtype=wp.float32),
+    flags: wp.array(dtype=wp.int32),
+    counter: wp.array(dtype=wp.int32),
+    output: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    if flags[tid] != 0:
+        slot = _det_helper_counter_alloc(counter)
+        output[slot] = data[tid]
 
 
 @wp.kernel
@@ -1017,6 +1052,62 @@ def test_deterministic_closure_kernel(test, device):
     test.assertFalse(np.array_equal(results_a[0], results_b[0]))
 
 
+
+def test_helper_function_scatter_atomic(test, device):
+    """Verify helper-function scatter atomics stay deterministic for simple direct-array targets."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    kernel = _make_deterministic_helper_scatter_kernel(_det_closure_transform_a)
+    data_np = np.arange(32, dtype=np.float32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+
+    expected = np.zeros(8, dtype=np.float32)
+    for tid in range(data_np.shape[0]):
+        bucket = tid % 8
+        expected[bucket] = np.float32(expected[bucket] + (data_np[tid] + np.float32(1.0)))
+
+    results = []
+    for _ in range(3):
+        output = wp.zeros(8, dtype=wp.float32, device=device)
+        wp.launch(kernel, dim=32, inputs=[data], outputs=[output], device=device)
+        results.append(output.numpy().copy())
+
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+
+def test_helper_function_counter_atomic(test, device):
+    """Verify helper-function counters remain deterministic for simple direct-array targets."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(32)
+    data_np = rng.random(64, dtype=np.float32)
+    flags_np = (rng.random(64) > 0.4).astype(np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    flags = wp.array(flags_np, dtype=wp.int32, device=device)
+    expected = data_np[flags_np != 0]
+
+    results = []
+    counts = []
+    for _ in range(3):
+        counter = wp.zeros(1, dtype=wp.int32, device=device)
+        output = wp.zeros(int(flags_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(helper_counter_kernel, dim=64, inputs=[data, flags], outputs=[counter, output], device=device)
+        count = int(counter.numpy()[0])
+        counts.append(count)
+        results.append(output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counts), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+
 def test_record_cmd_deterministic_launch(test, device):
     """Verify ``record_cmd=True`` works for deterministic CUDA launches."""
     if device.is_cpu:
@@ -1252,6 +1343,18 @@ add_function_test(
 )
 add_function_test(
     TestDeterministic, "test_deterministic_closure_kernel", test_deterministic_closure_kernel, devices=cuda_devices
+)
+add_function_test(
+    TestDeterministic,
+    "test_helper_function_scatter_atomic",
+    test_helper_function_scatter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_helper_function_counter_atomic",
+    test_helper_function_counter_atomic,
+    devices=cuda_devices,
 )
 add_function_test(
     TestDeterministic,

@@ -518,8 +518,10 @@ class Function:
         bound_args = tuple(bound_args.arguments.values())
         return call_builtin_from_desc(desc, bound_args)
 
-    def build(self, builder: ModuleBuilder | None):
-        self.adj.build(builder)
+    def build(self, builder: ModuleBuilder | None, default_builder_options=None):
+        if default_builder_options is None:
+            default_builder_options = getattr(builder, "options", None)
+        self.adj.build(builder, default_builder_options)
 
         # complete the function return type after we have analyzed it (inferred from return statement in ast)
         if not self.value_func:
@@ -2031,7 +2033,7 @@ class ModuleHasher:
         from warp._src.deterministic import is_deterministic_mode_enabled  # noqa: PLC0415
 
         if is_deterministic_mode_enabled(resolved_options.get("deterministic")) and not hasattr(kernel.adj, "det_meta"):
-            kernel.adj.build(None, resolved_options)
+            kernel.adj.build(None, resolved_options | {"output_arch": None})
 
         ch.update(bytes(kernel.key, "utf-8"))
         if kernel.options:
@@ -2235,7 +2237,19 @@ class ModuleBuilder:
         if func in self.functions:
             return
         else:
-            func.build(self)
+            # Temporary workaround for PR #1355: deterministic atomic interception
+            # currently injects kernel-only hidden scatter/counter params into
+            # nested @wp.func bodies, which breaks CUDA helper compilation.
+            # Build user functions with deterministic codegen disabled so helper
+            # atomics fall back to normal atomic code while kernels can still use
+            # deterministic interception for atomics emitted directly in kernels.
+            prev_options = self.options
+            if prev_options.get("deterministic"):
+                self.options = self.options | {"deterministic": False, "deterministic_debug": False}
+            try:
+                func.build(self)
+            finally:
+                self.options = prev_options
 
             # use dict to preserve import order
             self.functions[func] = None

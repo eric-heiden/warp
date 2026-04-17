@@ -1593,7 +1593,7 @@ class Adjoint:
                 func.adj.used_by_backward_kernel = True
 
             if adj.builder is None:
-                func.build(None)
+                func.build(None, adj.builder_options)
 
             elif func not in adj.builder.functions:
                 adj.builder.build_function(func)
@@ -1683,7 +1683,10 @@ class Adjoint:
                 if adj.used_by_backward_kernel:
                     func_arg_var.adj.used_by_backward_kernel = True
 
-                adj.builder.build_function(func_arg_var)
+                if adj.builder is None:
+                    func_arg_var.build(None, adj.builder_options)
+                else:
+                    adj.builder.build_function(func_arg_var)
 
             fwd_args.append(strip_reference(func_arg_var))
 
@@ -1774,6 +1777,13 @@ class Adjoint:
         scalar_dtype = value_dtype
         if hasattr(scalar_dtype, "_wp_scalar_type_"):
             scalar_dtype = scalar_dtype._wp_scalar_type_
+
+        # Temporary workaround for PR #1355: only intercept atomics whose
+        # destination array is a direct kernel argument. Array-view targets like
+        # arr[worldid] currently cannot be resolved reliably in the launch-time
+        # sort-reduce path, which otherwise leaves dest_arr=None.
+        if not any(arg.label == arr_var.label for arg in adj.args):
+            return None
 
         # Determine if the return value is actually consumed by the caller.
         # When called from emit_AugAssign (arr[i] += val) or a bare expression,
@@ -1957,7 +1967,7 @@ class Adjoint:
 
             # Build the function if not already built
             if adj.builder is None:
-                func.build(None)
+                func.build(None, adj.builder_options)
             elif func not in adj.builder.functions:
                 adj.builder.build_function(func)
 
