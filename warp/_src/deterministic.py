@@ -1,21 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deterministic execution mode for Warp.
+"""Deterministic execution mode helpers for Warp codegen and launch.
 
 This module implements the scatter-sort-reduce and two-pass strategies for
 making atomic operations produce bit-exact reproducible results.
 
 Two patterns of atomic usage are supported:
 
-Pattern A — Accumulation (return value unused):
+Pattern A -- Accumulation (return value unused):
     ``wp.atomic_add(arr, idx, value)`` or ``arr[idx] += value``
-    Strategy: Scatter records to a temporary buffer during the kernel, then
-    sort by (dest_index, thread_id) and reduce in fixed order post-kernel.
+    Strategy: scatter records to a temporary buffer during kernel execution,
+    then sort by ``(dest_index, thread_id)`` and reduce in fixed order.
 
-Pattern B — Counter/Allocator (return value used):
+Pattern B -- Counter/Allocator (return value used):
     ``slot = wp.atomic_add(counter, 0, 1)``
-    Strategy: Two-pass execution. Phase 0 records each thread's contribution
+    Strategy: two-pass execution. Phase 0 records each thread's contribution
     with all side effects suppressed. Prefix sum computes deterministic
     offsets. Phase 1 re-executes with deterministic slot assignments.
 
@@ -24,7 +24,9 @@ See ``warp.config.deterministic`` for the user-facing configuration modes.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import warp
 from warp._src import utils as warp_utils
@@ -34,40 +36,29 @@ REDUCE_OP_ADD = 0
 REDUCE_OP_MIN = 1
 REDUCE_OP_MAX = 2
 
-DETERMINISM_NOT_GUARANTEED = "not_guaranteed"
-DETERMINISM_RUN_TO_RUN = "run_to_run"
-DETERMINISM_GPU_TO_GPU = "gpu_to_gpu"
+DETERMINISTIC_NOT_GUARANTEED = "not_guaranteed"
+DETERMINISTIC_RUN_TO_RUN = "run_to_run"
+DETERMINISTIC_GPU_TO_GPU = "gpu_to_gpu"
 
-_VALID_DETERMINISM_MODES = {
-    DETERMINISM_NOT_GUARANTEED,
-    DETERMINISM_RUN_TO_RUN,
-    DETERMINISM_GPU_TO_GPU,
+DETERMINISTIC_FAMILY_ADD = "add"
+DETERMINISTIC_FAMILY_MIN = "min"
+DETERMINISTIC_FAMILY_MAX = "max"
+DETERMINISTIC_FAMILY_COUNTER = "counter"
+
+_VALID_DETERMINISTIC_MODES = {
+    DETERMINISTIC_NOT_GUARANTEED,
+    DETERMINISTIC_RUN_TO_RUN,
+    DETERMINISTIC_GPU_TO_GPU,
 }
 
-_DETERMINISM_MODE_IDS = {
-    DETERMINISM_NOT_GUARANTEED: 0,
-    DETERMINISM_RUN_TO_RUN: 1,
-    DETERMINISM_GPU_TO_GPU: 2,
+_DETERMINISTIC_MODE_IDS = {
+    DETERMINISTIC_NOT_GUARANTEED: 0,
+    DETERMINISTIC_RUN_TO_RUN: 1,
+    DETERMINISTIC_GPU_TO_GPU: 2,
 }
 
-# Map from Warp builtin names to (is_accumulation, reduce_op).
-# Atomics whose return value is consumed are always Pattern B (counter);
-# this table is used only for Pattern A classification.
-_ATOMIC_OP_INFO = {
-    "atomic_add": (True, REDUCE_OP_ADD),
-    "atomic_sub": (True, REDUCE_OP_ADD),  # codegen negates value before scattering
-    "atomic_min": (True, REDUCE_OP_MIN),
-    "atomic_max": (True, REDUCE_OP_MAX),
-}
 
-# Atomics that are associative+commutative on integers (no transform needed).
-_ALREADY_DETERMINISTIC_OPS = {"atomic_and", "atomic_or", "atomic_xor"}
-
-# Atomics that are inherently order-dependent (cannot be made deterministic).
-_ORDER_DEPENDENT_OPS = {"atomic_cas", "atomic_exch"}
-
-
-def normalize_determinism_mode(value, option_name="deterministic", allow_none=False):
+def normalize_deterministic_mode(value, option_name="deterministic", allow_none=False):
     """Normalize user-facing deterministic mode values.
 
     The public API accepts the explicit mode strings plus ``True``/``False``
@@ -75,28 +66,19 @@ def normalize_determinism_mode(value, option_name="deterministic", allow_none=Fa
 
     - ``False`` -> ``"not_guaranteed"``
     - ``True`` -> ``"run_to_run"``
-
-    Args:
-        value: User-provided config or option value.
-        option_name: Option name to use in error messages.
-        allow_none: Whether ``None`` is permitted.
-
-    Returns:
-        The normalized deterministic mode string, or ``None`` when
-        ``allow_none`` is ``True`` and the input is ``None``.
     """
     if value is None:
         if allow_none:
             return None
-        return DETERMINISM_NOT_GUARANTEED
+        return DETERMINISTIC_NOT_GUARANTEED
 
     if isinstance(value, bool):
-        return DETERMINISM_RUN_TO_RUN if value else DETERMINISM_NOT_GUARANTEED
+        return DETERMINISTIC_RUN_TO_RUN if value else DETERMINISTIC_NOT_GUARANTEED
 
     if isinstance(value, str):
-        if value in _VALID_DETERMINISM_MODES:
+        if value in _VALID_DETERMINISTIC_MODES:
             return value
-        valid_modes = ", ".join(repr(mode) for mode in sorted(_VALID_DETERMINISM_MODES))
+        valid_modes = ", ".join(repr(mode) for mode in sorted(_VALID_DETERMINISTIC_MODES))
         raise ValueError(f"{option_name} must be one of {valid_modes}, got {value!r}")
 
     raise TypeError(f"{option_name} must be a bool or string, got {type(value).__name__}")
@@ -104,46 +86,134 @@ def normalize_determinism_mode(value, option_name="deterministic", allow_none=Fa
 
 def is_deterministic_mode_enabled(value) -> bool:
     """Return ``True`` if a deterministic mode stronger than default is enabled."""
-    return normalize_determinism_mode(value) != DETERMINISM_NOT_GUARANTEED
+    return normalize_deterministic_mode(value) != DETERMINISTIC_NOT_GUARANTEED
 
 
-def determinism_mode_to_id(value) -> int:
+def deterministic_mode_to_id(value) -> int:
     """Map a normalized deterministic mode to the native enum id."""
-    return _DETERMINISM_MODE_IDS[normalize_determinism_mode(value)]
+    return _DETERMINISTIC_MODE_IDS[normalize_deterministic_mode(value)]
 
 
-@dataclass
+def reduce_op_to_family(reduce_op: int) -> str:
+    """Map a deterministic reduce op to its normalized family name."""
+    if reduce_op == REDUCE_OP_ADD:
+        return DETERMINISTIC_FAMILY_ADD
+    if reduce_op == REDUCE_OP_MIN:
+        return DETERMINISTIC_FAMILY_MIN
+    if reduce_op == REDUCE_OP_MAX:
+        return DETERMINISTIC_FAMILY_MAX
+    raise ValueError(f"Unsupported deterministic reduce op: {reduce_op}")
+
+
+def sanitize_det_name(name: str) -> str:
+    """Sanitize a source array label for deterministic helper names."""
+    sanitized = re.sub(r"\W+", "_", name)
+    sanitized = sanitized.strip("_")
+    if not sanitized:
+        sanitized = "target"
+    return sanitized
+
+
+def scatter_helper_name(array_var_label: str) -> str:
+    """Return the deterministic scatter helper name for an array."""
+    return f"det_{sanitize_det_name(array_var_label)}"
+
+
+def counter_helper_name(array_var_label: str) -> str:
+    """Return the deterministic counter helper name for an array."""
+    return f"det_{sanitize_det_name(array_var_label)}"
+
+
+def target_label(array_var_label: str, attr_path=()) -> str:
+    """Return a stable display/helper label for a deterministic array target."""
+    attr_path = tuple(attr_path)
+    if not attr_path:
+        return array_var_label
+    return ".".join((array_var_label, *attr_path))
+
+
+def scatter_cpp_type(target: ScatterTarget) -> str:
+    """Return the C++ helper type for a scatter target."""
+    return f"wp::det_scatter_buf_t<{target.value_ctype}>"
+
+
+def counter_cpp_type(_target: CounterTarget) -> str:
+    """Return the C++ helper type for a counter target."""
+    return "wp::det_counter_buf_t"
+
+
+def kernel_raw_scatter_param_names(target: ScatterTarget) -> dict[str, str]:
+    """Return raw kernel-entry parameter names for a scatter target."""
+    return {"buf": f"_wp_{target.helper_name}"}
+
+
+def kernel_raw_counter_param_names(target: CounterTarget) -> dict[str, str]:
+    """Return raw kernel-entry parameter names for a counter target."""
+    return {"buf": f"_wp_{target.helper_name}"}
+
+
+@dataclass(eq=False)
 class ScatterTarget:
-    """Tracks a Pattern A (accumulation) atomic target array during codegen."""
+    """Stable scatter target identity shared across a deterministic module build."""
 
-    array_var_label: str  # label of the target array Var
-    value_dtype: type  # Warp dtype of the accumulated value (e.g., wp.float32, wp.vec3)
-    value_ctype: str  # C type of the value (e.g., "float", "wp::vec_t<3, float>")
-    scalar_dtype: type  # scalar component dtype (e.g., wp.float32)
-    reduce_op: int  # REDUCE_OP_ADD, REDUCE_OP_MIN, or REDUCE_OP_MAX
-    index: int = 0  # scatter buffer index (assigned during codegen)
-    records_per_thread: int = 1  # static estimate of emitted records per thread
+    array_var_label: str
+    helper_name: str
+    family: str
+    value_dtype: type
+    value_ctype: str
+    scalar_dtype: type
+    reduce_op: int
+    index: int = 0
+    attr_path: tuple[str, ...] = ()
+
+    @property
+    def target_label(self) -> str:
+        return target_label(self.array_var_label, self.attr_path)
 
 
-@dataclass
+@dataclass(eq=False)
 class CounterTarget:
-    """Tracks a Pattern B (counter/allocator) atomic target array during codegen."""
+    """Stable counter target identity shared across a deterministic module build."""
 
-    array_var_label: str  # label of the target array Var
-    value_ctype: str  # C type of the counter value (e.g., "int")
-    index: int = 0  # counter buffer index (assigned during codegen)
+    array_var_label: str
+    helper_name: str
+    value_ctype: str
+    index: int = 0
+    attr_path: tuple[str, ...] = ()
+
+    @property
+    def target_label(self) -> str:
+        return target_label(self.array_var_label, self.attr_path)
 
 
 @dataclass
 class DeterministicMeta:
-    """Metadata attached to a kernel's Adjoint after codegen in deterministic mode.
-
-    Used by the launch system to allocate scatter/counter buffers and
-    orchestrate the multi-pass execution.
-    """
+    """Deterministic requirements accumulated while building an ``Adjoint``."""
 
     scatter_targets: list[ScatterTarget] = field(default_factory=list)
     counter_targets: list[CounterTarget] = field(default_factory=list)
+    scatter_records_per_thread: dict[ScatterTarget, int] = field(default_factory=dict)
+
+    def add_scatter_target(self, target: ScatterTarget, records_per_thread: int = 1):
+        """Record a scatter target requirement for this function or kernel."""
+        if target not in self.scatter_records_per_thread:
+            self.scatter_targets.append(target)
+            self.scatter_targets.sort(key=lambda x: x.index)
+            self.scatter_records_per_thread[target] = 0
+        self.scatter_records_per_thread[target] += records_per_thread
+
+    def add_counter_target(self, target: CounterTarget):
+        """Record a counter target requirement for this function or kernel."""
+        if target not in self.counter_targets:
+            self.counter_targets.append(target)
+            self.counter_targets.sort(key=lambda x: x.index)
+
+    def include(self, other: DeterministicMeta):
+        """Merge the transitive deterministic requirements of another adjoint."""
+        for target, count in other.scatter_records_per_thread.items():
+            self.add_scatter_target(target, records_per_thread=count)
+        for target in other.counter_targets:
+            self.add_counter_target(target)
 
     @property
     def has_scatter(self):
@@ -158,50 +228,99 @@ class DeterministicMeta:
         return self.has_scatter or self.has_counter
 
 
-def get_or_create_scatter_target(meta, array_var_label, value_dtype, value_ctype, scalar_dtype, reduce_op):
-    """Get existing scatter target for an array, or create a new one.
+@dataclass
+class DeterministicRegistry:
+    """Stable deterministic target registry shared across one build context."""
 
-    Multiple atomic call sites targeting the same array and reduction op share
-    one scatter buffer.
+    scatter_targets: list[ScatterTarget] = field(default_factory=list)
+    counter_targets: list[CounterTarget] = field(default_factory=list)
+    _scatter_targets_by_array: dict[tuple[str, tuple[str, ...]], ScatterTarget] = field(default_factory=dict)
+    _counter_targets_by_array: dict[tuple[str, tuple[str, ...]], CounterTarget] = field(default_factory=dict)
+
+
+def get_or_create_scatter_target(
+    registry, meta, array_var_label, value_dtype, value_ctype, scalar_dtype, reduce_op, attr_path=()
+):
+    """Get or create a stable scatter target and attach it to ``meta``.
+
+    Deterministic mode currently supports only one normalized reduction family
+    per target array. ``atomic_add`` and ``atomic_sub`` share the same family.
+    Mixing families such as ``atomic_add`` and ``atomic_max`` on the same array
+    is rejected as a first-pass limitation.
     """
-    for target in meta.scatter_targets:
+    family = reduce_op_to_family(reduce_op)
+    attr_path = tuple(attr_path)
+    key = (array_var_label, attr_path)
+    label = target_label(array_var_label, attr_path)
+    if key in registry._counter_targets_by_array:
+        raise ValueError(
+            f"Deterministic mode does not support using array '{label}' as both a counter target "
+            "and a scatter target in the same function or kernel."
+        )
+    target = registry._scatter_targets_by_array.get(key)
+
+    if target is not None:
+        if target.family != family:
+            raise ValueError(
+                f"Deterministic mode does not support mixing '{target.family}' and '{family}' reductions on array "
+                f"'{label}' in the same function or kernel."
+            )
         if (
-            target.array_var_label == array_var_label
-            and target.value_dtype == value_dtype
-            and target.value_ctype == value_ctype
-            and target.scalar_dtype == scalar_dtype
-            and target.reduce_op == reduce_op
+            target.value_dtype != value_dtype
+            or target.value_ctype != value_ctype
+            or target.scalar_dtype != scalar_dtype
+            or target.reduce_op != reduce_op
         ):
-            target.records_per_thread += 1
-            return target
-    target = ScatterTarget(
-        array_var_label=array_var_label,
-        value_dtype=value_dtype,
-        value_ctype=value_ctype,
-        scalar_dtype=scalar_dtype,
-        reduce_op=reduce_op,
-        index=len(meta.scatter_targets),
-    )
-    meta.scatter_targets.append(target)
+            raise ValueError(
+                f"Deterministic mode does not support multiple value layouts for array '{label}' "
+                f"within the same reduction family."
+            )
+    else:
+        target = ScatterTarget(
+            array_var_label=array_var_label,
+            helper_name=scatter_helper_name(label),
+            family=family,
+            value_dtype=value_dtype,
+            value_ctype=value_ctype,
+            scalar_dtype=scalar_dtype,
+            reduce_op=reduce_op,
+            index=len(registry.scatter_targets),
+            attr_path=attr_path,
+        )
+        registry.scatter_targets.append(target)
+        registry._scatter_targets_by_array[key] = target
+
+    meta.add_scatter_target(target)
     return target
 
 
-def get_or_create_counter_target(meta, array_var_label, value_ctype):
-    """Get existing counter target for an array, or create a new one."""
-    for target in meta.counter_targets:
-        if target.array_var_label == array_var_label:
-            return target
-    target = CounterTarget(
-        array_var_label=array_var_label,
-        value_ctype=value_ctype,
-        index=len(meta.counter_targets),
-    )
-    meta.counter_targets.append(target)
+def get_or_create_counter_target(registry, meta, array_var_label, value_ctype, attr_path=()):
+    """Get or create a stable counter target and attach it to ``meta``."""
+    attr_path = tuple(attr_path)
+    key = (array_var_label, attr_path)
+    label = target_label(array_var_label, attr_path)
+    if key in registry._scatter_targets_by_array:
+        raise ValueError(
+            f"Deterministic mode does not support using array '{label}' as both a counter target "
+            "and a scatter target in the same function or kernel."
+        )
+    target = registry._counter_targets_by_array.get(key)
+    if target is None:
+        target = CounterTarget(
+            array_var_label=array_var_label,
+            helper_name=counter_helper_name(label),
+            value_ctype=value_ctype,
+            index=len(registry.counter_targets),
+            attr_path=attr_path,
+        )
+        registry.counter_targets.append(target)
+        registry._counter_targets_by_array[key] = target
+    meta.add_counter_target(target)
     return target
 
 
 # ---------------------------------------------------------------------------
-# Warp type → C++ type string mapping for scatter buffer value types
+# Warp type -> C++ type string mapping for scatter buffer value types
 # ---------------------------------------------------------------------------
 
 _WARP_TO_CTYPE = {
@@ -234,7 +353,7 @@ def warp_type_to_ctype(dtype) -> str:
 
 
 def is_float_type(dtype) -> bool:
-    """Return True if dtype is a Warp floating-point type."""
+    """Return ``True`` if ``dtype`` is a Warp floating-point type."""
     return dtype in (warp.float16, warp.float32, warp.float64)
 
 
@@ -251,40 +370,25 @@ def warp_scalar_type_to_id(dtype) -> int:
 # ---------------------------------------------------------------------------
 
 
-def allocate_scatter_buffers(scatter_targets, dim_size, device, max_records=0):
+def allocate_scatter_buffers(scatter_targets, meta, dim_size, device, max_records=0):
     """Allocate scatter buffers for Pattern A targets.
 
-    Args:
-        scatter_targets: Deterministic scatter target metadata collected during
-            code generation.
-        dim_size: Launch dimension size. This corresponds to the number of
-            threads that may emit scatter records.
-        device: Target device for the temporary buffers.
-        max_records: Optional per-target, per-thread override for the maximum
-            number of scatter records a thread may emit. The final buffer size
-            uses ``max(codegen_lower_bound, max_records)`` records per thread.
-
-    Returns:
-        A list of ``(keys, values, counter, overflow, capacity)`` tuples, one
-        per scatter target.
+    Returns a list of ``(keys, values, counter, capacity)`` tuples, one per
+    scatter target in ``scatter_targets``.
     """
     buffers = []
     for target in scatter_targets:
-        records_per_thread = max(target.records_per_thread, max_records)
+        records_per_thread = max(meta.scatter_records_per_thread.get(target, 0), max_records)
         capacity = max(dim_size * records_per_thread, 1024)
         keys = warp.full(shape=(capacity,), value=-1, dtype=warp.int64, device=device)
         values = warp.zeros(shape=(capacity,), dtype=target.value_dtype, device=device)
         counter = warp.zeros(shape=(1,), dtype=warp.int32, device=device)
-        overflow = warp.zeros(shape=(1,), dtype=warp.int32, device=device)
-        buffers.append((keys, values, counter, overflow, capacity))
+        buffers.append((keys, values, counter, capacity))
     return buffers
 
 
 def allocate_counter_buffers(counter_targets, dim_size, device):
-    """Allocate counter buffers for Pattern B targets.
-
-    Returns a list of (contrib, prefix) tuples.
-    """
+    """Allocate counter buffers for Pattern B targets."""
     buffers = []
     for _target in counter_targets:
         contrib = warp.zeros(shape=(dim_size,), dtype=warp.int32, device=device)
@@ -293,20 +397,24 @@ def allocate_counter_buffers(counter_targets, dim_size, device):
     return buffers
 
 
-def run_sort_reduce(runtime, scatter_targets, scatter_buffers, dest_arrays, device, determinism_mode):
-    """Execute post-kernel sort-reduce for all Pattern A scatter targets.
+@warp.kernel(enable_backward=False)
+def add_counter_offset_kernel(values: warp.array(dtype=warp.int32), counter: warp.array(dtype=Any)):
+    """Add the current counter value to every deterministic prefix entry."""
+    tid = warp.tid()
+    values[tid] = values[tid] + warp.int32(counter[0])
 
-    Args:
-        runtime: The Warp Runtime object with native function bindings.
-        scatter_targets: List of ScatterTarget metadata.
-        scatter_buffers: List of (keys, values, counter, capacity) tuples.
-        dest_arrays: List of destination warp.array objects (parallel to scatter_targets).
-        device: The target device.
-        determinism_mode: One of the user-facing deterministic mode strings.
-    """
+
+def run_sort_reduce(runtime, scatter_targets, scatter_buffers, dest_arrays, device, determinism_mode):
+    """Execute post-kernel sort-reduce for all Pattern A scatter targets."""
     for i, target in enumerate(scatter_targets):
-        keys, values, _counter, _overflow, capacity = scatter_buffers[i]
+        keys, values, _counter, capacity = scatter_buffers[i]
         dest_arr = dest_arrays[i]
+
+        # Optional route-specific outputs may be passed as ``None``. Their
+        # guarded kernel paths must remain inactive, so there is no destination
+        # buffer to reduce into.
+        if dest_arr is None:
+            continue
 
         try:
             scalar_type_id = warp_scalar_type_to_id(target.scalar_dtype)
@@ -323,5 +431,5 @@ def run_sort_reduce(runtime, scatter_targets, scatter_buffers, dest_arrays, devi
             target.reduce_op,
             scalar_type_id,
             getattr(target.value_dtype, "_length_", 1),
-            determinism_mode_to_id(determinism_mode),
+            deterministic_mode_to_id(determinism_mode),
         )

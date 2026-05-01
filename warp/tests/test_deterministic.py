@@ -7,11 +7,15 @@ Validates that deterministic modes produce bit-exact reproducible results for
 atomic operations across multiple runs.
 """
 
+import re
 import unittest
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 import warp as wp
+from warp._src import deterministic as wp_deterministic
 from warp.tests.unittest_utils import *
 
 
@@ -95,6 +99,17 @@ def atomic_add_2d_kernel(
     wp.atomic_add(output, r, c, data[tid])
 
 
+@wp.kernel(deterministic=True, module="unique")
+def atomic_add_array_view_kernel(
+    data: wp.array2d(dtype=wp.float32),
+    output: wp.array2d(dtype=wp.float32),
+):
+    """Atomic add through a leading-index array view."""
+    row, col = wp.tid()
+    out_row = output[row]
+    wp.atomic_add(out_row, col % 8, data[row, col])
+
+
 @wp.kernel
 def atomic_double_kernel(
     data: wp.array(dtype=wp.float64),
@@ -167,9 +182,54 @@ def _det_helper_atomic_add(output: wp.array(dtype=wp.float32), index: int, value
     wp.atomic_add(output, index, value)
 
 
+@wp.kernel(deterministic=True, module="unique")
+def helper_atomic_add_array_view_kernel(
+    data: wp.array2d(dtype=wp.float32),
+    output: wp.array2d(dtype=wp.float32),
+):
+    """Atomic add through a leading-index array view passed to a helper."""
+    row, col = wp.tid()
+    _det_helper_atomic_add(output[row], col % 8, data[row, col])
+
+
 @wp.func
 def _det_helper_counter_alloc(counter: wp.array(dtype=wp.int32)) -> int:
     return wp.atomic_add(counter, 0, 1)
+
+
+@wp.func
+def _det_func_scatter_add_leaf(arr: wp.array(dtype=wp.float32), idx: int, value: wp.float32):
+    wp.atomic_add(arr, idx, value)
+
+
+@wp.func
+def _det_func_scatter_add_wrapper(dst: wp.array(dtype=wp.float32), idx: int, value: wp.float32):
+    _det_func_scatter_add_leaf(dst, idx, value)
+
+
+@wp.struct
+class _DetStructCounterWriter:
+    counter: wp.array(dtype=wp.int32)
+    output: wp.array(dtype=wp.float32)
+
+
+@wp.func
+def _det_struct_counter_write(writer: _DetStructCounterWriter, value: wp.float32):
+    slot = wp.atomic_add(writer.counter, 0, 1)
+    writer.output[slot] = value
+
+
+@wp.func
+def _det_nested_struct_counter_write(writer: _DetStructCounterWriter, value: wp.float32):
+    _det_struct_counter_write(writer, value)
+
+
+@wp.func
+def _det_struct_counter_write_optional_index(writer: _DetStructCounterWriter, value: wp.float32, output_index: int):
+    index = output_index
+    if output_index < 0:
+        index = wp.atomic_add(writer.counter, 0, 1)
+    writer.output[index] = value
 
 
 def _make_deterministic_closure_kernel(transform_func):
@@ -209,6 +269,94 @@ def helper_counter_kernel(
         output[slot] = data[tid]
 
 
+@wp.kernel(deterministic=True, module="unique")
+def struct_field_counter_kernel(
+    data: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+    writer: _DetStructCounterWriter,
+):
+    tid = wp.tid()
+    count = counts[tid]
+    if count > 0:
+        base = wp.atomic_add(writer.counter, 0, count)
+        for i in range(count):
+            writer.output[base + i] = data[tid] + wp.float32(i) * wp.float32(0.5)
+
+
+@wp.kernel(deterministic=True, module="unique")
+def struct_field_helper_counter_kernel(
+    data: wp.array(dtype=wp.float32),
+    flags: wp.array(dtype=wp.int32),
+    writer: _DetStructCounterWriter,
+):
+    tid = wp.tid()
+    if flags[tid] != 0:
+        _det_struct_counter_write(writer, data[tid])
+
+
+@wp.kernel(deterministic=True, module="unique")
+def generic_nested_struct_field_helper_counter_kernel(
+    data: wp.array(dtype=Any),
+    flags: wp.array(dtype=wp.int32),
+    writer: _DetStructCounterWriter,
+):
+    tid = wp.tid()
+    if flags[tid] != 0:
+        _det_nested_struct_counter_write(writer, data[tid])
+
+
+@wp.kernel(deterministic=True, module="unique")
+def any_struct_field_counter_kernel(
+    data: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+    writer: Any,
+):
+    tid = wp.tid()
+    count = counts[tid]
+    if count > 0:
+        base = wp.atomic_add(writer.counter, 0, count)
+        for i in range(count):
+            writer.output[base + i] = data[tid] + wp.float32(i) * wp.float32(0.5)
+
+
+@wp.kernel(deterministic=True, module="unique")
+def any_struct_field_nested_counter_kernel(
+    data: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+    writer: Any,
+):
+    tid = wp.tid()
+    count = counts[tid]
+    if count > 0:
+        base = wp.atomic_add(writer.counter, 0, count)
+        for i in range(count):
+            _det_struct_counter_write_optional_index(
+                writer,
+                data[tid] + wp.float32(i) * wp.float32(0.5),
+                base + i,
+            )
+
+
+@wp.kernel
+def func_scatter_add_kernel(
+    data: wp.array(dtype=wp.float32),
+    dest_indices: wp.array(dtype=wp.int32),
+    output: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    _det_func_scatter_add_leaf(output, dest_indices[tid], data[tid])
+
+
+@wp.kernel
+def nested_func_scatter_add_kernel(
+    data: wp.array(dtype=wp.float32),
+    dest_indices: wp.array(dtype=wp.int32),
+    accum: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    _det_func_scatter_add_wrapper(accum, dest_indices[tid], data[tid])
+
+
 @wp.kernel
 def triple_scatter_add_kernel(
     data: wp.array(dtype=wp.float32),
@@ -236,7 +384,7 @@ def loop_scatter_add_kernel(
         wp.atomic_add(output, 0, val)
 
 
-@wp.kernel
+@wp.kernel(module="unique")
 def mixed_reduce_op_same_array_kernel(
     data: wp.array(dtype=wp.float32),
     output: wp.array(dtype=wp.float32),
@@ -608,6 +756,72 @@ def test_atomic_add_2d(test, device):
         np.testing.assert_array_equal(results[0], results[i])
 
 
+def test_atomic_add_array_view(test, device):
+    """Verify deterministic scatter atomics through array views use root-array indices."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rows, cols, bins = 4, 128, 8
+    rng = np.random.default_rng(1355)
+    data_np = rng.random((rows, cols), dtype=np.float32)
+
+    expected = np.zeros((rows, bins), dtype=np.float32)
+    for row in range(rows):
+        for col in range(cols):
+            expected[row, col % bins] = np.float32(expected[row, col % bins] + data_np[row, col])
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+
+    results = []
+    for _ in range(5):
+        output = wp.zeros(shape=(rows, bins), dtype=wp.float32, device=device)
+        wp.launch(
+            atomic_add_array_view_kernel,
+            dim=(rows, cols),
+            inputs=[data],
+            outputs=[output],
+            device=device,
+        )
+        results.append(output.numpy().copy())
+
+    np.testing.assert_allclose(results[0], expected, rtol=1.0e-6, atol=1.0e-6)
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+
+
+def test_helper_atomic_add_array_view(test, device):
+    """Verify helper scatter atomics through array views keep caller root-array offsets."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rows, cols, bins = 4, 128, 8
+    rng = np.random.default_rng(1356)
+    data_np = rng.random((rows, cols), dtype=np.float32)
+
+    expected = np.zeros((rows, bins), dtype=np.float32)
+    for row in range(rows):
+        for col in range(cols):
+            expected[row, col % bins] = np.float32(expected[row, col % bins] + data_np[row, col])
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+
+    results = []
+    for _ in range(5):
+        output = wp.zeros(shape=(rows, bins), dtype=wp.float32, device=device)
+        wp.launch(
+            helper_atomic_add_array_view_kernel,
+            dim=(rows, cols),
+            inputs=[data],
+            outputs=[output],
+            device=device,
+        )
+        results.append(output.numpy().copy())
+
+    np.testing.assert_allclose(results[0], expected, rtol=1.0e-6, atol=1.0e-6)
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+
+
 def test_atomic_double_deterministic(test, device):
     """Verify deterministic mode with float64 atomics."""
     if device.is_cpu:
@@ -785,7 +999,7 @@ def test_loop_scatter_max_records_override(test, device):
 
 
 def test_mixed_reduce_ops_same_array(test, device):
-    """Verify add/max atomics targeting one array are reduced independently."""
+    """Verify mixed reduction families on one array are rejected in deterministic mode."""
     if device.is_cpu:
         test.skipTest("CPU execution is already deterministic")
 
@@ -793,9 +1007,10 @@ def test_mixed_reduce_ops_same_array(test, device):
     data = wp.array(data_np, dtype=wp.float32, device=device)
     output = wp.zeros(1, dtype=wp.float32, device=device)
 
-    wp.launch(mixed_reduce_op_same_array_kernel, dim=data_np.shape[0], inputs=[data], outputs=[output], device=device)
-
-    np.testing.assert_allclose(output.numpy(), np.array([1.0], dtype=np.float32), rtol=0.0, atol=0.0)
+    with test.assertRaisesRegex(Exception, "does not support mixing"):
+        wp.launch(
+            mixed_reduce_op_same_array_kernel, dim=data_np.shape[0], inputs=[data], outputs=[output], device=device
+        )
 
 
 def test_counter_reproducibility(test, device):
@@ -1052,7 +1267,6 @@ def test_deterministic_closure_kernel(test, device):
     test.assertFalse(np.array_equal(results_a[0], results_b[0]))
 
 
-
 def test_helper_function_scatter_atomic(test, device):
     """Verify helper-function scatter atomics stay deterministic for simple direct-array targets."""
     if device.is_cpu:
@@ -1076,7 +1290,6 @@ def test_helper_function_scatter_atomic(test, device):
     for i in range(1, len(results)):
         np.testing.assert_array_equal(results[0], results[i])
     np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
-
 
 
 def test_helper_function_counter_atomic(test, device):
@@ -1106,6 +1319,384 @@ def test_helper_function_counter_atomic(test, device):
         np.testing.assert_array_equal(results[0], results[i])
     np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
 
+
+def test_struct_field_counter_atomic(test, device):
+    """Verify deterministic counters work when the target array lives in a struct field."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(34)
+    data_np = rng.random(64, dtype=np.float32)
+    counts_np = rng.integers(0, 4, size=64, dtype=np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts_arr = wp.array(counts_np, dtype=wp.int32, device=device)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    results = []
+    counter_values = []
+    for _ in range(3):
+        writer = _DetStructCounterWriter()
+        writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+        writer.output = wp.zeros(int(counts_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(struct_field_counter_kernel, dim=64, inputs=[data, counts_arr, writer], device=device)
+        counter_values.append(int(writer.counter.numpy()[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counter_values), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+def test_struct_field_helper_counter_atomic(test, device):
+    """Verify helper-function counters work when the target array lives in a struct field."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(35)
+    data_np = rng.random(64, dtype=np.float32)
+    flags_np = (rng.random(64) > 0.4).astype(np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    flags = wp.array(flags_np, dtype=wp.int32, device=device)
+    expected = data_np[flags_np != 0]
+
+    results = []
+    counts = []
+    for _ in range(3):
+        writer = _DetStructCounterWriter()
+        writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+        writer.output = wp.zeros(int(flags_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(struct_field_helper_counter_kernel, dim=64, inputs=[data, flags, writer], device=device)
+        counts.append(int(writer.counter.numpy()[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counts), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+def test_any_struct_field_counter_atomic(test, device):
+    """Verify deterministic counters work when the struct argument is typed as Any."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(37)
+    data_np = rng.random(64, dtype=np.float32)
+    counts_np = rng.integers(0, 4, size=64, dtype=np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts_arr = wp.array(counts_np, dtype=wp.int32, device=device)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    results = []
+    counter_values = []
+    for _ in range(3):
+        writer = _DetStructCounterWriter()
+        writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+        writer.output = wp.zeros(int(counts_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(any_struct_field_counter_kernel, dim=64, inputs=[data, counts_arr, writer], device=device)
+        counter_values.append(int(writer.counter.numpy()[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counter_values), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+def test_any_struct_field_nested_counter_atomic(test, device):
+    """Verify nested helper counters stay correct when the helper gets an explicit output index."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(39)
+    data_np = rng.random(64, dtype=np.float32)
+    counts_np = rng.integers(0, 4, size=64, dtype=np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts_arr = wp.array(counts_np, dtype=wp.int32, device=device)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    results = []
+    counter_values = []
+    for _ in range(3):
+        writer = _DetStructCounterWriter()
+        writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+        writer.output = wp.zeros(int(counts_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(any_struct_field_nested_counter_kernel, dim=64, inputs=[data, counts_arr, writer], device=device)
+        counter_values.append(int(writer.counter.numpy()[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counter_values), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+def test_any_struct_field_counter_accumulates_across_launches(test, device):
+    """Verify zero-contribution launches do not reset an existing deterministic counter."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    data_np = np.arange(8, dtype=np.float32)
+    counts_np = np.array([1, 2, 0, 1, 0, 2, 1, 0], dtype=np.int32)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts = wp.array(counts_np, dtype=wp.int32, device=device)
+    zero_counts = wp.zeros_like(counts)
+
+    writer = _DetStructCounterWriter()
+    writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+    writer.output = wp.zeros(expected.shape[0] + 4, dtype=wp.float32, device=device)
+
+    wp.launch(any_struct_field_counter_kernel, dim=8, inputs=[data, counts, writer], device=device)
+    first_count = int(writer.counter.numpy()[0])
+    first_output = writer.output.numpy()[: expected.shape[0]].copy()
+
+    wp.launch(any_struct_field_counter_kernel, dim=8, inputs=[data, zero_counts, writer], device=device)
+    second_count = int(writer.counter.numpy()[0])
+    second_output = writer.output.numpy()[: expected.shape[0]].copy()
+
+    test.assertEqual(first_count, expected.shape[0])
+    test.assertEqual(second_count, expected.shape[0])
+    np.testing.assert_array_equal(first_output.view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(second_output.view(np.uint32), expected.view(np.uint32))
+
+
+def test_struct_field_counter_view_atomic(test, device):
+    """Verify struct-field counters work when the field holds a 1-element array view."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(40)
+    data_np = rng.random(64, dtype=np.float32)
+    counts_np = rng.integers(0, 4, size=64, dtype=np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts_arr = wp.array(counts_np, dtype=wp.int32, device=device)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    results = []
+    counter_values = []
+    packed_values = []
+    for _ in range(3):
+        packed_counter = wp.zeros(2, dtype=wp.int32, device=device)
+        writer = _DetStructCounterWriter()
+        writer.counter = packed_counter[0:1]
+        writer.output = wp.zeros(int(counts_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(struct_field_counter_kernel, dim=64, inputs=[data, counts_arr, writer], device=device)
+        packed_np = packed_counter.numpy().copy()
+        packed_values.append(packed_np)
+        counter_values.append(int(packed_np[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counter_values), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+        np.testing.assert_array_equal(packed_values[0], packed_values[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(packed_values[0], np.array([expected.shape[0], 0], dtype=np.int32))
+
+
+def test_any_struct_field_counter_view_atomic(test, device):
+    """Verify Any-typed struct-field counters work when the field holds a 1-element array view."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(41)
+    data_np = rng.random(64, dtype=np.float32)
+    counts_np = rng.integers(0, 4, size=64, dtype=np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    counts_arr = wp.array(counts_np, dtype=wp.int32, device=device)
+    expected = np.array(
+        [
+            np.float32(data_np[tid] + np.float32(i) * np.float32(0.5))
+            for tid, count in enumerate(counts_np)
+            for i in range(count)
+        ],
+        dtype=np.float32,
+    )
+
+    results = []
+    counter_values = []
+    packed_values = []
+    for _ in range(3):
+        packed_counter = wp.zeros(2, dtype=wp.int32, device=device)
+        writer = _DetStructCounterWriter()
+        writer.counter = packed_counter[0:1]
+        writer.output = wp.zeros(int(counts_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(any_struct_field_counter_kernel, dim=64, inputs=[data, counts_arr, writer], device=device)
+        packed_np = packed_counter.numpy().copy()
+        packed_values.append(packed_np)
+        counter_values.append(int(packed_np[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counter_values), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+        np.testing.assert_array_equal(packed_values[0], packed_values[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(packed_values[0], np.array([expected.shape[0], 0], dtype=np.int32))
+
+
+def test_generic_nested_struct_field_helper_counter_atomic(test, device):
+    """Verify generic kernel overloads preserve nested helper deterministic counters."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    rng = np.random.default_rng(36)
+    data_np = rng.random(64, dtype=np.float32)
+    flags_np = (rng.random(64) > 0.4).astype(np.int32)
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    flags = wp.array(flags_np, dtype=wp.int32, device=device)
+    expected = data_np[flags_np != 0]
+
+    results = []
+    counts = []
+    for _ in range(3):
+        writer = _DetStructCounterWriter()
+        writer.counter = wp.zeros(1, dtype=wp.int32, device=device)
+        writer.output = wp.zeros(int(flags_np.sum()) + 4, dtype=wp.float32, device=device)
+        wp.launch(
+            generic_nested_struct_field_helper_counter_kernel, dim=64, inputs=[data, flags, writer], device=device
+        )
+        counts.append(int(writer.counter.numpy()[0]))
+        results.append(writer.output.numpy()[: expected.shape[0]].copy())
+
+    np.testing.assert_array_equal(np.array(counts), np.full(3, expected.shape[0], dtype=np.int32))
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+    np.testing.assert_array_equal(results[0].view(np.uint32), expected.view(np.uint32))
+
+
+def test_struct_field_deterministic_metadata(test, device):
+    """Verify struct-field counters register deterministic metadata on helpers and kernels."""
+    del device
+
+    struct_field_counter_kernel.adj.build(None, {"deterministic": "run_to_run"})
+    struct_field_helper_counter_kernel.adj.build(None, {"deterministic": "run_to_run"})
+    _det_struct_counter_write.adj.build(None, {"deterministic": "run_to_run"})
+
+    test.assertIsNotNone(_det_struct_counter_write.adj.det_meta)
+    test.assertTrue(_det_struct_counter_write.adj.det_meta.has_counter)
+
+    test.assertIsNotNone(struct_field_counter_kernel.adj.det_meta)
+    test.assertTrue(struct_field_counter_kernel.adj.det_meta.has_counter)
+
+    test.assertIsNotNone(struct_field_helper_counter_kernel.adj.det_meta)
+    test.assertTrue(struct_field_helper_counter_kernel.adj.det_meta.has_counter)
+
+
+def test_helper_function_deterministic_metadata(test, device):
+    """Verify helper-function atomics register deterministic metadata on helpers and kernels."""
+    del device
+
+    helper_scatter_kernel = _make_deterministic_helper_scatter_kernel(_det_closure_transform_a)
+
+    helper_scatter_kernel.adj.build(None, {"deterministic": "run_to_run"})
+    helper_counter_kernel.adj.build(None, {"deterministic": "run_to_run"})
+    _det_helper_atomic_add.adj.build(None, {"deterministic": "run_to_run"})
+    _det_helper_counter_alloc.adj.build(None, {"deterministic": "run_to_run"})
+
+    test.assertIsNotNone(_det_helper_atomic_add.adj.det_meta)
+    test.assertTrue(_det_helper_atomic_add.adj.det_meta.has_scatter)
+
+    test.assertIsNotNone(_det_helper_counter_alloc.adj.det_meta)
+    test.assertTrue(_det_helper_counter_alloc.adj.det_meta.has_counter)
+
+    test.assertIsNotNone(helper_scatter_kernel.adj.det_meta)
+    test.assertTrue(helper_scatter_kernel.adj.det_meta.has_scatter)
+
+    test.assertIsNotNone(helper_counter_kernel.adj.det_meta)
+    test.assertTrue(helper_counter_kernel.adj.det_meta.has_counter)
+
+
+def test_deterministic_func_kernel(test, device):
+    """Verify deterministic atomics inside ``@wp.func`` calls remain reproducible."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    n = 512
+    out_size = 16
+    rng = np.random.default_rng(74)
+    data_np = rng.random(n, dtype=np.float32)
+    indices_np = rng.integers(0, out_size, size=n, dtype=np.int32)
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    indices = wp.array(indices_np, dtype=wp.int32, device=device)
+    results = []
+    for _ in range(3):
+        output = wp.zeros(out_size, dtype=wp.float32, device=device)
+        wp.launch(func_scatter_add_kernel, dim=n, inputs=[data, indices], outputs=[output], device=device)
+        results.append(output.numpy().copy())
+
+    for result in results:
+        np.testing.assert_allclose(
+            result, _reference_scatter_add_float32(data_np, indices_np, out_size), rtol=1e-6, atol=1e-6
+        )
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
+
+
+def test_nested_deterministic_func_kernel(test, device):
+    """Verify deterministic helper args propagate through nested ``@wp.func`` calls."""
+    if device.is_cpu:
+        test.skipTest("CPU execution is already deterministic")
+
+    n = 512
+    out_size = 16
+    rng = np.random.default_rng(75)
+    data_np = rng.random(n, dtype=np.float32)
+    indices_np = rng.integers(0, out_size, size=n, dtype=np.int32)
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    indices = wp.array(indices_np, dtype=wp.int32, device=device)
+    results = []
+    for _ in range(3):
+        accum = wp.zeros(out_size, dtype=wp.float32, device=device)
+        wp.launch(nested_func_scatter_add_kernel, dim=n, inputs=[data, indices], outputs=[accum], device=device)
+        results.append(accum.numpy().copy())
+
+    for result in results:
+        np.testing.assert_allclose(
+            result, _reference_scatter_add_float32(data_np, indices_np, out_size), rtol=1e-6, atol=1e-6
+        )
+    for i in range(1, len(results)):
+        np.testing.assert_array_equal(results[0], results[i])
 
 
 def test_record_cmd_deterministic_launch(test, device):
@@ -1204,6 +1795,36 @@ def test_graph_capture_deterministic_closure_kernel(test, device):
     np.testing.assert_array_equal(first, second)
 
 
+def test_graph_capture_deterministic_func_kernel(test, device):
+    """Verify deterministic ``@wp.func`` atomics remain capture-safe."""
+    if device.is_cpu:
+        test.skipTest("Graph capture requires CUDA")
+
+    n = 256
+    rng = np.random.default_rng(76)
+    data_np = rng.random(n, dtype=np.float32)
+    indices_np = rng.integers(0, 8, size=n, dtype=np.int32)
+
+    data = wp.array(data_np, dtype=wp.float32, device=device)
+    indices = wp.array(indices_np, dtype=wp.int32, device=device)
+    output = wp.zeros(8, dtype=wp.float32, device=device)
+
+    wp.launch(func_scatter_add_kernel, dim=n, inputs=[data, indices], outputs=[output], device=device)
+    output.zero_()
+
+    with wp.ScopedCapture(device, force_module_load=False) as capture:
+        wp.launch(func_scatter_add_kernel, dim=n, inputs=[data, indices], outputs=[output], device=device)
+
+    wp.capture_launch(capture.graph)
+    first = output.numpy().copy()
+
+    output.zero_()
+    wp.capture_launch(capture.graph)
+    second = output.numpy().copy()
+
+    np.testing.assert_array_equal(first, second)
+
+
 def test_graph_capture_vec3_atomic_minmax(test, device):
     """Verify composite deterministic reductions remain capture-safe."""
     if device.is_cpu:
@@ -1240,8 +1861,62 @@ def test_graph_capture_vec3_atomic_minmax(test, device):
 
     np.testing.assert_array_equal(first_min, second_min)
     np.testing.assert_array_equal(first_max, second_max)
-    np.testing.assert_allclose(first_min, np.min(points_np, axis=0, keepdims=True), rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(first_max, np.max(points_np, axis=0, keepdims=True), rtol=0.0, atol=0.0)
+
+
+def test_deterministic_enum_parity(test, device):
+    """Keep Python deterministic constants aligned with the native enums."""
+    del device
+
+    native_source = (Path(wp.__file__).resolve().parent / "native" / "deterministic.cu").read_text()
+
+    def parse_enum(enum_name):
+        match = re.search(rf"enum {enum_name} \{{(.*?)\n\}};", native_source, re.DOTALL)
+        if match is None:
+            raise AssertionError(f"Failed to find enum {enum_name} in deterministic.cu")
+
+        entries = {}
+        for name, value in re.findall(r"([A-Z0-9_]+)\s*=\s*([0-9]+)", match.group(1)):
+            entries[name] = int(value)
+        return entries
+
+    native_reduce_ops = parse_enum("ReduceOp")
+    native_deterministic_levels = parse_enum("DeterminismLevel")
+    native_scalar_types = parse_enum("ScalarType")
+
+    test.assertEqual(
+        native_reduce_ops,
+        {
+            "REDUCE_OP_ADD": wp_deterministic.REDUCE_OP_ADD,
+            "REDUCE_OP_MIN": wp_deterministic.REDUCE_OP_MIN,
+            "REDUCE_OP_MAX": wp_deterministic.REDUCE_OP_MAX,
+        },
+    )
+    test.assertEqual(
+        native_deterministic_levels,
+        {
+            "DETERMINISTIC_NOT_GUARANTEED": wp_deterministic._DETERMINISTIC_MODE_IDS[
+                wp_deterministic.DETERMINISTIC_NOT_GUARANTEED
+            ],
+            "DETERMINISTIC_RUN_TO_RUN": wp_deterministic._DETERMINISTIC_MODE_IDS[
+                wp_deterministic.DETERMINISTIC_RUN_TO_RUN
+            ],
+            "DETERMINISTIC_GPU_TO_GPU": wp_deterministic._DETERMINISTIC_MODE_IDS[
+                wp_deterministic.DETERMINISTIC_GPU_TO_GPU
+            ],
+        },
+    )
+    test.assertEqual(
+        native_scalar_types,
+        {
+            "SCALAR_HALF": wp_deterministic._SCALAR_TYPE_IDS[wp.float16],
+            "SCALAR_FLOAT": wp_deterministic._SCALAR_TYPE_IDS[wp.float32],
+            "SCALAR_DOUBLE": wp_deterministic._SCALAR_TYPE_IDS[wp.float64],
+            "SCALAR_INT": wp_deterministic._SCALAR_TYPE_IDS[wp.int32],
+            "SCALAR_UINT": wp_deterministic._SCALAR_TYPE_IDS[wp.uint32],
+            "SCALAR_INT64": wp_deterministic._SCALAR_TYPE_IDS[wp.int64],
+            "SCALAR_UINT64": wp_deterministic._SCALAR_TYPE_IDS[wp.uint64],
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1965,13 @@ add_function_test(
     TestDeterministic, "test_atomic_sub_deterministic", test_atomic_sub_deterministic, devices=cuda_devices
 )
 add_function_test(TestDeterministic, "test_atomic_add_2d", test_atomic_add_2d, devices=cuda_devices)
+add_function_test(TestDeterministic, "test_atomic_add_array_view", test_atomic_add_array_view, devices=cuda_devices)
+add_function_test(
+    TestDeterministic,
+    "test_helper_atomic_add_array_view",
+    test_helper_atomic_add_array_view,
+    devices=cuda_devices,
+)
 add_function_test(
     TestDeterministic, "test_atomic_double_deterministic", test_atomic_double_deterministic, devices=cuda_devices
 )
@@ -1319,6 +2001,15 @@ add_function_test(
 )
 add_function_test(
     TestDeterministic, "test_mixed_reduce_ops_same_array", test_mixed_reduce_ops_same_array, devices=cuda_devices
+)
+add_function_test(
+    TestDeterministic, "test_deterministic_func_kernel", test_deterministic_func_kernel, devices=cuda_devices
+)
+add_function_test(
+    TestDeterministic,
+    "test_nested_deterministic_func_kernel",
+    test_nested_deterministic_func_kernel,
+    devices=cuda_devices,
 )
 
 # Pattern B tests (counter).
@@ -1358,6 +2049,66 @@ add_function_test(
 )
 add_function_test(
     TestDeterministic,
+    "test_struct_field_counter_atomic",
+    test_struct_field_counter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_struct_field_helper_counter_atomic",
+    test_struct_field_helper_counter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_any_struct_field_counter_atomic",
+    test_any_struct_field_counter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_any_struct_field_nested_counter_atomic",
+    test_any_struct_field_nested_counter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_any_struct_field_counter_accumulates_across_launches",
+    test_any_struct_field_counter_accumulates_across_launches,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_struct_field_counter_view_atomic",
+    test_struct_field_counter_view_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_any_struct_field_counter_view_atomic",
+    test_any_struct_field_counter_view_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_generic_nested_struct_field_helper_counter_atomic",
+    test_generic_nested_struct_field_helper_counter_atomic,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_struct_field_deterministic_metadata",
+    test_struct_field_deterministic_metadata,
+    devices=all_devices,
+)
+add_function_test(
+    TestDeterministic,
+    "test_helper_function_deterministic_metadata",
+    test_helper_function_deterministic_metadata,
+    devices=all_devices,
+)
+add_function_test(
+    TestDeterministic,
     "test_record_cmd_deterministic_launch",
     test_record_cmd_deterministic_launch,
     devices=cuda_devices,
@@ -1376,12 +2127,20 @@ add_function_test(
 )
 add_function_test(
     TestDeterministic,
+    "test_graph_capture_deterministic_func_kernel",
+    test_graph_capture_deterministic_func_kernel,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestDeterministic,
     "test_graph_capture_vec3_atomic_minmax",
     test_graph_capture_vec3_atomic_minmax,
     devices=cuda_devices,
 )
+add_function_test(
+    TestDeterministic, "test_deterministic_enum_parity", test_deterministic_enum_parity, devices=all_devices
+)
 
 
 if __name__ == "__main__":
-    wp.clear_kernel_cache()
     unittest.main(verbosity=2)

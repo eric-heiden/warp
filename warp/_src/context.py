@@ -78,6 +78,22 @@ class CudaMemcpyKind(enum.IntEnum):
     Default = 4
 
 
+class det_scatter_buf_t(ctypes.Structure):
+    _fields_ = [
+        ("keys", ctypes.c_void_p),
+        ("vals", ctypes.c_void_p),
+        ("count", ctypes.c_void_p),
+        ("capacity", ctypes.c_int),
+    ]
+
+
+class det_counter_buf_t(ctypes.Structure):
+    _fields_ = [
+        ("contrib", ctypes.c_void_p),
+        ("prefix", ctypes.c_void_p),
+    ]
+
+
 # represents either a built-in or user-defined function
 
 
@@ -1076,7 +1092,7 @@ def func_grad(forward_fn):
             )
         else:
             # resolve return variables
-            forward_fn.adj.build(None, forward_fn.module.options)
+            forward_fn.build(None, forward_fn.module.options)
 
             expected_args = list(forward_fn.input_types.items())
             if forward_fn.adj.return_var is not None:
@@ -1328,13 +1344,13 @@ def kernel(
     def wrapper(f, *args, **kwargs):
         kernel_options = {}
 
-        from warp._src.deterministic import normalize_determinism_mode  # noqa: PLC0415
+        from warp._src.deterministic import normalize_deterministic_mode  # noqa: PLC0415
 
         if enable_backward is not None:
             kernel_options["enable_backward"] = enable_backward
 
         if deterministic is not None:
-            kernel_options["deterministic"] = normalize_determinism_mode(
+            kernel_options["deterministic"] = normalize_deterministic_mode(
                 deterministic, option_name="deterministic", allow_none=True
             )
 
@@ -2032,7 +2048,10 @@ class ModuleHasher:
         # metadata it would have received on a fresh compile.
         from warp._src.deterministic import is_deterministic_mode_enabled  # noqa: PLC0415
 
-        if is_deterministic_mode_enabled(resolved_options.get("deterministic")) and not hasattr(kernel.adj, "det_meta"):
+        if (
+            is_deterministic_mode_enabled(resolved_options.get("deterministic"))
+            and getattr(kernel.adj, "det_meta", None) is None
+        ):
             kernel.adj.build(None, resolved_options | {"output_arch": None})
 
         ch.update(bytes(kernel.key, "utf-8"))
@@ -2237,19 +2256,7 @@ class ModuleBuilder:
         if func in self.functions:
             return
         else:
-            # Temporary workaround for PR #1355: deterministic atomic interception
-            # currently injects kernel-only hidden scatter/counter params into
-            # nested @wp.func bodies, which breaks CUDA helper compilation.
-            # Build user functions with deterministic codegen disabled so helper
-            # atomics fall back to normal atomic code while kernels can still use
-            # deterministic interception for atomics emitted directly in kernels.
-            prev_options = self.options
-            if prev_options.get("deterministic"):
-                self.options = self.options | {"deterministic": False, "deterministic_debug": False}
-            try:
-                func.build(self)
-            finally:
-                self.options = prev_options
+            func.build(self)
 
             # use dict to preserve import order
             self.functions[func] = None
@@ -2587,12 +2594,12 @@ class Module:
         if options["enable_mathdx_gemm"] is None:
             options["enable_mathdx_gemm"] = config.enable_mathdx_gemm
 
-        from warp._src.deterministic import normalize_determinism_mode  # noqa: PLC0415
+        from warp._src.deterministic import normalize_deterministic_mode  # noqa: PLC0415
 
         # Resolve None-means-inherit for deterministic
         if options["deterministic"] is None:
             options["deterministic"] = config.deterministic
-        options["deterministic"] = normalize_determinism_mode(options["deterministic"], option_name="deterministic")
+        options["deterministic"] = normalize_deterministic_mode(options["deterministic"], option_name="deterministic")
 
         if options["deterministic_max_records"] is None:
             options["deterministic_max_records"] = 0
@@ -2780,8 +2787,8 @@ class Module:
             _ = ModuleBuilder(self, builder_options)
             self.has_unresolved_static_expressions = False
 
-        if block_dim not in self.hashers:
-            options = self.resolve_options(warp.config)
+        options = self.resolve_options(warp.config)
+        if block_dim not in self.hashers or self.resolved_options.get(block_dim) != options:
             self.hashers[block_dim] = ModuleHasher(self._get_live_kernels(), options)
             self.resolved_options[block_dim] = options
 
@@ -7576,56 +7583,54 @@ def _launch_deterministic(
     kernel has atomic operations that require deterministic treatment.
     """
     from warp._src.deterministic import (  # noqa: PLC0415
+        add_counter_offset_kernel,
         allocate_counter_buffers,
         allocate_scatter_buffers,
-        normalize_determinism_mode,
+        normalize_deterministic_mode,
         run_sort_reduce,
     )
 
     dim_size = bounds.size
     options = kernel.module.resolve_options(warp.config) | kernel.options
-    determinism_mode = normalize_determinism_mode(options.get("deterministic"), option_name="deterministic")
+    determinism_mode = normalize_deterministic_mode(options.get("deterministic"), option_name="deterministic")
     max_scatter_records = max(0, int(options.get("deterministic_max_records", 0) or 0))
     det_debug = int(warp.config.deterministic_debug)
 
     # Allocate buffers.
     scatter_bufs = (
-        allocate_scatter_buffers(det_meta.scatter_targets, dim_size, device, max_records=max_scatter_records)
+        allocate_scatter_buffers(
+            det_meta.scatter_targets,
+            det_meta,
+            dim_size,
+            device,
+            max_records=max_scatter_records,
+        )
         if det_meta.has_scatter
         else []
     )
     counter_bufs = allocate_counter_buffers(det_meta.counter_targets, dim_size, device) if det_meta.has_counter else []
+    overflow_buf = warp.zeros(shape=(1,), dtype=warp.int32, device=device) if det_meta.has_scatter else None
 
     # Build the extra deterministic parameters (must match codegen_kernel order).
     def build_det_params(phase, scatter_bufs, counter_bufs, use_scatter):
-        det_params = []
-        if det_meta.has_counter:
-            det_params.append(ctypes.c_int(phase))
-            for i, _ct in enumerate(det_meta.counter_targets):
-                contrib, prefix = counter_bufs[i]
-                if phase == 0:
-                    det_params.append(ctypes.c_void_p(contrib.ptr))
-                    det_params.append(ctypes.c_void_p(0))  # prefix not used in phase 0
-                else:
-                    det_params.append(ctypes.c_void_p(0))  # contrib not used in phase 1
-                    det_params.append(ctypes.c_void_p(prefix.ptr))
+        det_params = [
+            ctypes.c_int(phase),
+            ctypes.c_int(det_debug),
+            ctypes.c_void_p(overflow_buf.ptr if overflow_buf is not None else 0),
+        ]
+        for i, _ct in enumerate(det_meta.counter_targets):
+            contrib, prefix = counter_bufs[i]
+            if phase == 0:
+                det_params.append(det_counter_buf_t(contrib.ptr, 0))
+            else:
+                det_params.append(det_counter_buf_t(0, prefix.ptr))
         for i, _st in enumerate(det_meta.scatter_targets):
             if use_scatter and i < len(scatter_bufs):
-                keys, values, counter, overflow, capacity = scatter_bufs[i]
-                det_params.append(ctypes.c_void_p(keys.ptr))
-                det_params.append(ctypes.c_void_p(values.ptr))
-                det_params.append(ctypes.c_void_p(counter.ptr))
-                det_params.append(ctypes.c_void_p(overflow.ptr))
-                det_params.append(ctypes.c_int(capacity))
+                keys, values, counter, capacity = scatter_bufs[i]
+                det_params.append(det_scatter_buf_t(keys.ptr, values.ptr, counter.ptr, capacity))
             else:
                 # Null scatter buffers (phase 0 doesn't scatter).
-                det_params.append(ctypes.c_void_p(0))
-                det_params.append(ctypes.c_void_p(0))
-                det_params.append(ctypes.c_void_p(0))
-                det_params.append(ctypes.c_void_p(0))
-                det_params.append(ctypes.c_int(0))
-        if det_meta.has_scatter:
-            det_params.append(ctypes.c_int(det_debug))
+                det_params.append(det_scatter_buf_t(0, 0, 0, 0))
         return det_params
 
     def do_cuda_launch(hook, params_list):
@@ -7653,6 +7658,29 @@ def _launch_deterministic(
             stream.cuda_stream,
         )
 
+    def resolve_det_target_array(target):
+        resolved = None
+        for j, arg in enumerate(kernel.adj.args):
+            if arg.label == target.array_var_label:
+                resolved = fwd_args[j]
+                break
+
+        if resolved is None:
+            return None
+
+        for attr in getattr(target, "attr_path", ()):
+            if resolved is None:
+                return None
+            if not hasattr(resolved, attr):
+                raise RuntimeError(
+                    "Deterministic target "
+                    f"{target.target_label!r} could not resolve attribute {attr!r} "
+                    f"on {type(resolved).__name__}"
+                )
+            resolved = getattr(resolved, attr)
+
+        return resolved
+
     if det_meta.has_counter:
         # === Two-pass execution ===
 
@@ -7670,19 +7698,43 @@ def _launch_deterministic(
             contrib, prefix = counter_bufs[i]
             warp._src.utils.array_scan(contrib, prefix, inclusive=False)
 
-            # Write the total count to the actual counter array so user code
-            # that reads it after the launch sees the correct value.
-            # Total = exclusive_prefix[-1] + contrib[-1].
-            # Use inclusive scan's last element = total
+            counter_arr = resolve_det_target_array(ct)
+            # Optional route-specific counters may be passed as ``None``.
+            # In that case the guarded kernel path must remain inactive,
+            # so there is no concrete array to write back to here.
+            if counter_arr is None:
+                continue
+            if not hasattr(counter_arr, "ptr"):
+                raise RuntimeError(
+                    "Deterministic counter target "
+                    f"{ct.target_label!r} resolved to non-array object "
+                    f"({type(counter_arr).__name__})"
+                )
+
+            # Offset deterministic slots by the counter's current value so
+            # repeated launches append instead of rewriting from zero.
+            warp.launch(
+                add_counter_offset_kernel,
+                dim=dim_size,
+                inputs=[prefix, counter_arr],
+                device=device,
+                stream=stream,
+                record_tape=False,
+            )
+
+            # Write the accumulated total count to the actual counter array so
+            # user code that reads it after the launch sees the appended count.
             inclusive_out = warp.empty(shape=(dim_size,), dtype=warp.int32, device=device)
             warp._src.utils.array_scan(contrib, inclusive_out, inclusive=True)
-            # Find the counter array in fwd_args and add the total.
-            for j, arg in enumerate(kernel.adj.args):
-                if arg.label == ct.array_var_label:
-                    counter_arr = fwd_args[j]
-                    # Copy the total (last element of inclusive scan) to the counter.
-                    warp.copy(counter_arr, inclusive_out, dest_offset=0, src_offset=dim_size - 1, count=1)
-                    break
+            warp.launch(
+                add_counter_offset_kernel,
+                dim=dim_size,
+                inputs=[inclusive_out, counter_arr],
+                device=device,
+                stream=stream,
+                record_tape=False,
+            )
+            warp.copy(counter_arr, inclusive_out, dest_offset=0, src_offset=dim_size - 1, count=1)
 
         # Phase 1: execution pass with deterministic slots.
         det_params_p1 = build_det_params(
@@ -7700,15 +7752,7 @@ def _launch_deterministic(
     # Post-kernel: sort-reduce for Pattern A scatter targets.
     if det_meta.has_scatter:
         # Identify the destination arrays from fwd_args.
-        dest_arrays = []
-        for st in det_meta.scatter_targets:
-            # Find the array argument whose label matches the scatter target.
-            dest_arr = None
-            for j, arg in enumerate(kernel.adj.args):
-                if arg.label == st.array_var_label:
-                    dest_arr = fwd_args[j]
-                    break
-            dest_arrays.append(dest_arr)
+        dest_arrays = [resolve_det_target_array(st) for st in det_meta.scatter_targets]
 
         run_sort_reduce(runtime, det_meta.scatter_targets, scatter_bufs, dest_arrays, device, determinism_mode)
 
@@ -8715,10 +8759,10 @@ def set_module_options(options: dict[str, Any], module: Any = None):
         options: Set of key-value option pairs
     """
     if "deterministic" in options:
-        from warp._src.deterministic import normalize_determinism_mode  # noqa: PLC0415
+        from warp._src.deterministic import normalize_deterministic_mode  # noqa: PLC0415
 
         options = dict(options)
-        options["deterministic"] = normalize_determinism_mode(
+        options["deterministic"] = normalize_deterministic_mode(
             options["deterministic"], option_name="deterministic", allow_none=True
         )
 
