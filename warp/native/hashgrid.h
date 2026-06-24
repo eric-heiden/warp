@@ -14,6 +14,7 @@ template <typename Type> struct HashGrid_t {
 
     int* cell_starts = nullptr;  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
     int* cell_ends = nullptr;  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int* group_ids = nullptr;  // sorted unique group identifiers for grouped queries
 
     int dim_x = 0;
     int dim_y = 0;
@@ -21,6 +22,8 @@ template <typename Type> struct HashGrid_t {
 
     int num_points = 0;
     int max_points = 0;
+    int num_groups = 0;
+    int max_cells = 0;
 
     void* context = nullptr;
 
@@ -33,6 +36,44 @@ template <typename Type> struct HashGrid_t {
 using HashGrid = HashGrid_t<float>;
 using HashGridH = HashGrid_t<half>;
 using HashGridD = HashGrid_t<double>;
+
+static constexpr int HASH_GRID_QUERY_ALL_GROUPS = -2147483647 - 1;
+
+template <typename Type> CUDA_CALLABLE inline int hash_grid_num_cells(const HashGrid_t<Type>& grid)
+{
+    return grid.dim_x * grid.dim_y * grid.dim_z;
+}
+
+template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const HashGrid_t<Type>& grid)
+{
+    return grid.group_ids != nullptr && grid.num_groups > 0;
+}
+
+template <typename Type> CUDA_CALLABLE inline int hash_grid_cell_count(const HashGrid_t<Type>& grid)
+{
+    const int group_count = hash_grid_has_groups(grid) ? grid.num_groups : 1;
+    return hash_grid_num_cells(grid) * group_count;
+}
+
+template <typename Type> CUDA_CALLABLE inline int hash_grid_group_slot(const HashGrid_t<Type>& grid, int group_id)
+{
+    if (!hash_grid_has_groups(grid))
+        return 0;
+
+    int lo = 0;
+    int hi = grid.num_groups;
+    while (lo < hi) {
+        const int mid = (lo + hi) / 2;
+        if (grid.group_ids[mid] < group_id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+
+    if (lo < grid.num_groups && grid.group_ids[lo] == group_id)
+        return lo;
+    return -1;
+}
 
 // convert a virtual (world) cell coordinate to a physical one
 template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, int x, int y, int z)
@@ -66,6 +107,15 @@ template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid
     return cz * (grid.dim_x * grid.dim_y) + cy * grid.dim_x + cx;
 }
 
+template <typename Type>
+CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, int x, int y, int z, int group_slot)
+{
+    const int cell = hash_grid_index(grid, x, y, z);
+    if (hash_grid_has_groups(grid))
+        return group_slot * hash_grid_num_cells(grid) + cell;
+    return cell;
+}
+
 template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, const vec_t<3, Type>& p)
 {
     // Use floor() to round toward negative infinity, not int() which truncates toward zero.
@@ -74,6 +124,20 @@ template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid
     return hash_grid_index(
         grid, int(floor(p[0] * grid.cell_width_inv)), int(floor(p[1] * grid.cell_width_inv)),
         int(floor(p[2] * grid.cell_width_inv))
+    );
+}
+
+template <typename Type>
+CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, const vec_t<3, Type>& p, int group_id)
+{
+    const int group_slot = hash_grid_group_slot(grid, group_id);
+    if (group_slot < 0)
+        return -1;
+
+    // Use floor() to round toward negative infinity, not int() which truncates toward zero.
+    return hash_grid_index(
+        grid, int(floor(p[0] * grid.cell_width_inv)), int(floor(p[1] * grid.cell_width_inv)),
+        int(floor(p[2] * grid.cell_width_inv)), group_slot
     );
 }
 
@@ -93,6 +157,10 @@ template <typename Type> struct hash_grid_query_t {
         , cell_index(0)
         , cell_end(0)
         , current(0)
+        , group(0)
+        , group_start(0)
+        , group_end(1)
+        , group_slot(0)
         , grid()
     {
     }
@@ -118,6 +186,11 @@ template <typename Type> struct hash_grid_query_t {
 
     int current;  // index of the current iterator value
 
+    int group;  // requested group, or HASH_GRID_QUERY_ALL_GROUPS for all groups
+    int group_start;
+    int group_end;
+    int group_slot;
+
     HashGrid_t<Type> grid;
 };
 
@@ -128,11 +201,42 @@ using hash_grid_query_d = hash_grid_query_t<double>;
 
 
 template <typename Type>
-CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius)
+CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& query)
+{
+    const int cell = hash_grid_index(query.grid, query.x, query.y, query.z, query.group_slot);
+    query.cell_index = query.grid.cell_starts[cell];
+    query.cell_end = query.grid.cell_ends[cell];
+}
+
+template <typename Type>
+CUDA_CALLABLE inline hash_grid_query_t<Type>
+hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
 {
     hash_grid_query_t<Type> query;
 
     query.grid = *(const HashGrid_t<Type>*)(id);
+    query.group = group;
+
+    if (hash_grid_has_groups(query.grid)) {
+        if (group == HASH_GRID_QUERY_ALL_GROUPS) {
+            query.group_start = 0;
+            query.group_end = query.grid.num_groups;
+            query.group_slot = 0;
+        } else {
+            const int group_slot = hash_grid_group_slot(query.grid, group);
+            if (group_slot < 0) {
+                query.group_start = 0;
+                query.group_end = 0;
+                query.group_slot = 0;
+                query.cell_index = 0;
+                query.cell_end = 0;
+                return query;
+            }
+            query.group_start = group_slot;
+            query.group_end = group_slot + 1;
+            query.group_slot = group_slot;
+        }
+    }
 
     // Convert coordinate to grid cell indices using floor() (see hash_grid_index above)
     Type cell_width_inv = query.grid.cell_width_inv;
@@ -150,9 +254,7 @@ CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<
     query.y = query.y_start;
     query.z = query.z_start;
 
-    const int cell = hash_grid_index(query.grid, query.x, query.y, query.z);
-    query.cell_index = query.grid.cell_starts[cell];
-    query.cell_end = query.grid.cell_ends[cell];
+    hash_grid_query_set_cell(query);
 
     return query;
 }
@@ -163,6 +265,8 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
     const HashGrid_t<Type>& grid = query.grid;
     if (!grid.point_cells)
         return false;
+    if (hash_grid_has_groups(grid) && query.group_end <= query.group_start)
+        return false;
 
     while (1) {
         if (query.cell_index < query.cell_end) {
@@ -170,6 +274,15 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
             index = grid.point_ids[query.cell_index++];
             return true;
         } else {
+            if (hash_grid_has_groups(grid)) {
+                query.group_slot++;
+                if (query.group_slot < query.group_end) {
+                    hash_grid_query_set_cell(query);
+                    continue;
+                }
+                query.group_slot = query.group_start;
+            }
+
             query.x++;
             if (query.x > query.x_end) {
                 query.x = query.x_start;
@@ -187,10 +300,7 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
             }
 
             // update cell pointers
-            const int cell = hash_grid_index(grid, query.x, query.y, query.z);
-
-            query.cell_index = grid.cell_starts[cell];
-            query.cell_end = grid.cell_ends[cell];
+            hash_grid_query_set_cell(query);
         }
     }
 }

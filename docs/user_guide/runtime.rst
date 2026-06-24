@@ -2162,6 +2162,61 @@ precision, for example ``wp.HashGridQuery[wp.float64]``. The unparameterized ``w
     check/compute the distance twice.
 
 
+Grouped Hash Grids
+^^^^^^^^^^^^^^^^^^
+
+Hash grids can also be built with point groups. Grouping is useful when a single grid stores particles from multiple
+independent environments, worlds, or batches. Points from different groups may occupy identical coordinates, but grouped
+queries only traverse the buckets for the requested group, avoiding cross-group candidate iteration and user-side
+filtering.
+
+Pass a contiguous ``wp.int32`` array with one group id per point to :meth:`HashGrid.build() <warp.HashGrid.build>`:
+
+.. code:: python
+
+    points = wp.array(
+        [
+            (0.0, 0.0, 0.0),
+            (0.4, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.4, 0.0, 0.0),
+        ],
+        dtype=wp.vec3,
+        device="cuda:0",
+    )
+    groups = wp.array([0, 0, 1, 1], dtype=wp.int32, device="cuda:0")
+
+    grid = wp.HashGrid(dim_x=8, dim_y=8, dim_z=8, device="cuda:0")
+    grid.build(points=points, radius=0.5, groups=groups)
+
+Inside kernels, pass the desired group id directly to :func:`wp.hash_grid_query() <warp._src.lang.hash_grid_query>`:
+
+.. code:: python
+
+    @wp.kernel
+    def count_group_neighbors(
+        grid: wp.uint64,
+        points: wp.array[wp.vec3],
+        groups: wp.array[wp.int32],
+        radius: float,
+        neighbor_count: wp.array[int],
+    ):
+        tid = wp.tid()
+        point = points[tid]
+        group = groups[tid]
+        count = int(0)
+
+        for index in wp.hash_grid_query(grid, point, radius, group):
+            if index != tid and wp.length(points[index] - point) <= radius:
+                count += 1
+
+        neighbor_count[tid] = count
+
+If the group argument is omitted, the query visits all groups. Unlike grouped BVH queries, grouped hash-grid queries do
+not use a group-root helper such as :func:`wp.bvh_get_group_root() <warp._src.lang.bvh_get_group_root>`; the group id is
+the query selector.
+
+
 
 Volumes
 #######

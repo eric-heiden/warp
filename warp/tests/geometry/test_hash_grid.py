@@ -51,6 +51,47 @@ count_neighbors_f32 = wp.overload(count_neighbors, [wp.uint64, wp.float32, wp.ar
 count_neighbors_f64 = wp.overload(count_neighbors, [wp.uint64, wp.float64, wp.array[wp.vec3d], wp.array[int]])
 
 
+@wp.kernel
+def count_neighbors_grouped(
+    grid: wp.uint64,
+    radius: float,
+    points: wp.array[wp.vec3],
+    groups: wp.array[int],
+    counts: wp.array[int],
+):
+    tid = wp.tid()
+    p = points[tid]
+    group = groups[tid]
+    count = int(0)
+
+    for index in wp.hash_grid_query(grid, p, radius, group):
+        d = wp.length(p - points[index])
+        if d <= radius:
+            count += 1
+
+    counts[tid] = count
+
+
+@wp.kernel
+def count_neighbors_fixed_group(
+    grid: wp.uint64,
+    radius: float,
+    group: int,
+    points: wp.array[wp.vec3],
+    counts: wp.array[int],
+):
+    tid = wp.tid()
+    p = points[tid]
+    count = int(0)
+
+    for index in wp.hash_grid_query(grid, p, radius, group):
+        d = wp.length(p - points[index])
+        if d <= radius:
+            count += 1
+
+    counts[tid] = count
+
+
 _saved_warnings_seen = _logger_module._warnings_seen.copy()
 try:
     with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
@@ -425,6 +466,53 @@ def test_hashgrid_multiprecision(test, device):
             assert_np_equal(counts_arr.numpy(), expected_counts)
 
 
+def test_hashgrid_grouped_query(test, device):
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    groups = np.array([0, 0, 1, 1, 2], dtype=np.int32)
+    radius = 0.2
+
+    points_arr = wp.array(points, dtype=wp.vec3, device=device)
+    groups_arr = wp.array(groups, dtype=int, device=device)
+    counts_grouped = wp.zeros(len(points), dtype=int, device=device)
+    counts_all = wp.zeros(len(points), dtype=int, device=device)
+    counts_missing = wp.zeros(len(points), dtype=int, device=device)
+
+    grid = wp.HashGrid(16, 16, 16, device)
+    grid.build(points_arr, radius, groups=groups_arr)
+
+    wp.launch(
+        kernel=count_neighbors_grouped,
+        dim=len(points),
+        inputs=[wp.uint64(grid.id), radius, points_arr, groups_arr, counts_grouped],
+        device=device,
+    )
+    wp.launch(
+        kernel=count_neighbors,
+        dim=len(points),
+        inputs=[wp.uint64(grid.id), radius, points_arr, counts_all],
+        device=device,
+    )
+    wp.launch(
+        kernel=count_neighbors_fixed_group,
+        dim=len(points),
+        inputs=[wp.uint64(grid.id), radius, 99, points_arr, counts_missing],
+        device=device,
+    )
+
+    assert_np_equal(counts_grouped.numpy(), np.array([2, 2, 2, 2, 1], dtype=np.int32))
+    assert_np_equal(counts_all.numpy(), np.array([4, 4, 4, 4, 1], dtype=np.int32))
+    assert_np_equal(counts_missing.numpy(), np.zeros(len(points), dtype=np.int32))
+
+
 def test_hashgrid_query_func_annotations(test, device):
     """Pass live hash grid queries to helper functions that choose the nearest point within a query radius."""
     points = np.array(
@@ -709,6 +797,7 @@ add_function_test(TestHashGrid, "test_hashgrid_query", test_hashgrid_query, devi
 add_function_test(TestHashGrid, "test_hashgrid_inputs", test_hashgrid_inputs, devices=devices)
 add_function_test(TestHashGrid, "test_hashgrid_multiple_streams", test_hashgrid_multiple_streams, devices=cuda_devices)
 add_function_test(TestHashGrid, "test_hashgrid_multiprecision", test_hashgrid_multiprecision, devices=devices)
+add_function_test(TestHashGrid, "test_hashgrid_grouped_query", test_hashgrid_grouped_query, devices=devices)
 add_function_test(
     TestHashGrid, "test_hashgrid_query_func_annotations", test_hashgrid_query_func_annotations, devices=devices
 )

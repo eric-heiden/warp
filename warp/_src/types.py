@@ -7024,6 +7024,21 @@ class HashGrid:
     """Hash-based spatial grid for accelerated neighbor queries on point data.
 
     Supports float16, float32, and float64 precision via the ``dtype`` parameter.
+
+    **Concept of Grouped HashGrid:**
+
+    A grouped hash grid partitions point buckets by a user-provided integer group id. This is useful for storing
+    particles from many independent environments in a single grid while keeping neighbor queries local to one
+    environment.
+
+    In a standard hash grid, all points sharing a spatial cell are stored together, so kernels that need environment
+    isolation must query all candidates and filter out points from other environments. Grouped hash grids store each
+    group's cell ranges independently, and :func:`warp.hash_grid_query` accepts an optional group id that restricts
+    traversal to that group's cells only. This avoids cross-group candidate iteration while preserving the ungrouped
+    query path when no group is passed.
+
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a separate root lookup. Pass the same group id
+    used at build time directly to :func:`warp.hash_grid_query`.
     """
 
     # Native type IDs (must match HashGridTypeId enum in hashgrid.cpp)
@@ -7087,8 +7102,11 @@ class HashGrid:
 
         # indicates whether the grid data has been reserved for use by a kernel
         self.reserved = False
+        self.groups = None
+        self._group_ids = None
+        self._group_key = None
 
-    def build(self, points, radius):
+    def build(self, points, radius, groups=None):
         """Update the hash grid data structure.
 
         This method rebuilds the underlying datastructure and should be called any time the set
@@ -7100,6 +7118,11 @@ class HashGrid:
             radius (float): The cell size to use for bucketing points, cells are cubes with edges of this width.
                             For best performance the radius used to construct the grid should match closely to
                             the radius used when performing queries.
+            groups: Optional array of point group indices of data type :class:`warp.int32`.
+                When provided, the grid is partitioned by group so grouped queries only visit points with the
+                requested group id. This is intended for independent environments or worlds whose particles should not
+                interact, even when their coordinates overlap. Omitting the group argument in
+                :func:`warp.hash_grid_query` preserves the all-points traversal behavior.
         """
         if not types_equal(points.dtype, self._vec_type):
             raise TypeError(f"Hash grid points should have type {self._vec_type.__name__}, got {points.dtype}")
@@ -7110,7 +7133,37 @@ class HashGrid:
         if points.ndim > 1:
             points = points.contiguous().flatten()
 
-        self._native_func("update")(self.id, self._type_id, radius, ctypes.byref(points.__ctype__()))
+        groups_arg = None
+        group_ids_arg = None
+        if groups is not None:
+            if groups.dtype != int32:
+                raise RuntimeError("groups should be an array of type wp.int32")
+            if groups.device != points.device:
+                raise RuntimeError("groups must live on the same device as points")
+            if groups.ndim > 1:
+                groups = groups.contiguous().flatten()
+            elif not groups.is_contiguous:
+                groups = groups.contiguous()
+            if len(groups) != len(points):
+                raise RuntimeError("groups must have the same length as points")
+
+            group_key = (groups.ptr, groups.shape, groups.device)
+            if self._group_key != group_key:
+                group_ids_np = np.unique(groups.numpy()).astype(np.int32)
+                self._group_ids = warp.array(group_ids_np, dtype=int32, device=self.device)
+                self._group_key = group_key
+
+            self.groups = groups
+            groups_arg = ctypes.byref(groups.__ctype__())
+            group_ids_arg = ctypes.byref(self._group_ids.__ctype__())
+        else:
+            self.groups = None
+            self._group_ids = None
+            self._group_key = None
+
+        self._native_func("update")(
+            self.id, self._type_id, radius, ctypes.byref(points.__ctype__()), groups_arg, group_ids_arg
+        )
         self.reserved = True
 
     def reserve(self, num_points):

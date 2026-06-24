@@ -11,13 +11,19 @@ extern CUcontext get_current_context();
 
 namespace wp {
 
-template <typename Type> __global__ void compute_cell_indices(HashGrid_t<Type> grid, wp::array_t<vec_t<3, Type>> points)
+template <typename Type>
+__global__ void compute_cell_indices(
+    HashGrid_t<Type> grid, wp::array_t<vec_t<3, Type>> points, wp::array_t<int> groups, bool use_groups
+)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < points.shape[0]) {
         const vec_t<3, Type>& point = wp::index(points, tid);
-        grid.point_cells[tid] = hash_grid_index(grid, point);
+        if (use_groups)
+            grid.point_cells[tid] = hash_grid_index(grid, point, wp::index(groups, tid));
+        else
+            grid.point_cells[tid] = hash_grid_index(grid, point);
         grid.point_ids[tid] = tid;
     }
 }
@@ -49,17 +55,24 @@ __global__ void compute_cell_offsets(int* cell_starts, int* cell_ends, const int
 }
 
 template <typename Type>
-void hash_grid_rebuild_device(const wp::HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points)
+void hash_grid_rebuild_device(
+    const wp::HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points, const wp::array_t<int>* groups
+)
 {
     ContextGuard guard(grid.context);
 
     int num_points = points.shape[0];
+    bool use_groups = groups != nullptr;
+    wp::array_t<int> empty_groups;
+    const wp::array_t<int>& group_array = groups ? *groups : empty_groups;
 
-    wp_launch_device(WP_CURRENT_CONTEXT, (wp::compute_cell_indices<Type>), num_points, (grid, points));
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, (wp::compute_cell_indices<Type>), num_points, (grid, points, group_array, use_groups)
+    );
 
     radix_sort_pairs_device(WP_CURRENT_CONTEXT, grid.point_cells, grid.point_ids, num_points);
 
-    const int num_cells = grid.dim_x * grid.dim_y * grid.dim_z;
+    const int num_cells = hash_grid_cell_count(grid);
 
     wp_memset_device(WP_CURRENT_CONTEXT, grid.cell_starts, 0, sizeof(int) * num_cells);
     wp_memset_device(WP_CURRENT_CONTEXT, grid.cell_ends, 0, sizeof(int) * num_cells);
@@ -71,9 +84,15 @@ void hash_grid_rebuild_device(const wp::HashGrid_t<Type>& grid, const wp::array_
 }
 
 // Explicit template instantiations
-template void hash_grid_rebuild_device<half>(const HashGrid_t<half>&, const array_t<vec_t<3, half>>&);
-template void hash_grid_rebuild_device<float>(const HashGrid_t<float>&, const array_t<vec_t<3, float>>&);
-template void hash_grid_rebuild_device<double>(const HashGrid_t<double>&, const array_t<vec_t<3, double>>&);
+template void hash_grid_rebuild_device<half>(
+    const HashGrid_t<half>&, const array_t<vec_t<3, half>>&, const array_t<int>*
+);
+template void hash_grid_rebuild_device<float>(
+    const HashGrid_t<float>&, const array_t<vec_t<3, float>>&, const array_t<int>*
+);
+template void hash_grid_rebuild_device<double>(
+    const HashGrid_t<double>&, const array_t<vec_t<3, double>>&, const array_t<int>*
+);
 
 
 }  // namespace wp

@@ -4860,24 +4860,33 @@ def mesh_eval_velocity(id: uint64, face: int32, bary_u: float32, bary_v: float32
     ...
 
 @over
-def hash_grid_query(id: uint64, point: vec3f, max_dist: float32) -> HashGridQuery:
+def hash_grid_query(id: uint64, point: vec3f, max_dist: float32, group: int32) -> HashGridQuery:
     """Construct a point query against a :class:`warp.HashGrid`.
 
-    This query can be used to iterate over all neighboring points within a fixed radius from the query point."""
+    This query can be used to iterate over all neighboring points within a fixed radius from the query point.
+    If the hash grid was built with groups, passing a group id restricts traversal to that group only, so points from
+    other groups are not returned as candidates. Omitting the group visits all groups, matching ungrouped behavior.
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a root lookup; pass the group id directly."""
     ...
 
 @over
-def hash_grid_query(id: uint64, point: vec3h, max_dist: float16) -> HashGridQuery:
+def hash_grid_query(id: uint64, point: vec3h, max_dist: float16, group: int32) -> HashGridQuery:
     """Construct a point query against a :class:`warp.HashGrid` (float16 precision).
 
-    This query can be used to iterate over all neighboring points within a fixed radius from the query point."""
+    This query can be used to iterate over all neighboring points within a fixed radius from the query point.
+    If the hash grid was built with groups, passing a group id restricts traversal to that group only, so points from
+    other groups are not returned as candidates. Omitting the group visits all groups, matching ungrouped behavior.
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a root lookup; pass the group id directly."""
     ...
 
 @over
-def hash_grid_query(id: uint64, point: vec3d, max_dist: float64) -> HashGridQuery:
+def hash_grid_query(id: uint64, point: vec3d, max_dist: float64, group: int32) -> HashGridQuery:
     """Construct a point query against a :class:`warp.HashGrid` (float64 precision).
 
-    This query can be used to iterate over all neighboring points within a fixed radius from the query point."""
+    This query can be used to iterate over all neighboring points within a fixed radius from the query point.
+    If the hash grid was built with groups, passing a group id restricts traversal to that group only, so points from
+    other groups are not returned as candidates. Omitting the group visits all groups, matching ungrouped behavior.
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a root lookup; pass the group id directly."""
     ...
 
 def hash_grid_query_next(query: HashGridQuery, index: int32) -> bool:

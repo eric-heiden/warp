@@ -30,6 +30,14 @@ static_assert(
     offsetof(HashGrid, point_ids) == offsetof(HashGridD, point_ids),
     "HashGrid point_ids offset mismatch between float and double"
 );
+static_assert(
+    offsetof(HashGrid, group_ids) == offsetof(HashGridH, group_ids),
+    "HashGrid group_ids offset mismatch between float and half"
+);
+static_assert(
+    offsetof(HashGrid, group_ids) == offsetof(HashGridD, group_ids),
+    "HashGrid group_ids offset mismatch between float and double"
+);
 
 #include <map>
 
@@ -79,7 +87,9 @@ template <typename Type> void hash_grid_rem_descriptor(uint64_t id)
 
 // implemented in hashgrid.cu
 template <typename Type>
-void hash_grid_rebuild_device(const HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points);
+void hash_grid_rebuild_device(
+    const HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points, const wp::array_t<int>* groups
+);
 
 }  // namespace wp
 
@@ -101,6 +111,7 @@ template <typename Type> uint64_t hash_grid_create_host_impl(int dim_x, int dim_
     const int num_cells = dim_x * dim_y * dim_z;
     grid->cell_starts = (int*)wp_alloc_host(num_cells * sizeof(int), tag);
     grid->cell_ends = (int*)wp_alloc_host(num_cells * sizeof(int), tag);
+    grid->max_cells = num_cells;
 
     return (uint64_t)(grid);
 }
@@ -136,8 +147,28 @@ template <typename Type> void hash_grid_reserve_host_impl(uint64_t id, int num_p
     grid->num_points = num_points;
 }
 
+template <typename Type> void hash_grid_reserve_cells_host_impl(HashGrid_t<Type>* grid, int num_cells)
+{
+    static const char* tag = "(native:hashgrid)";
+
+    if (num_cells > grid->max_cells) {
+        wp_free_host(grid->cell_starts);
+        wp_free_host(grid->cell_ends);
+
+        grid->cell_starts = (int*)wp_alloc_host(num_cells * sizeof(int), tag);
+        grid->cell_ends = (int*)wp_alloc_host(num_cells * sizeof(int), tag);
+        grid->max_cells = num_cells;
+    }
+}
+
 template <typename Type>
-void hash_grid_update_host_impl(uint64_t id, Type cell_width, const wp::array_t<vec_t<3, Type>>* points)
+void hash_grid_update_host_impl(
+    uint64_t id,
+    Type cell_width,
+    const wp::array_t<vec_t<3, Type>>* points,
+    const wp::array_t<int>* groups,
+    const wp::array_t<int>* group_ids
+)
 {
     // Python enforces this, but let's be defensive anyways
     if (!points || points->ndim != 1) {
@@ -152,23 +183,43 @@ void hash_grid_update_host_impl(uint64_t id, Type cell_width, const wp::array_t<
 
     HashGrid_t<Type>* grid = (HashGrid_t<Type>*)(id);
     int num_points = points->shape[0];
+    int num_groups = 0;
+
+    if (groups) {
+        if (groups->ndim != 1 || groups->shape[0] != num_points) {
+            fprintf(stderr, "Warp error: Invalid groups array passed to %s\n", __FUNCTION__);
+            return;
+        }
+        if (!group_ids || group_ids->ndim != 1) {
+            fprintf(stderr, "Warp error: Invalid group_ids array passed to %s\n", __FUNCTION__);
+            return;
+        }
+        num_groups = group_ids->shape[0];
+    }
 
     hash_grid_reserve_host_impl<Type>(id, num_points);
 
     grid->cell_width = cell_width;
     grid->cell_width_inv = Type(1) / cell_width;
+    grid->group_ids = group_ids ? (int*)group_ids->data : nullptr;
+    grid->num_groups = num_groups;
+
+    const int num_cells = hash_grid_cell_count(*grid);
+    hash_grid_reserve_cells_host_impl(grid, num_cells);
 
     // calculate cell for each position
     for (int i = 0; i < num_points; ++i) {
         const vec_t<3, Type>& point = wp::index(*points, i);
-        grid->point_cells[i] = hash_grid_index(*grid, point);
+        if (groups)
+            grid->point_cells[i] = hash_grid_index(*grid, point, wp::index(*groups, i));
+        else
+            grid->point_cells[i] = hash_grid_index(*grid, point);
         grid->point_ids[i] = i;
     }
 
     // sort indices
     radix_sort_pairs_host(grid->point_cells, grid->point_ids, num_points);
 
-    const int num_cells = grid->dim_x * grid->dim_y * grid->dim_z;
     memset(grid->cell_starts, 0, sizeof(int) * num_cells);
     memset(grid->cell_ends, 0, sizeof(int) * num_cells);
 
@@ -215,6 +266,7 @@ template <typename Type> uint64_t hash_grid_create_device_impl(void* context, in
     const int num_cells = dim_x * dim_y * dim_z;
     grid.cell_starts = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, num_cells * sizeof(int), tag);
     grid.cell_ends = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, num_cells * sizeof(int), tag);
+    grid.max_cells = num_cells;
 
     HashGrid_t<Type>* grid_device
         = (HashGrid_t<Type>*)(wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(HashGrid_t<Type>), tag));
@@ -278,10 +330,35 @@ template <typename Type> void hash_grid_reserve_device_impl(uint64_t id, int num
     }
 }
 
+template <typename Type> void hash_grid_reserve_cells_device_impl(uint64_t id, HashGrid_t<Type>& grid, int num_cells)
+{
+    static const char* tag = "(native:hashgrid)";
+
+    if (num_cells > grid.max_cells) {
+        ContextGuard guard(grid.context);
+
+        wp_free_device(WP_CURRENT_CONTEXT, grid.cell_starts);
+        wp_free_device(WP_CURRENT_CONTEXT, grid.cell_ends);
+
+        grid.cell_starts = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, num_cells * sizeof(int), tag);
+        grid.cell_ends = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, num_cells * sizeof(int), tag);
+        grid.max_cells = num_cells;
+
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, (HashGrid_t<Type>*)id, &grid, sizeof(HashGrid_t<Type>));
+        hash_grid_add_descriptor(id, grid);
+    }
+}
+
 // Note: For device update, we use a static local variable for CUDA graph compatibility.
 // We need separate static variables for each type to avoid aliasing issues.
 template <typename Type>
-void hash_grid_update_device_impl(uint64_t id, Type cell_width, const wp::array_t<vec_t<3, Type>>* points)
+void hash_grid_update_device_impl(
+    uint64_t id,
+    Type cell_width,
+    const wp::array_t<vec_t<3, Type>>* points,
+    const wp::array_t<int>* groups,
+    const wp::array_t<int>* group_ids
+)
 {
     // Python enforces this, but let's be defensive anyways
     if (!points || points->ndim != 1) {
@@ -290,6 +367,19 @@ void hash_grid_update_device_impl(uint64_t id, Type cell_width, const wp::array_
     }
 
     int num_points = points->shape[0];
+    int num_groups = 0;
+
+    if (groups) {
+        if (groups->ndim != 1 || groups->shape[0] != num_points) {
+            fprintf(stderr, "Warp error: Invalid groups array passed to %s\n", __FUNCTION__);
+            return;
+        }
+        if (!group_ids || group_ids->ndim != 1) {
+            fprintf(stderr, "Warp error: Invalid group_ids array passed to %s\n", __FUNCTION__);
+            return;
+        }
+        num_groups = group_ids->shape[0];
+    }
 
     // ensure we have enough memory reserved for update
     // this must be done before retrieving the descriptor
@@ -307,8 +397,13 @@ void hash_grid_update_device_impl(uint64_t id, Type cell_width, const wp::array_
         grid.num_points = num_points;
         grid.cell_width = cell_width;
         grid.cell_width_inv = Type(1) / cell_width;
+        grid.group_ids = group_ids ? (int*)group_ids->data : nullptr;
+        grid.num_groups = num_groups;
 
-        hash_grid_rebuild_device(grid, *points);
+        const int num_cells = hash_grid_cell_count(grid);
+        hash_grid_reserve_cells_device_impl(id, grid, num_cells);
+
+        hash_grid_rebuild_device(grid, *points, groups);
 
         // update device side grid descriptor
         wp_memcpy_h2d(WP_CURRENT_CONTEXT, (HashGrid_t<Type>*)id, &grid, sizeof(HashGrid_t<Type>));
@@ -360,17 +455,26 @@ void wp_hash_grid_destroy_host(uint64_t id, int type)
     }
 }
 
-void wp_hash_grid_update_host(uint64_t id, int type, double cell_width, const void* points)
+void wp_hash_grid_update_host(uint64_t id, int type, double cell_width, const void* points, const void* groups, const void* group_ids)
 {
     switch (type) {
     case HASH_GRID_TYPE_FLOAT16:
-        hash_grid_update_host_impl<half>(id, half(cell_width), (const wp::array_t<wp::vec3h>*)points);
+        hash_grid_update_host_impl<half>(
+            id, half(cell_width), (const wp::array_t<wp::vec3h>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     case HASH_GRID_TYPE_FLOAT32:
-        hash_grid_update_host_impl<float>(id, float(cell_width), (const wp::array_t<wp::vec3f>*)points);
+        hash_grid_update_host_impl<float>(
+            id, float(cell_width), (const wp::array_t<wp::vec3f>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     case HASH_GRID_TYPE_FLOAT64:
-        hash_grid_update_host_impl<double>(id, cell_width, (const wp::array_t<wp::vec3d>*)points);
+        hash_grid_update_host_impl<double>(
+            id, cell_width, (const wp::array_t<wp::vec3d>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     default:
         fprintf(stderr, "Warp error: Invalid hash grid type %d\n", type);
@@ -426,17 +530,26 @@ void wp_hash_grid_destroy_device(uint64_t id, int type)
     }
 }
 
-void wp_hash_grid_update_device(uint64_t id, int type, double cell_width, const void* points)
+void wp_hash_grid_update_device(uint64_t id, int type, double cell_width, const void* points, const void* groups, const void* group_ids)
 {
     switch (type) {
     case HASH_GRID_TYPE_FLOAT16:
-        hash_grid_update_device_impl<half>(id, half(cell_width), (const wp::array_t<wp::vec3h>*)points);
+        hash_grid_update_device_impl<half>(
+            id, half(cell_width), (const wp::array_t<wp::vec3h>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     case HASH_GRID_TYPE_FLOAT32:
-        hash_grid_update_device_impl<float>(id, float(cell_width), (const wp::array_t<wp::vec3f>*)points);
+        hash_grid_update_device_impl<float>(
+            id, float(cell_width), (const wp::array_t<wp::vec3f>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     case HASH_GRID_TYPE_FLOAT64:
-        hash_grid_update_device_impl<double>(id, cell_width, (const wp::array_t<wp::vec3d>*)points);
+        hash_grid_update_device_impl<double>(
+            id, cell_width, (const wp::array_t<wp::vec3d>*)points, (const wp::array_t<int>*)groups,
+            (const wp::array_t<int>*)group_ids
+        );
         break;
     default:
         fprintf(stderr, "Warp error: Invalid hash grid type %d\n", type);
@@ -469,14 +582,22 @@ void wp_hash_grid_reserve_device(uint64_t id, int type, int num_points)
 namespace wp {
 
 template <typename Type>
-void hash_grid_rebuild_device(const HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points)
+void hash_grid_rebuild_device(
+    const HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points, const wp::array_t<int>* groups
+)
 {
 }
 
 // Explicit instantiations
-template void hash_grid_rebuild_device<half>(const HashGrid_t<half>&, const wp::array_t<vec_t<3, half>>&);
-template void hash_grid_rebuild_device<float>(const HashGrid_t<float>&, const wp::array_t<vec_t<3, float>>&);
-template void hash_grid_rebuild_device<double>(const HashGrid_t<double>&, const wp::array_t<vec_t<3, double>>&);
+template void hash_grid_rebuild_device<half>(
+    const HashGrid_t<half>&, const wp::array_t<vec_t<3, half>>&, const wp::array_t<int>*
+);
+template void hash_grid_rebuild_device<float>(
+    const HashGrid_t<float>&, const wp::array_t<vec_t<3, float>>&, const wp::array_t<int>*
+);
+template void hash_grid_rebuild_device<double>(
+    const HashGrid_t<double>&, const wp::array_t<vec_t<3, double>>&, const wp::array_t<int>*
+);
 
 }  // namespace wp
 
