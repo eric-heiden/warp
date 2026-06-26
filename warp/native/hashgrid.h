@@ -38,10 +38,21 @@ using HashGridH = HashGrid_t<half>;
 using HashGridD = HashGrid_t<double>;
 
 static constexpr int HASH_GRID_QUERY_ALL_GROUPS = -2147483647 - 1;
+static constexpr long long HASH_GRID_MAX_CELL_COUNT = 2147483647LL;
+
+CUDA_CALLABLE inline long long hash_grid_checked_cell_product(long long a, long long b)
+{
+    if (a <= 0LL || b <= 0LL || a > HASH_GRID_MAX_CELL_COUNT / b)
+        return -1LL;
+
+    return a * b;
+}
 
 template <typename Type> CUDA_CALLABLE inline int hash_grid_num_cells(const HashGrid_t<Type>& grid)
 {
-    return grid.dim_x * grid.dim_y * grid.dim_z;
+    long long total = hash_grid_checked_cell_product((long long)grid.dim_x, (long long)grid.dim_y);
+    total = hash_grid_checked_cell_product(total, (long long)grid.dim_z);
+    return (int)total;
 }
 
 template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const HashGrid_t<Type>& grid)
@@ -51,8 +62,18 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const Ha
 
 template <typename Type> CUDA_CALLABLE inline int hash_grid_cell_count(const HashGrid_t<Type>& grid)
 {
-    const int group_count = hash_grid_has_groups(grid) ? grid.num_groups : 1;
-    return hash_grid_num_cells(grid) * group_count;
+    // Grouped grids allocate one cell range per unique group, so reject overflow before each multiply.
+    const int base = hash_grid_num_cells(grid);
+    if (base < 0)
+        return -1;
+
+    const long long group_count = hash_grid_has_groups(grid) ? (long long)grid.num_groups : 1LL;
+    const long long total = hash_grid_checked_cell_product((long long)base, group_count);
+
+    if (total < 0LL)
+        return -1;
+
+    return (int)total;
 }
 
 template <typename Type> CUDA_CALLABLE inline int hash_grid_group_slot(const HashGrid_t<Type>& grid, int group_id)
@@ -112,7 +133,7 @@ CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, int x, in
 {
     const int cell = hash_grid_index(grid, x, y, z);
     if (hash_grid_has_groups(grid))
-        return group_slot * hash_grid_num_cells(grid) + cell;
+        return (int)((long long)group_slot * (long long)hash_grid_num_cells(grid) + (long long)cell);
     return cell;
 }
 
@@ -200,8 +221,7 @@ using hash_grid_query_h = hash_grid_query_t<half>;
 using hash_grid_query_d = hash_grid_query_t<double>;
 
 
-template <typename Type>
-CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& query)
+template <typename Type> CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& query)
 {
     const int cell = hash_grid_index(query.grid, query.x, query.y, query.z, query.group_slot);
     query.cell_index = query.grid.cell_starts[cell];
@@ -209,8 +229,7 @@ CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& quer
 }
 
 template <typename Type>
-CUDA_CALLABLE inline hash_grid_query_t<Type>
-hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
+CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
 {
     hash_grid_query_t<Type> query;
 
@@ -257,6 +276,12 @@ hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
     hash_grid_query_set_cell(query);
 
     return query;
+}
+
+template <typename Type>
+CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius)
+{
+    return hash_grid_query(id, pos, radius, HASH_GRID_QUERY_ALL_GROUPS);
 }
 
 

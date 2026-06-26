@@ -513,6 +513,63 @@ def test_hashgrid_grouped_query(test, device):
     assert_np_equal(counts_missing.numpy(), np.zeros(len(points), dtype=np.int32))
 
 
+def test_hashgrid_grouped_query_rebuild_after_in_place_groups(test, device):
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    radius = 0.2
+
+    points_arr = wp.array(points, dtype=wp.vec3, device=device)
+    groups_arr = wp.array([0, 0, 1, 1], dtype=int, device=device)
+    counts = wp.zeros(len(points), dtype=int, device=device)
+
+    grid = wp.HashGrid(16, 16, 16, device)
+    grid.build(points_arr, radius, groups=groups_arr)
+
+    groups_arr.assign([0, 0, 5, 5])
+    grid.build(points_arr, radius, groups=groups_arr)
+
+    wp.launch(
+        kernel=count_neighbors_fixed_group,
+        dim=len(points),
+        inputs=[wp.uint64(grid.id), radius, 5, points_arr, counts],
+        device=device,
+    )
+
+    assert_np_equal(counts.numpy(), np.array([2, 2, 2, 2], dtype=np.int32))
+
+
+def test_hashgrid_device_validation(test, device):
+    points = wp.zeros(1, dtype=wp.vec3, device=device)
+    groups = wp.zeros(1, dtype=int, device=device)
+    grid = wp.HashGrid(16, 16, 16, device)
+    grid.build(points, 1.0, groups=groups)
+
+    other_device = None
+    if wp.get_device(device).is_cuda:
+        other_device = "cpu"
+    elif cuda_devices:
+        other_device = cuda_devices[0]
+
+    if other_device is None:
+        test.skipTest("requires both CPU and CUDA devices")
+
+    other_points = wp.zeros(1, dtype=wp.vec3, device=other_device)
+    other_groups = wp.zeros(1, dtype=int, device=other_device)
+
+    with test.assertRaisesRegex(RuntimeError, "points must live on the same device"):
+        grid.build(other_points, 1.0)
+
+    with test.assertRaisesRegex(RuntimeError, "groups must live on the same device"):
+        grid.build(points, 1.0, groups=other_groups)
+
+
 def test_hashgrid_query_func_annotations(test, device):
     """Pass live hash grid queries to helper functions that choose the nearest point within a query radius."""
     points = np.array(
@@ -592,6 +649,19 @@ def test_hashgrid_build_invalid_radius(test, device):
         grid.build(points, 0.0)
     with test.assertRaises(ValueError):
         grid.build(points, -1.0)
+
+
+def test_hashgrid_cell_count_overflow(test, device):
+    with test.assertRaisesRegex(RuntimeError, "cell count exceeds supported limit"):
+        wp.HashGrid(1291, 1291, 1291, device)
+
+    grid = wp.HashGrid(128, 128, 128, device)
+    points = wp.zeros(1025, dtype=wp.vec3, device=device)
+    groups = wp.array(np.arange(1025, dtype=np.int32), dtype=int, device=device)
+
+    with test.assertRaisesRegex(RuntimeError, "cell count exceeds supported limit"):
+        grid.build(points, 1.0, groups=groups)
+    test.assertFalse(grid.reserved)
 
 
 def test_hashgrid_dtype_validation(test, device):
@@ -799,12 +869,20 @@ add_function_test(TestHashGrid, "test_hashgrid_multiple_streams", test_hashgrid_
 add_function_test(TestHashGrid, "test_hashgrid_multiprecision", test_hashgrid_multiprecision, devices=devices)
 add_function_test(TestHashGrid, "test_hashgrid_grouped_query", test_hashgrid_grouped_query, devices=devices)
 add_function_test(
+    TestHashGrid,
+    "test_hashgrid_grouped_query_rebuild_after_in_place_groups",
+    test_hashgrid_grouped_query_rebuild_after_in_place_groups,
+    devices=devices,
+)
+add_function_test(TestHashGrid, "test_hashgrid_device_validation", test_hashgrid_device_validation, devices=devices)
+add_function_test(
     TestHashGrid, "test_hashgrid_query_func_annotations", test_hashgrid_query_func_annotations, devices=devices
 )
 add_function_test(TestHashGrid, "test_hashgrid_invalid_dtype", test_hashgrid_invalid_dtype, devices=devices)
 add_function_test(
     TestHashGrid, "test_hashgrid_build_invalid_radius", test_hashgrid_build_invalid_radius, devices=devices
 )
+add_function_test(TestHashGrid, "test_hashgrid_cell_count_overflow", test_hashgrid_cell_count_overflow, devices=devices)
 add_function_test(TestHashGrid, "test_hashgrid_dtype_validation", test_hashgrid_dtype_validation, devices=devices)
 add_function_test(TestHashGrid, "test_hashgrid_edge_cases", test_hashgrid_edge_cases, devices=devices)
 add_function_test(TestHashGrid, "test_hashgrid_negative_wrapping", test_hashgrid_negative_wrapping, devices=devices)

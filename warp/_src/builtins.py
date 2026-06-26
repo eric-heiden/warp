@@ -8203,19 +8203,29 @@ add_builtin(
 def _add_hash_grid_query_builtins(vec_type, scalar_type, query_type, precision_doc=""):
     """Register hash_grid_query and hash_grid_query_next builtins for a given precision."""
     doc_suffix = f" ({precision_doc} precision)" if precision_doc else ""
+    query_doc = f"""Construct a point query against a :class:`warp.HashGrid`{doc_suffix}.
+
+    This query can be used to iterate over all neighboring points within a fixed radius from the query point.
+    If the hash grid was built with groups, passing a group id restricts traversal to that group only, so points from
+    other groups are not returned as candidates. Omitting the group visits all groups, matching ungrouped behavior.
+    Unlike grouped BVH queries, grouped hash-grid queries do not require a root lookup; pass the group id directly."""
+
+    add_builtin(
+        "hash_grid_query",
+        input_types={"id": uint64, "point": vec_type, "max_dist": scalar_type},
+        value_type=query_type,
+        group="Geometry",
+        doc=query_doc,
+        export=False,
+        is_differentiable=False,
+    )
 
     add_builtin(
         "hash_grid_query",
         input_types={"id": uint64, "point": vec_type, "max_dist": scalar_type, "group": int},
         value_type=query_type,
-        defaults={"group": -2147483648},
         group="Geometry",
-        doc=f"""Construct a point query against a :class:`warp.HashGrid`{doc_suffix}.
-
-    This query can be used to iterate over all neighboring points within a fixed radius from the query point.
-    If the hash grid was built with groups, passing a group id restricts traversal to that group only, so points from
-    other groups are not returned as candidates. Omitting the group visits all groups, matching ungrouped behavior.
-    Unlike grouped BVH queries, grouped hash-grid queries do not require a root lookup; pass the group id directly.""",
+        doc=query_doc,
         export=False,
         is_differentiable=False,
     )

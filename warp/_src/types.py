@@ -9,6 +9,7 @@ import enum
 import functools
 import inspect
 import math
+import operator
 import struct
 import sys
 import types
@@ -7045,6 +7046,7 @@ class HashGrid:
     _TYPE_FLOAT16 = 0
     _TYPE_FLOAT32 = 1
     _TYPE_FLOAT64 = 2
+    _MAX_CELL_COUNT = (1 << 31) - 1
 
     _dtype_map: ClassVar = {
         float16: (vec3h, _TYPE_FLOAT16),
@@ -7056,6 +7058,23 @@ class HashGrid:
         """Get the appropriate native function for the given action."""
         location = "host" if self.device.is_cpu else "device"
         return getattr(self.runtime.core, f"wp_hash_grid_{action}_{location}")
+
+    @classmethod
+    def _validate_cell_count(cls, dim_x, dim_y, dim_z, group_count=1):
+        effective_group_count = max(group_count, 1)
+        base_count = dim_x * dim_y * dim_z
+        total_count = base_count * effective_group_count
+
+        if dim_x <= 0 or dim_y <= 0 or dim_z <= 0:
+            raise RuntimeError("Hash grid dimensions must be positive")
+        if total_count > cls._MAX_CELL_COUNT:
+            raise RuntimeError(
+                "Hash grid cell count exceeds supported limit: "
+                f"{dim_x} * {dim_y} * {dim_z} * {effective_group_count} = {total_count} "
+                f"> {cls._MAX_CELL_COUNT}"
+            )
+
+        return total_count
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -7094,17 +7113,29 @@ class HashGrid:
 
         self.runtime = warp._src.context.runtime
         self.device = self.runtime.get_device(device)
+        try:
+            self._dim_x = operator.index(dim_x)
+            self._dim_y = operator.index(dim_y)
+            self._dim_z = operator.index(dim_z)
+        except TypeError as e:
+            raise TypeError("HashGrid dimensions must be integers") from e
+
+        self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z)
 
         if self.device.is_cpu:
-            self.id = self._native_func("create")(self._type_id, dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(self._type_id, self._dim_x, self._dim_y, self._dim_z)
         else:
-            self.id = self._native_func("create")(self.device.context, self._type_id, dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(
+                self.device.context, self._type_id, self._dim_x, self._dim_y, self._dim_z
+            )
+        if not self.id:
+            raise RuntimeError("Failed to create HashGrid")
 
         # indicates whether the grid data has been reserved for use by a kernel
         self.reserved = False
         self.groups = None
         self._group_ids = None
-        self._group_key = None
+        self._group_capture_key = None
 
     def build(self, points, radius, groups=None):
         """Update the hash grid data structure.
@@ -7132,14 +7163,16 @@ class HashGrid:
 
         if points.ndim > 1:
             points = points.contiguous().flatten()
+        if points.device != self.device:
+            raise RuntimeError("points must live on the same device as this HashGrid")
 
         groups_arg = None
         group_ids_arg = None
         if groups is not None:
             if groups.dtype != int32:
                 raise RuntimeError("groups should be an array of type wp.int32")
-            if groups.device != points.device:
-                raise RuntimeError("groups must live on the same device as points")
+            if groups.device != self.device:
+                raise RuntimeError("groups must live on the same device as this HashGrid")
             if groups.ndim > 1:
                 groups = groups.contiguous().flatten()
             elif not groups.is_contiguous:
@@ -7147,11 +7180,17 @@ class HashGrid:
             if len(groups) != len(points):
                 raise RuntimeError("groups must have the same length as points")
 
-            group_key = (groups.ptr, groups.shape, groups.device)
-            if self._group_key != group_key:
+            group_capture_key = (groups.ptr, groups.shape, groups.device)
+            if self.device.is_capturing:
+                if self._group_capture_key != group_capture_key or self._group_ids is None:
+                    raise RuntimeError("HashGrid group ids must be initialized before graph capture")
+                self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z, len(self._group_ids))
+            else:
+                # Group values can change in-place while the array pointer and shape stay fixed.
                 group_ids_np = np.unique(groups.numpy()).astype(np.int32)
+                self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z, len(group_ids_np))
                 self._group_ids = warp.array(group_ids_np, dtype=int32, device=self.device)
-                self._group_key = group_key
+                self._group_capture_key = group_capture_key
 
             self.groups = groups
             groups_arg = ctypes.byref(groups.__ctype__())
@@ -7159,7 +7198,7 @@ class HashGrid:
         else:
             self.groups = None
             self._group_ids = None
-            self._group_key = None
+            self._group_capture_key = None
 
         self._native_func("update")(
             self.id, self._type_id, radius, ctypes.byref(points.__ctype__()), groups_arg, group_ids_arg
