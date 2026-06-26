@@ -215,6 +215,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_options import TestOptions
     from warp.tests.test_overwrite import TestOverwrite
     from warp.tests.test_print import TestPrint
+    from warp.tests.test_program_smoothing import TestProgramSmoothing
     from warp.tests.test_quat import TestQuat
     from warp.tests.test_rand import TestRand
     from warp.tests.test_ref import TestRef
@@ -381,6 +382,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestPeer,
         TestPinned,
         TestPrint,
+        TestProgramSmoothing,
         TestQuat,
         TestRand,
         TestRef,
