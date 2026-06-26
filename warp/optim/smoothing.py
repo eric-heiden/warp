@@ -17,3 +17,4 @@ from warp._src.optim.smoothing import GradientEstimate as GradientEstimate
 from warp._src.optim.smoothing import estimate_finite_difference as estimate_finite_difference
 from warp._src.optim.smoothing import estimate_pathwise as estimate_pathwise
 from warp._src.optim.smoothing import estimate_score_function as estimate_score_function
+from warp._src.optim.smoothing import estimate_score_function_batched as estimate_score_function_batched

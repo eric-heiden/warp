@@ -73,6 +73,37 @@ def estimate_score_function(
     return _estimate_score_function(loss_fn, params, sigma=sigma, samples=samples, seed=seed, antithetic=antithetic)
 
 
+def estimate_score_function_batched(
+    loss_fn: Callable[[Sequence[wp.array]], Any],
+    params: Sequence[wp.array],
+    *,
+    sigma: float | Sequence[float],
+    samples: int = 64,
+    seed: int | None = None,
+    antithetic: bool = True,
+) -> GradientEstimate:
+    """Estimate a score-function gradient from one batched loss evaluation.
+
+    The callable receives parameter arrays with a leading sample dimension and
+    must return one scalar loss per sample. For example, if a parameter has
+    shape ``(d,)``, the batched callable receives an array of shape
+    ``(samples, d)`` and returns a Warp array of shape ``(samples,)``.
+
+    This has the same estimator as :func:`estimate_score_function`, but it lets
+    Warp kernels parallelize the perturbed executions across CPU threads or CUDA
+    threads instead of looping over samples in Python.
+    """
+
+    return _estimate_score_function_batched(
+        loss_fn,
+        params,
+        sigma=sigma,
+        samples=samples,
+        seed=seed,
+        antithetic=antithetic,
+    )
+
+
 def estimate_pathwise(
     loss_fn: Callable[[Sequence[wp.array]], Any],
     params: Sequence[wp.array],
@@ -187,6 +218,51 @@ def _estimate_score_function(
     elapsed_time = time.perf_counter() - start
     return GradientEstimate(
         method="score_function",
+        value=baseline,
+        gradients=gradients,
+        gradient_variance=variances,
+        samples=samples,
+        sigma=sigmas,
+        elapsed_time=elapsed_time,
+        values=values,
+    )
+
+
+def _estimate_score_function_batched(
+    loss_fn: Callable[[Sequence[wp.array]], Any],
+    params: Sequence[wp.array],
+    *,
+    sigma: float | Sequence[float],
+    samples: int,
+    seed: int | None,
+    antithetic: bool,
+) -> GradientEstimate:
+    params = _validate_params(params)
+    sigmas = _normalize_sigma(sigma, params)
+    base_values = _params_to_numpy(params)
+    noises = _make_noises(samples, base_values, seed=seed, antithetic=antithetic)
+
+    start = time.perf_counter()
+    sampled_params = _make_batched_sample_params(params, base_values, sigmas, noises)
+    values = _losses_to_numpy(loss_fn(sampled_params), samples)
+
+    baseline = float(np.mean(values))
+    gradients = []
+    variances = []
+    for param_index, param in enumerate(params):
+        sigma_i = sigmas[param_index]
+        if sigma_i == 0.0:
+            grad_samples = np.zeros((samples, *base_values[param_index].shape), dtype=np.float64)
+        else:
+            scale = ((values - baseline) / sigma_i).reshape((samples,) + (1,) * base_values[param_index].ndim)
+            grad_samples = scale * noises[param_index]
+
+        gradients.append(_array_like(param, np.mean(grad_samples, axis=0)))
+        variances.append(_array_like(param, _sample_variance(grad_samples)))
+
+    elapsed_time = time.perf_counter() - start
+    return GradientEstimate(
+        method="score_function_batched",
         value=baseline,
         gradients=gradients,
         gradient_variance=variances,
@@ -395,6 +471,19 @@ def _make_sample_params(
     return sampled_params
 
 
+def _make_batched_sample_params(
+    template_params: Sequence[wp.array],
+    base_values: Sequence[np.ndarray],
+    sigmas: Sequence[float],
+    noises: Sequence[np.ndarray],
+) -> list[wp.array]:
+    sampled_params = []
+    for param, base_value, sigma, noise in zip(template_params, base_values, sigmas, noises, strict=True):
+        samples = base_value.reshape((1, *base_value.shape)) + sigma * noise
+        sampled_params.append(wp.array(samples, dtype=param.dtype, device=param.device, requires_grad=False))
+    return sampled_params
+
+
 def _loss_to_float(loss: Any) -> float:
     if isinstance(loss, wp.array):
         values = loss.numpy().reshape(-1)
@@ -403,6 +492,18 @@ def _loss_to_float(loss: Any) -> float:
         return float(values[0])
 
     return float(loss)
+
+
+def _losses_to_numpy(losses: Any, samples: int) -> np.ndarray:
+    if isinstance(losses, wp.array):
+        values = losses.numpy().reshape(-1).astype(np.float64, copy=False)
+    else:
+        values = np.asarray(losses, dtype=np.float64).reshape(-1)
+
+    if values.size != samples:
+        raise ValueError("batched loss_fn must return one scalar loss per sample")
+
+    return values
 
 
 def _array_like(param: wp.array, values: np.ndarray) -> wp.array:

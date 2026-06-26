@@ -5,7 +5,7 @@
 ### Added
 
 - Add `warp.optim.smoothing` helpers for Gaussian-smoothed program-gradient estimation with score-function,
-  pathwise-AD, and finite-difference estimators.
+  batched score-function, pathwise-AD, and finite-difference estimators.
 - Add `@wp.kernel(grid_stride=False)` (and the `"default_grid_stride"` module option / `wp.config.default_grid_stride`
   for a whole module or process) to compile a kernel without the grid-stride loop. Removing the loop lowers per-thread
   overhead and register pressure, which can speed up launch-bound kernels; it still handles launches of any size, but

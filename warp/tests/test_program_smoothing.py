@@ -20,6 +20,15 @@ def step_loss_kernel(x: wp.array(dtype=float), loss: wp.array(dtype=float)):
 
 
 @wp.kernel
+def step_loss_batched_kernel(x: wp.array2d(dtype=float), loss: wp.array(dtype=float)):
+    sample = wp.tid()
+    if x[sample, 0] >= 0.0:
+        loss[sample] = 1.0
+    else:
+        loss[sample] = 0.0
+
+
+@wp.kernel
 def quadratic_loss_kernel(x: wp.array(dtype=float), loss: wp.array(dtype=float)):
     loss[0] = x[0] * x[0] + 0.5 * x[1] * x[1]
 
@@ -28,6 +37,16 @@ def make_step_loss(device):
     def loss_fn(params):
         loss = wp.zeros(1, dtype=float, requires_grad=True, device=device)
         wp.launch(step_loss_kernel, dim=1, inputs=[params[0], loss], device=device)
+        return loss
+
+    return loss_fn
+
+
+def make_step_loss_batched(device):
+    def loss_fn(params):
+        samples = params[0].shape[0]
+        loss = wp.zeros(samples, dtype=float, device=device)
+        wp.launch(step_loss_batched_kernel, dim=samples, inputs=[params[0], loss], device=device)
         return loss
 
     return loss_fn
@@ -57,6 +76,27 @@ def test_score_function_estimator_detects_branch_gradient(test, device):
     expected = 1.0 / (0.25 * math.sqrt(2.0 * math.pi))
 
     test.assertEqual(result.method, "score_function")
+    test.assertEqual(result.samples, 20000)
+    test.assertAlmostEqual(result.value, 0.5, delta=0.02)
+    test.assertAlmostEqual(float(result.gradients[0].numpy()[0]), expected, delta=0.08)
+    test.assertGreater(float(result.gradient_variance[0].numpy()[0]), 0.0)
+
+
+def test_batched_score_function_estimator_detects_branch_gradient(test, device):
+    x = wp.array([0.0], dtype=float, requires_grad=True, device=device)
+
+    result = warp.optim.smoothing.estimate_score_function_batched(
+        make_step_loss_batched(device),
+        [x],
+        sigma=0.25,
+        samples=20000,
+        seed=7,
+        antithetic=True,
+    )
+
+    expected = 1.0 / (0.25 * math.sqrt(2.0 * math.pi))
+
+    test.assertEqual(result.method, "score_function_batched")
     test.assertEqual(result.samples, 20000)
     test.assertAlmostEqual(result.value, 0.5, delta=0.02)
     test.assertAlmostEqual(float(result.gradients[0].numpy()[0]), expected, delta=0.08)
@@ -107,6 +147,12 @@ add_function_test(
     TestProgramSmoothing,
     "test_score_function_estimator_detects_branch_gradient",
     test_score_function_estimator_detects_branch_gradient,
+    devices=devices,
+)
+add_function_test(
+    TestProgramSmoothing,
+    "test_batched_score_function_estimator_detects_branch_gradient",
+    test_batched_score_function_estimator_detects_branch_gradient,
     devices=devices,
 )
 add_function_test(
