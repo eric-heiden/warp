@@ -65,9 +65,13 @@ compute_cell_offsets_checked(int* cell_starts, int* cell_ends, const int* point_
 
     if (tid < num_points) {
         const int c = point_cells[tid];
-        // Grouped builds may carry negative sentinel cells from stale native group ids.
-        // Those entries sort before valid cells and should not open or close any range.
+        // Stale native group ids produce invalid sentinel cells that must not index the range buffers.
+        // CUB can sort those sentinels last, so the first one must close the preceding valid range.
         if (c < 0 || c >= num_cells) {
+            const int p = tid > 0 ? point_cells[tid - 1] : -1;
+            if (p >= 0 && p < num_cells) {
+                cell_ends[p] = tid;
+            }
             return;
         }
 
