@@ -515,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
             "native/texture.cpp",
             "native/mathdx.cpp",
             "native/coloring.cpp",
-            "native/fastcall.cpp",
+            "native/deterministic.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 
@@ -526,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             cuda_sources = [
                 "native/bvh.cu",
+                "native/deterministic.cu",
                 "native/bvh_cubql.cu",
                 "native/mesh.cu",
                 "native/sort.cu",

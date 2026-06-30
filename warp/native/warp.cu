@@ -151,6 +151,8 @@ struct DeviceInfo {
     int pageable_memory_access = 0;
     int direct_managed_mem_access_from_host = 0;
     int host_native_atomic_supported = 0;
+    int managed_memory = 0;
+    int concurrent_managed_access = 0;
     int is_mempool_supported = 0;
     int sm_count = 0;
     int is_ipc_supported = -1;
@@ -177,6 +179,7 @@ struct FreeInfo {
 
 struct CaptureInfo {
     CUstream stream = NULL;  // the main stream where capture begins and ends
+    CUcontext context = NULL;  // context where capture was started
     uint64_t id = 0;  // unique capture id from CUDA
     bool external = false;  // whether this is an external capture
     cudaStreamCaptureMode mode = cudaStreamCaptureModeThreadLocal;  // mode used to open the capture (for pause/resume)
@@ -301,6 +304,12 @@ int cuda_init()
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].host_native_atomic_supported, CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED, device
                 ));
+                check_cu(
+                    cuDeviceGetAttribute_f(&g_devices[i].managed_memory, CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY, device)
+                );
+                check_cu(cuDeviceGetAttribute_f(
+                    &g_devices[i].concurrent_managed_access, CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, device
+                ));
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].is_mempool_supported, CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device
                 ));
@@ -423,6 +432,20 @@ static inline CaptureInfo* get_capture_info(CUstream stream)
             return capture_iter->second;
     }
     return NULL;
+}
+
+static inline bool is_context_capturing(CUcontext context)
+{
+    if (g_captures.empty())
+        return false;
+
+    for (const auto& capture_iter : g_captures) {
+        CaptureInfo* capture = capture_iter.second;
+        if (capture && capture->context == context)
+            return true;
+    }
+
+    return false;
 }
 
 // helper function to copy a value to device memory in a graph-friendly way
@@ -843,6 +866,29 @@ void* wp_alloc_device_async(void* context, size_t s, const char* tag)
     return ptr;
 }
 
+void* wp_alloc_device_managed(void* context, size_t s, const char* tag)
+{
+    ContextGuard guard(context);
+
+    ContextInfo* context_info = get_context_info(context);
+    if (!context_info || !context_info->device_info)
+        return NULL;
+
+    DeviceInfo* device_info = context_info->device_info;
+    if (!device_info->managed_memory)
+        return NULL;
+
+    void* ptr = NULL;
+
+    if (!check_cuda(cudaMallocManaged(&ptr, s, cudaMemAttachGlobal)))
+        return NULL;
+
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_DEVICE, wp_cuda_context_get_device_ordinal(context), tag);
+
+    return ptr;
+}
+
 void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
 {
     if (g_alloc_tracker.enabled && ptr)
@@ -1071,18 +1117,11 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
     // make recording unconditional at capture time. For now we still execute
     // the CUDA op live under stream capture, but the record itself is API-
     // intent only and doesn't depend on the live call's result.
-    APICState* apic_state = wp_apic_get_recording_state();
-    if (apic_state) {
-        int32_t dst_region, src_region;
-        uint64_t dst_offset, src_offset;
-        bool dst_ok = apic_resolve_ptr(apic_state, (uint64_t)dest, &dst_region, &dst_offset);
-        bool src_ok = apic_resolve_ptr(apic_state, (uint64_t)src, &src_region, &src_offset);
-        if (!dst_ok)
-            fprintf(stderr, "APIC: Error - memcpy dst pointer not in any registered region\n");
-        if (!src_ok)
-            fprintf(stderr, "APIC: Error - memcpy src pointer not in any registered region\n");
-        if (dst_ok && src_ok)
-            apic_record_memcpy_d2d(apic_state, dst_region, dst_offset, src_region, src_offset, n);
+    APICState* apic_state = wp_apic_get_cuda_recording_state();
+    if (apic_state && n > 0) {
+        APICAddress dst_addr = apic_resolve_live_ptr(apic_state, (uint64_t)dest, n);
+        APICAddress src_addr = apic_resolve_live_ptr(apic_state, (uint64_t)src, n);
+        apic_record_memcpy_d2d(apic_state, dst_addr.region_id, dst_addr.offset, src_addr.region_id, src_addr.offset, n);
     }
 
     return result;
@@ -1255,14 +1294,10 @@ bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stre
     // make recording unconditional at capture time. For now we still execute
     // the CUDA op live under stream capture, but the record itself is API-
     // intent only and doesn't depend on the live call's result.
-    APICState* apic_state = wp_apic_get_recording_state();
-    if (apic_state) {
-        int32_t region_id;
-        uint64_t offset;
-        if (apic_resolve_ptr(apic_state, (uint64_t)dest, &region_id, &offset))
-            apic_record_memset(apic_state, region_id, offset, n, value);
-        else
-            fprintf(stderr, "APIC: Error - memset dst pointer not in any registered region\n");
+    APICState* apic_state = wp_apic_get_cuda_recording_state();
+    if (apic_state && n > 0) {
+        APICAddress addr = apic_resolve_live_ptr(apic_state, (uint64_t)dest, n);
+        apic_record_memset(apic_state, addr.region_id, addr.offset, n, value);
     }
     return result;
 }
@@ -2489,6 +2524,59 @@ int wp_cuda_device_get_host_native_atomic_supported(int ordinal)
     return 0;
 }
 
+int wp_cuda_device_get_managed_memory_supported(int ordinal)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].managed_memory;
+    return 0;
+}
+
+int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].concurrent_managed_access;
+    return 0;
+}
+
+int wp_cuda_pointer_get_memory_kind(void* context, void* ptr)
+{
+    if (!ptr)
+        return WP_MEMORY_KIND_UNKNOWN;
+
+    ContextGuard guard(context);
+
+    unsigned int is_managed = 0;
+    CUresult managed_result
+        = cuPointerGetAttribute_f(&is_managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, reinterpret_cast<CUdeviceptr>(ptr));
+    if (managed_result != CUDA_SUCCESS)
+        return WP_MEMORY_KIND_UNKNOWN;
+    if (is_managed)
+        return WP_MEMORY_KIND_CUDA_MANAGED;
+
+    unsigned int memory_type = 0;
+    CUresult memory_type_result
+        = cuPointerGetAttribute_f(&memory_type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, reinterpret_cast<CUdeviceptr>(ptr));
+    if (memory_type_result != CUDA_SUCCESS)
+        return WP_MEMORY_KIND_UNKNOWN;
+
+    if (memory_type == CU_MEMORYTYPE_HOST)
+        return WP_MEMORY_KIND_PINNED;
+
+    if (memory_type != CU_MEMORYTYPE_DEVICE)
+        return WP_MEMORY_KIND_UNKNOWN;
+
+    CUmemoryPool mempool = NULL;
+    CUresult mempool_result
+        = cuPointerGetAttribute_f(&mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, reinterpret_cast<CUdeviceptr>(ptr));
+    if (mempool_result != CUDA_SUCCESS)
+        return WP_MEMORY_KIND_CUDA_DEVICE;
+
+    if (mempool)
+        return WP_MEMORY_KIND_CUDA_MEMPOOL;
+
+    return WP_MEMORY_KIND_CUDA_DEVICE;
+}
+
 int wp_cuda_device_is_mempool_supported(int ordinal)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
@@ -2748,13 +2836,19 @@ uint64_t wp_cuda_context_check(void* context)
     cudaError_t e = cudaGetLastError();
     check_cuda(e);
 
-    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
-    check_cuda(cudaStreamIsCapturing(get_current_stream(), &status));
+    CUcontext current_context = get_current_context();
 
-    // synchronize if the stream is not capturing
-    if (status == cudaStreamCaptureStatusNone) {
-        check_cuda(cudaDeviceSynchronize());
-        e = cudaGetLastError();
+    // Device-wide synchronization is illegal while a Warp-known stream capture
+    // is active in this context, even if the current stream itself is not capturing.
+    if (!is_context_capturing(current_context)) {
+        cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+        check_cuda(cudaStreamIsCapturing(get_current_stream(), &status));
+
+        // synchronize if the stream is not capturing
+        if (status == cudaStreamCaptureStatusNone) {
+            check_cuda(cudaDeviceSynchronize());
+            e = cudaGetLastError();
+        }
     }
 
     return static_cast<uint64_t>(e);
@@ -3180,6 +3274,20 @@ int wp_cuda_stream_is_capturing(void* stream)
     return int(status != cudaStreamCaptureStatusNone);
 }
 
+int wp_cuda_thread_exchange_capture_mode(int mode)
+{
+    // Swap this thread's stream capture mode and return the previous mode.
+    // Passing cudaStreamCaptureModeRelaxed allows otherwise-forbidden
+    // operations (e.g. legacy allocations on non-capturing streams) while a
+    // thread-local capture is active on another stream. Callers must restore
+    // the returned mode afterwards.
+    cudaStreamCaptureMode capture_mode = static_cast<cudaStreamCaptureMode>(mode);
+    if (!check_cuda(cudaThreadExchangeStreamCaptureMode(&capture_mode)))
+        return -1;
+
+    return int(capture_mode);
+}
+
 uint64_t wp_cuda_stream_get_capture_id(void* stream) { return get_capture_id(static_cast<CUstream>(stream)); }
 
 int wp_cuda_stream_get_priority(void* stream)
@@ -3284,6 +3392,7 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
 
     CaptureInfo* capture = new CaptureInfo();
     capture->stream = cuda_stream;
+    capture->context = context ? static_cast<CUcontext>(context) : get_current_context();
     capture->id = capture_id;
     capture->external = bool(external);
     capture->mode = capture_mode;
@@ -5283,6 +5392,7 @@ size_t wp_cuda_launch_kernel(
     size_t dim,
     int max_blocks,
     int block_dim,
+    int grid_stride,
     int cluster_dim,
     int shared_memory_bytes,
     void** args,
@@ -5309,68 +5419,97 @@ size_t wp_cuda_launch_kernel(
         }
     }
 
-    // CUDA specs up to compute capability 9.0 says the max x-dim grid is 2**31-1, so
-    // grid_dim is fine as an int for the near future
-    int natural_grid_dim = (dim + block_dim - 1) / block_dim;
-    int grid_dim = natural_grid_dim;
+    unsigned int grid_x, grid_y = 1, grid_z = 1;
 
-    if (max_blocks <= 0) {
-        max_blocks = 2147483647;
-    }
-
-    if (grid_dim < 0) {
-#if defined(_DEBUG)
-        fprintf(
-            stderr,
-            "Warp warning: Overflow in grid dimensions detected for %zu total elements and 256 threads "
-            "per block.\n    Setting block count to %d.\n",
-            dim, max_blocks
-        );
-#endif
-        grid_dim = max_blocks;
+    if (grid_stride) {
+        // Grid-stride loop kernel: a 1D grid suffices because the loop covers every work item.
+        // max_blocks (when set) caps the block count; otherwise use the CUDA gridDim.x max (2**31-1).
+        // A clustered kernel needs gridDim.x to be a multiple of cluster_dim: an untruncated grid must
+        // already be aligned (pad dim), while a grid truncated by max_blocks rounds down to a whole
+        // number of clusters (the loop still covers every work item).
+        int natural_grid_dim = (dim + block_dim - 1) / block_dim;
+        int grid_dim = natural_grid_dim;
+        int cap = (max_blocks > 0) ? max_blocks : 2147483647;
+        if (grid_dim < 0)
+            grid_dim = cap;
+        else if (grid_dim > cap)
+            grid_dim = cap;
+        if (cluster_dim > 1 && grid_dim > 0) {
+            if (grid_dim == natural_grid_dim) {
+                if (grid_dim % cluster_dim != 0) {
+                    wp::set_error_string(
+                        "Warp CUDA error: clustered kernel launch requires the block count to be a multiple of "
+                        "cluster_dim (got %d blocks, cluster_dim=%d); pad dim to a whole number of clusters",
+                        grid_dim, cluster_dim
+                    );
+                    return CUDA_ERROR_INVALID_VALUE;
+                }
+            } else {
+                grid_dim = (grid_dim / cluster_dim) * cluster_dim;
+                if (grid_dim == 0) {
+                    wp::set_error_string(
+                        "Warp CUDA error: clustered kernel launch requires max_blocks to be 0 or at least cluster_dim "
+                        "(got max_blocks=%d, cluster_dim=%d)",
+                        max_blocks, cluster_dim
+                    );
+                    return CUDA_ERROR_INVALID_VALUE;
+                }
+            }
+        }
+        grid_x = (unsigned int)(grid_dim <= 0 ? 1 : grid_dim);
     } else {
-        if (grid_dim > max_blocks) {
-            grid_dim = max_blocks;
+        // Lean 3D kernel (no loop): spread blocks across a 3D grid so the launch can exceed the
+        // gridDim.x limit. Cap grid.x so gridDim.x*blockDim.x stays within uint32 (matching the
+        // lean kernel template's index math on the IMAD.WIDE.U32 fast path), then spill the
+        // remaining blocks into grid.y and grid.z (each capped at 65535).
+        //
+        // Clusters group cluster_dim blocks along x, but a lean block early-returns (before any
+        // cluster barrier) when _idx >= dim.size. To keep every cluster all-run or all-return, require
+        // the block count to be a whole number of clusters (pad dim) and keep grid.x a multiple of
+        // cluster_dim, so the run/early-return boundary lands on a cluster boundary.
+        size_t total_blocks = (dim + block_dim - 1) / block_dim;
+        if (cluster_dim > 1 && (total_blocks % (size_t)cluster_dim) != 0) {
+            wp::set_error_string(
+                "Warp CUDA error: clustered kernel launch requires the block count to be a multiple of "
+                "cluster_dim (got %zu blocks, cluster_dim=%d); pad dim to a whole number of clusters",
+                total_blocks, cluster_dim
+            );
+            return CUDA_ERROR_INVALID_VALUE;
         }
-    }
-
-    if (cluster_dim > 1 && grid_dim > 0) {
-        // CUDA requires the launch grid to be a multiple of cluster_dim when the
-        // kernel was compiled with __cluster_dims__. We never pad upward: padded
-        // CTAs would skip the kernel body (guarded by _idx < dim) yet still join
-        // their cluster, breaking distributed shared memory / cluster barriers
-        // that require every peer to run. The launch path rejects non-aligned
-        // shapes before reaching here; this is the backstop for any other caller.
-        if (grid_dim == natural_grid_dim) {
-            // Untruncated launch shape: must already be cluster-aligned.
-            if (grid_dim % cluster_dim != 0) {
-                wp::set_error_string(
-                    "Warp CUDA error: clustered kernel launch requires the block count to be a multiple of "
-                    "cluster_dim (got %d blocks, cluster_dim=%d); pad dim to a whole number of clusters",
-                    grid_dim, cluster_dim
-                );
-                return CUDA_ERROR_INVALID_VALUE;
-            }
-        } else {
-            // Truncated by max_blocks (grid-stride loop): every launched CTA runs
-            // the body, so rounding down to a valid multiple stays safe.
-            grid_dim = (grid_dim / cluster_dim) * cluster_dim;
-            if (grid_dim == 0) {
-                wp::set_error_string(
-                    "Warp CUDA error: clustered kernel launch requires max_blocks to be 0 or at least cluster_dim "
-                    "(got max_blocks=%d, cluster_dim=%d)",
-                    max_blocks, cluster_dim
-                );
-                return CUDA_ERROR_INVALID_VALUE;
-            }
+        unsigned int max_grid_x = (1u << 24) / (unsigned int)block_dim;
+        if (cluster_dim > 1) {
+            max_grid_x = (max_grid_x / (unsigned int)cluster_dim) * (unsigned int)cluster_dim;
+            if (max_grid_x == 0)
+                max_grid_x = (unsigned int)cluster_dim;
         }
+        unsigned int gx = (unsigned int)(total_blocks < (size_t)max_grid_x ? total_blocks : (size_t)max_grid_x);
+        if (gx == 0)
+            gx = 1;
+        size_t remaining = (total_blocks + gx - 1) / gx;
+        unsigned int gy = (unsigned int)(remaining < 65535u ? remaining : 65535u);
+        if (gy == 0)
+            gy = 1;
+        unsigned int gz = (unsigned int)((remaining + gy - 1) / gy);
+        if (gz == 0)
+            gz = 1;
+        if (gz > 65535u)
+            gz = 65535u;
+        grid_x = gx;
+        grid_y = gy;
+        grid_z = gz;
     }
 
     begin_cuda_range(WP_TIMING_KERNEL, stream, context, get_cuda_kernel_name(kernel));
 
-    CUresult res = cuLaunchKernel_f(
-        (CUfunction)kernel, grid_dim, 1, 1, block_dim, 1, 1, shared_memory_bytes, static_cast<CUstream>(stream), args, 0
-    );
+    // Skip the launch for an empty grid (no work): the dummy gridDim.x=1 fallback is not a multiple
+    // of cluster_dim, so an empty clustered launch (e.g. a recorded lean launch resized via
+    // set_dim(0)) would otherwise be rejected by CUDA.
+    CUresult res = CUDA_SUCCESS;
+    if (dim > 0)
+        res = cuLaunchKernel_f(
+            (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
+            static_cast<CUstream>(stream), args, 0
+        );
 
     check_cu(res);
 
@@ -5378,7 +5517,7 @@ size_t wp_cuda_launch_kernel(
 
     // APIC recording: record kernel launch to byte stream if capturing
     if (apic_info) {
-        APICState* state = wp_apic_get_recording_state();
+        APICState* state = wp_apic_get_cuda_recording_state();
         if (state) {
             // Read shape and size from launch_bounds_t<N> in args[0].
             int ndim = apic_info->kernel_dim;
@@ -5403,9 +5542,9 @@ size_t wp_cuda_launch_kernel(
 
             apic_record_kernel_launch(
                 state, apic_info->kernel_key, apic_info->module_hash, apic_info->is_forward, shape, ndim, launch_size,
-                max_blocks, block_dim, cluster_dim, shared_memory_bytes, apic_info->params, apic_info->num_params,
-                apic_info->adj_params, apic_info->relocs, apic_info->num_relocs, apic_info->value_data,
-                apic_info->value_data_size
+                max_blocks, block_dim, grid_stride, cluster_dim, shared_memory_bytes, apic_info->params,
+                apic_info->num_params, apic_info->adj_params, apic_info->relocs, apic_info->num_relocs,
+                apic_info->value_data, apic_info->value_data_size
             );
         }
     }

@@ -106,6 +106,11 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.cuda.test_streams import TestStreams
     from warp.tests.cuda.test_texture import TestTexture
     from warp.tests.cuda.test_unified_memory import TestUnifiedMemory
+    from warp.tests.deterministic.test_deterministic_backward import TestDeterministicBackward
+    from warp.tests.deterministic.test_deterministic_counter import TestDeterministicCounter
+    from warp.tests.deterministic.test_deterministic_graph_capture import TestDeterministicGraph
+    from warp.tests.deterministic.test_deterministic_options import TestDeterministicOptions
+    from warp.tests.deterministic.test_deterministic_scatter import TestDeterministicScatter
     from warp.tests.fem.test_fem_examples import TestFemDiffusionExamples, TestFemExamples
     from warp.tests.fem.test_fem_field import TestFemField
     from warp.tests.fem.test_fem_fp64 import TestFemFp64
@@ -177,9 +182,9 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_fabricarray import TestFabricArray
     from warp.tests.test_factory_style_array_annotations import TestFactoryStyleArrayAnnotations
     from warp.tests.test_fast_math import TestFastMath
-    from warp.tests.test_fastcall import TestFastcall, TestFastcallAvailable
     from warp.tests.test_fp16 import TestFp16
     from warp.tests.test_func import TestFunc
+    from warp.tests.test_func_parameter_targets import TestFuncParameterTargets
     from warp.tests.test_future_annotations import TestFutureAnnotations
     from warp.tests.test_generics import TestGenerics
     from warp.tests.test_grad import TestGrad
@@ -261,6 +266,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.tile.test_tile_solve_no_mathdx import TestTileSolveNoMathDx
     from warp.tests.tile.test_tile_sort import TestTileSort
     from warp.tests.tile.test_tile_stack import TestTileStack
+    from warp.tests.tile.test_tile_struct import TestTileStruct
     from warp.tests.tile.test_tile_view import TestTileView
 
     test_classes = [
@@ -301,6 +307,11 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestCudaArchSuffix,
         TestCustomAllocator,
         TestDense,
+        TestDeterministicBackward,
+        TestDeterministicCounter,
+        TestDeterministicGraph,
+        TestDeterministicOptions,
+        TestDeterministicScatter,
         TestDevices,
         TestDiagnostics,
         TestDLPack,
@@ -310,8 +321,6 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestFactoryStyleArrayAnnotations,
         TestFabricArray,
         TestFastMath,
-        TestFastcall,
-        TestFastcallAvailable,
         TestFemDiffusionExamples,
         TestFemExamples,
         TestFemField,
@@ -324,6 +333,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestFemShape,
         TestFp16,
         TestFunc,
+        TestFuncParameterTargets,
         TestFutureAnnotations,
         TestGenerics,
         TestGrad,
@@ -414,6 +424,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTileSolveNoMathDx,
         TestTileSort,
         TestTileStack,
+        TestTileStruct,
         TestTileView,
         TestTorch,
         TestTorchAllocator,
@@ -478,6 +489,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_fast_math import TestFastMath
     from warp.tests.test_fp16 import TestFp16
     from warp.tests.test_func import TestFunc
+    from warp.tests.test_func_parameter_targets import TestFuncParameterTargets
     from warp.tests.test_generics import TestGenerics
     from warp.tests.test_grad import TestGrad
     from warp.tests.test_grad_customs import TestGradCustoms
@@ -515,6 +527,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestEnum,
         TestFastMath,
         TestFunc,
+        TestFuncParameterTargets,
         TestGenerics,
         TestMath,
         TestModuleHashing,

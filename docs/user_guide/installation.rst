@@ -73,11 +73,11 @@ the ``pip install`` command, e.g.
    * - Platform
      - Install Command
    * - Linux aarch64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.12.1/warp_lang-1.12.1+cu13-py3-none-manylinux_2_34_aarch64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.15.0/warp_lang-1.15.0+cu13-py3-none-manylinux_2_34_aarch64.whl``
    * - Linux x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.12.1/warp_lang-1.12.1+cu13-py3-none-manylinux_2_28_x86_64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.15.0/warp_lang-1.15.0+cu13-py3-none-manylinux_2_28_x86_64.whl``
    * - Windows x86-64
-     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.12.1/warp_lang-1.12.1+cu13-py3-none-win_amd64.whl``
+     - ``pip install https://github.com/NVIDIA/warp/releases/download/v1.15.0/warp_lang-1.15.0+cu13-py3-none-win_amd64.whl``
 
 The ``--force-reinstall`` option may need to be used to overwrite a previous installation.
 
@@ -152,7 +152,6 @@ For developers who want to build the library themselves the following tools are 
 
 * (Windows) Microsoft Visual Studio, minimum version 2019
 * (Linux) GCC, minimum version 9.4
-* (Linux) Python development headers, e.g. ``libpython3-dev`` (v3.10+)
 * `CUDA Toolkit <https://developer.nvidia.com/cuda-toolkit>`_, minimum version 12.0
 * `Git Large File Storage <https://git-lfs.com>`_
 
