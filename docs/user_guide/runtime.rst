@@ -2253,8 +2253,10 @@ If the group argument is omitted, the query visits all groups. Unlike grouped BV
 not use a group-root helper such as :func:`wp.bvh_get_group_root() <warp._src.lang.bvh_get_group_root>`; the group id is
 the query selector.
 
-Group ids may be arbitrary ``int32`` values and are consumed on-device during rebuilds, so grouped rebuilds stay
-asynchronous and group assignments may change between rebuilds, including inside replayed CUDA graphs.
+Group ids may be arbitrary ``int32`` values. Rebuilds read the ``groups`` array directly on the device and never copy
+group data back to the host, so grouped rebuilds are asynchronous like ungrouped ones, and group assignments may
+change between rebuilds, including inside replayed CUDA graphs. The grid does not keep any host-side record of the
+group ids in use, so no warm-up rebuild is needed after changing them.
 
 
 
