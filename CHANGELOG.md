@@ -60,6 +60,10 @@
   `wp.sparse.bsr_set_from_triplets()`, `wp.sparse.bsr_set_transpose()`, and reusable launches created with
   `wp.launch(..., record_cmd=True)`, so saved CPU graphs replay them from current inputs
   ([GH-1431](https://github.com/NVIDIA/warp/issues/1431)).
+- Add grouped construction and queries to `wp.HashGrid` for multi-environment workloads via the optional
+  `groups` argument to `wp.HashGrid.build()` and an optional trailing `group` argument to `wp.hash_grid_query()`
+  that restricts traversal to points sharing the requested group id
+  ([GH-1579](https://github.com/NVIDIA/warp/issues/1579)).
 
 ### Removed
 

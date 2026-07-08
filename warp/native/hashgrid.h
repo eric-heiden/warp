@@ -11,10 +11,10 @@ namespace wp {
 template <typename Type> struct HashGrid_t {
     int* point_cells = nullptr;  // cell id of a point
     int* point_ids = nullptr;  // index to original point
+    uint64_t* point_keys = nullptr;  // sorted (cell, group) keys, allocated only for grouped builds
 
     int* cell_starts = nullptr;  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
     int* cell_ends = nullptr;  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
-    int* group_ids = nullptr;  // sorted unique group identifiers for grouped queries
 
     int dim_x = 0;
     int dim_y = 0;
@@ -22,8 +22,8 @@ template <typename Type> struct HashGrid_t {
 
     int num_points = 0;
     int max_points = 0;
-    int num_groups = 0;
-    int max_cells = 0;
+    int max_keys = 0;  // capacity of point_keys
+    int has_groups = 0;  // whether the most recent build was grouped
 
     void* context = nullptr;
 
@@ -37,63 +37,35 @@ using HashGrid = HashGrid_t<float>;
 using HashGridH = HashGrid_t<half>;
 using HashGridD = HashGrid_t<double>;
 
-static constexpr int HASH_GRID_QUERY_ALL_GROUPS = -2147483647 - 1;
-static constexpr long long HASH_GRID_MAX_CELL_COUNT = 2147483647LL;
-
-CUDA_CALLABLE inline long long hash_grid_checked_cell_product(long long a, long long b)
-{
-    if (a <= 0LL || b <= 0LL || a > HASH_GRID_MAX_CELL_COUNT / b)
-        return -1LL;
-
-    return a * b;
-}
-
 template <typename Type> CUDA_CALLABLE inline int hash_grid_num_cells(const HashGrid_t<Type>& grid)
 {
-    long long total = hash_grid_checked_cell_product((long long)grid.dim_x, (long long)grid.dim_y);
-    total = hash_grid_checked_cell_product(total, (long long)grid.dim_z);
-    return (int)total;
+    // dimensions are validated against overflow at grid creation (HashGrid._validate_cell_count)
+    return grid.dim_x * grid.dim_y * grid.dim_z;
 }
 
 template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const HashGrid_t<Type>& grid)
 {
-    return grid.group_ids != nullptr && grid.num_groups > 0;
+    return grid.point_keys != nullptr && grid.has_groups != 0;
 }
 
-template <typename Type> CUDA_CALLABLE inline int hash_grid_cell_count(const HashGrid_t<Type>& grid)
+// Composite sort key ordering grouped points cell-major with each cell's points sorted by
+// the unsigned bit pattern of their group id, so every int32 group id is a valid group.
+CUDA_CALLABLE inline uint64_t hash_grid_point_key(int cell, int group)
 {
-    // Grouped grids allocate one cell range per unique group, so reject overflow before each multiply.
-    const int base = hash_grid_num_cells(grid);
-    if (base < 0)
-        return -1;
-
-    const long long group_count = hash_grid_has_groups(grid) ? (long long)grid.num_groups : 1LL;
-    const long long total = hash_grid_checked_cell_product((long long)base, group_count);
-
-    if (total < 0LL)
-        return -1;
-
-    return (int)total;
+    return ((uint64_t)cell << 32) | (uint64_t)(uint32_t)group;
 }
 
-template <typename Type> CUDA_CALLABLE inline int hash_grid_group_slot(const HashGrid_t<Type>& grid, int group_id)
+// first index in [lo, hi) whose key is >= key
+CUDA_CALLABLE inline int hash_grid_lower_bound(const uint64_t* keys, int lo, int hi, uint64_t key)
 {
-    if (!hash_grid_has_groups(grid))
-        return 0;
-
-    int lo = 0;
-    int hi = grid.num_groups;
     while (lo < hi) {
-        const int mid = (lo + hi) / 2;
-        if (grid.group_ids[mid] < group_id)
+        const int mid = lo + (hi - lo) / 2;
+        if (keys[mid] < key)
             lo = mid + 1;
         else
             hi = mid;
     }
-
-    if (lo < grid.num_groups && grid.group_ids[lo] == group_id)
-        return lo;
-    return -1;
+    return lo;
 }
 
 // convert a virtual (world) cell coordinate to a physical one
@@ -128,15 +100,6 @@ template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid
     return cz * (grid.dim_x * grid.dim_y) + cy * grid.dim_x + cx;
 }
 
-template <typename Type>
-CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, int x, int y, int z, int group_slot)
-{
-    const int cell = hash_grid_index(grid, x, y, z);
-    if (hash_grid_has_groups(grid))
-        return (int)((long long)group_slot * (long long)hash_grid_num_cells(grid) + (long long)cell);
-    return cell;
-}
-
 template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, const vec_t<3, Type>& p)
 {
     // Use floor() to round toward negative infinity, not int() which truncates toward zero.
@@ -145,20 +108,6 @@ template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid
     return hash_grid_index(
         grid, int(floor(p[0] * grid.cell_width_inv)), int(floor(p[1] * grid.cell_width_inv)),
         int(floor(p[2] * grid.cell_width_inv))
-    );
-}
-
-template <typename Type>
-CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, const vec_t<3, Type>& p, int group_id)
-{
-    const int group_slot = hash_grid_group_slot(grid, group_id);
-    if (group_slot < 0)
-        return -1;
-
-    // Use floor() to round toward negative infinity, not int() which truncates toward zero.
-    return hash_grid_index(
-        grid, int(floor(p[0] * grid.cell_width_inv)), int(floor(p[1] * grid.cell_width_inv)),
-        int(floor(p[2] * grid.cell_width_inv)), group_slot
     );
 }
 
@@ -179,9 +128,7 @@ template <typename Type> struct hash_grid_query_t {
         , cell_end(0)
         , current(0)
         , group(0)
-        , group_start(0)
-        , group_end(1)
-        , group_slot(0)
+        , filter_by_group(false)
         , grid()
     {
     }
@@ -207,10 +154,8 @@ template <typename Type> struct hash_grid_query_t {
 
     int current;  // index of the current iterator value
 
-    int group;  // requested group, or HASH_GRID_QUERY_ALL_GROUPS for all groups
-    int group_start;
-    int group_end;
-    int group_slot;
+    int group;  // literal group id, applied only when filter_by_group is set
+    bool filter_by_group;  // whether traversal is restricted to `group`
 
     HashGrid_t<Type> grid;
 };
@@ -223,39 +168,35 @@ using hash_grid_query_d = hash_grid_query_t<double>;
 
 template <typename Type> CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& query)
 {
-    const int cell = hash_grid_index(query.grid, query.x, query.y, query.z, query.group_slot);
-    query.cell_index = query.grid.cell_starts[cell];
-    query.cell_end = query.grid.cell_ends[cell];
+    const int cell = hash_grid_index(query.grid, query.x, query.y, query.z);
+    int start = query.grid.cell_starts[cell];
+    int end = query.grid.cell_ends[cell];
+
+    if (query.filter_by_group && hash_grid_has_groups(query.grid)) {
+        // a cell's points are sorted by their (cell, group) key, so the requested group
+        // occupies a contiguous sub-range that binary search can locate
+        const uint64_t key = hash_grid_point_key(cell, query.group);
+        start = hash_grid_lower_bound(query.grid.point_keys, start, end, key);
+        // key + 1 cannot select past the cell: incrementing the largest group bit
+        // pattern rolls into cell + 1, which exceeds every key in [start, end)
+        end = hash_grid_lower_bound(query.grid.point_keys, start, end, key + 1);
+    }
+
+    query.cell_index = start;
+    query.cell_end = end;
 }
 
+// `group` carries a literal group id and is applied only when `filter_by_group` is set, so the
+// full int32 domain remains available for user group ids (no sentinel value is reserved)
 template <typename Type>
-CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
+CUDA_CALLABLE inline hash_grid_query_t<Type>
+hash_grid_query_impl(uint64_t id, vec_t<3, Type> pos, Type radius, int group, bool filter_by_group)
 {
     hash_grid_query_t<Type> query;
 
     query.grid = *(const HashGrid_t<Type>*)(id);
     query.group = group;
-
-    if (hash_grid_has_groups(query.grid)) {
-        if (group == HASH_GRID_QUERY_ALL_GROUPS) {
-            query.group_start = 0;
-            query.group_end = query.grid.num_groups;
-            query.group_slot = 0;
-        } else {
-            const int group_slot = hash_grid_group_slot(query.grid, group);
-            if (group_slot < 0) {
-                query.group_start = 0;
-                query.group_end = 0;
-                query.group_slot = 0;
-                query.cell_index = 0;
-                query.cell_end = 0;
-                return query;
-            }
-            query.group_start = group_slot;
-            query.group_end = group_slot + 1;
-            query.group_slot = group_slot;
-        }
-    }
+    query.filter_by_group = filter_by_group;
 
     // Convert coordinate to grid cell indices using floor() (see hash_grid_index above)
     Type cell_width_inv = query.grid.cell_width_inv;
@@ -279,9 +220,15 @@ CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<
 }
 
 template <typename Type>
+CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius, int group)
+{
+    return hash_grid_query_impl(id, pos, radius, group, true);
+}
+
+template <typename Type>
 CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<3, Type> pos, Type radius)
 {
-    return hash_grid_query(id, pos, radius, HASH_GRID_QUERY_ALL_GROUPS);
+    return hash_grid_query_impl(id, pos, radius, 0, false);
 }
 
 
@@ -290,8 +237,6 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
     const HashGrid_t<Type>& grid = query.grid;
     if (!grid.point_cells)
         return false;
-    if (hash_grid_has_groups(grid) && query.group_end <= query.group_start)
-        return false;
 
     while (1) {
         if (query.cell_index < query.cell_end) {
@@ -299,15 +244,6 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
             index = grid.point_ids[query.cell_index++];
             return true;
         } else {
-            if (hash_grid_has_groups(grid)) {
-                query.group_slot++;
-                if (query.group_slot < query.group_end) {
-                    hash_grid_query_set_cell(query);
-                    continue;
-                }
-                query.group_slot = query.group_start;
-            }
-
             query.x++;
             if (query.x > query.x_end) {
                 query.x = query.x_start;

@@ -2253,6 +2253,9 @@ If the group argument is omitted, the query visits all groups. Unlike grouped BV
 not use a group-root helper such as :func:`wp.bvh_get_group_root() <warp._src.lang.bvh_get_group_root>`; the group id is
 the query selector.
 
+Group ids may be arbitrary ``int32`` values and are consumed on-device during rebuilds, so grouped rebuilds stay
+asynchronous and group assignments may change between rebuilds, including inside replayed CUDA graphs.
+
 
 
 Volumes

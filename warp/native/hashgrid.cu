@@ -11,25 +11,34 @@ extern CUcontext get_current_context();
 
 namespace wp {
 
-template <typename Type>
-__global__ void compute_cell_indices(
-    HashGrid_t<Type> grid, wp::array_t<vec_t<3, Type>> points, wp::array_t<int> groups, bool use_groups
-)
+template <typename Type> __global__ void compute_cell_indices(HashGrid_t<Type> grid, wp::array_t<vec_t<3, Type>> points)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < points.shape[0]) {
-        const vec_t<3, Type>& point = wp::index(points, tid);
-        if (use_groups) {
-            const int cell = hash_grid_index(grid, point, wp::index(groups, tid));
-            // A negative cell can only occur if group_ids is stale or supplied incorrectly.
-            // Keep it as a sentinel; the grouped offset pass ignores it without a host sync.
-            grid.point_cells[tid] = cell;
-        } else {
-            grid.point_cells[tid] = hash_grid_index(grid, point);
-        }
+        grid.point_cells[tid] = hash_grid_index(grid, wp::index(points, tid));
         grid.point_ids[tid] = tid;
     }
+}
+
+template <typename Type>
+__global__ void compute_point_keys(HashGrid_t<Type> grid, wp::array_t<vec_t<3, Type>> points, wp::array_t<int> groups)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid < points.shape[0]) {
+        const int cell = hash_grid_index(grid, wp::index(points, tid));
+        grid.point_keys[tid] = hash_grid_point_key(cell, wp::index(groups, tid));
+        grid.point_ids[tid] = tid;
+    }
+}
+
+__global__ void extract_cells_from_keys(int* point_cells, const uint64_t* point_keys, int num_points)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid < num_points)
+        point_cells[tid] = (int)(point_keys[tid] >> 32);
 }
 
 __global__ void compute_cell_offsets(int* cell_starts, int* cell_ends, const int* point_cells, int num_points)
@@ -58,46 +67,6 @@ __global__ void compute_cell_offsets(int* cell_starts, int* cell_ends, const int
     }
 }
 
-__global__ void
-compute_cell_offsets_checked(int* cell_starts, int* cell_ends, const int* point_cells, int num_points, int num_cells)
-{
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (tid < num_points) {
-        const int c = point_cells[tid];
-        // Stale native group ids produce invalid sentinel cells that must not index the range buffers.
-        // CUB can sort those sentinels last, so the first one must close the preceding valid range.
-        if (c < 0 || c >= num_cells) {
-            const int p = tid > 0 ? point_cells[tid - 1] : -1;
-            if (p >= 0 && p < num_cells) {
-                cell_ends[p] = tid;
-            }
-            return;
-        }
-
-        // Valid cells are contiguous after sorting. The first point for a cell starts that
-        // cell's range; later transitions close the previous valid cell and start this one.
-        if (tid == 0)
-            cell_starts[c] = 0;
-        else {
-            const int p = point_cells[tid - 1];
-
-            if (c != p) {
-                cell_starts[c] = tid;
-                // The previous sorted entry can be an invalid sentinel at the boundary
-                // between invalid and valid cells, so only close ranges for valid cells.
-                if (p >= 0 && p < num_cells) {
-                    cell_ends[p] = tid;
-                }
-            }
-        }
-
-        if (tid == num_points - 1) {
-            cell_ends[c] = tid + 1;
-        }
-    }
-}
-
 template <typename Type>
 void hash_grid_rebuild_device(
     const wp::HashGrid_t<Type>& grid, const wp::array_t<vec_t<3, Type>>& points, const wp::array_t<int>* groups
@@ -105,36 +74,33 @@ void hash_grid_rebuild_device(
 {
     ContextGuard guard(grid.context);
 
-    int num_points = points.shape[0];
-    bool use_groups = groups != nullptr;
-    wp::array_t<int> empty_groups;
-    const wp::array_t<int>& group_array = groups ? *groups : empty_groups;
-    const int num_cells = hash_grid_cell_count(grid);
-    if (num_cells < 0) {
-        fprintf(stderr, "Warp error: Hash grid cell count overflow in %s\n", __FUNCTION__);
-        return;
+    const int num_points = points.shape[0];
+    const int num_cells = hash_grid_num_cells(grid);
+
+    if (groups) {
+        // sort composite (cell, group) keys so points stay cell-major with each cell's
+        // points sorted by group; the group values are consumed on-device, keeping
+        // grouped rebuilds asynchronous and CUDA graph replay safe under group changes
+        wp_launch_device(WP_CURRENT_CONTEXT, (wp::compute_point_keys<Type>), num_points, (grid, points, *groups));
+
+        radix_sort_pairs_device(WP_CURRENT_CONTEXT, grid.point_keys, grid.point_ids, num_points);
+
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, wp::extract_cells_from_keys, num_points, (grid.point_cells, grid.point_keys, num_points)
+        );
+    } else {
+        wp_launch_device(WP_CURRENT_CONTEXT, (wp::compute_cell_indices<Type>), num_points, (grid, points));
+
+        radix_sort_pairs_device(WP_CURRENT_CONTEXT, grid.point_cells, grid.point_ids, num_points);
     }
 
-    wp_launch_device(
-        WP_CURRENT_CONTEXT, (wp::compute_cell_indices<Type>), num_points, (grid, points, group_array, use_groups)
-    );
-
-    radix_sort_pairs_device(WP_CURRENT_CONTEXT, grid.point_cells, grid.point_ids, num_points);
     wp_memset_device(WP_CURRENT_CONTEXT, grid.cell_starts, 0, sizeof(int) * num_cells);
     wp_memset_device(WP_CURRENT_CONTEXT, grid.cell_ends, 0, sizeof(int) * num_cells);
 
-    if (use_groups) {
-        // Defensive path for stale native group_ids: invalid cells stay sorted but never index cell ranges.
-        wp_launch_device(
-            WP_CURRENT_CONTEXT, wp::compute_cell_offsets_checked, num_points,
-            (grid.cell_starts, grid.cell_ends, grid.point_cells, num_points, num_cells)
-        );
-    } else {
-        wp_launch_device(
-            WP_CURRENT_CONTEXT, wp::compute_cell_offsets, num_points,
-            (grid.cell_starts, grid.cell_ends, grid.point_cells, num_points)
-        );
-    }
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, wp::compute_cell_offsets, num_points,
+        (grid.cell_starts, grid.cell_ends, grid.point_cells, num_points)
+    );
 }
 
 // Explicit template instantiations

@@ -7087,9 +7087,9 @@ class HashGrid:
     environment.
 
     In a standard hash grid, all points sharing a spatial cell are stored together, so kernels that need environment
-    isolation must query all candidates and filter out points from other environments. Grouped hash grids store each
-    group's cell ranges independently, and :func:`warp.hash_grid_query` accepts an optional group id that restricts
-    traversal to that group's cells only. This avoids cross-group candidate iteration while preserving the ungrouped
+    isolation must query all candidates and filter out points from other environments. Grouped hash grids keep each
+    cell's points sorted by group id, and :func:`warp.hash_grid_query` accepts an optional group id that restricts
+    traversal to that group's points only. This avoids cross-group candidate iteration while preserving the ungrouped
     query path when no group is passed.
 
     Unlike grouped BVH queries, grouped hash-grid queries do not require a separate root lookup. Pass the same group id
@@ -7114,21 +7114,18 @@ class HashGrid:
         return getattr(self.runtime.core, f"wp_hash_grid_{action}_{location}")
 
     @classmethod
-    def _validate_cell_count(cls, dim_x, dim_y, dim_z, group_count=1):
-        effective_group_count = max(group_count, 1)
-        base_count = dim_x * dim_y * dim_z
-        total_count = base_count * effective_group_count
+    def _validate_cell_count(cls, dim_x, dim_y, dim_z):
+        cell_count = dim_x * dim_y * dim_z
 
         if dim_x <= 0 or dim_y <= 0 or dim_z <= 0:
             raise RuntimeError("Hash grid dimensions must be positive")
-        if total_count > cls._MAX_CELL_COUNT:
+        if cell_count > cls._MAX_CELL_COUNT:
             raise RuntimeError(
                 "Hash grid cell count exceeds supported limit: "
-                f"{dim_x} * {dim_y} * {dim_z} * {effective_group_count} = {total_count} "
-                f"> {cls._MAX_CELL_COUNT}"
+                f"{dim_x} * {dim_y} * {dim_z} = {cell_count} > {cls._MAX_CELL_COUNT}"
             )
 
-        return total_count
+        return cell_count
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -7188,8 +7185,6 @@ class HashGrid:
         # indicates whether the grid data has been reserved for use by a kernel
         self.reserved = False
         self.groups = None
-        self._group_ids = None
-        self._group_capture_key = None
 
     def build(self, points, radius, groups=None):
         """Update the hash grid data structure.
@@ -7208,6 +7203,8 @@ class HashGrid:
                 requested group id. This is intended for independent environments or worlds whose particles should not
                 interact, even when their coordinates overlap. Omitting the group argument in
                 :func:`warp.hash_grid_query` preserves the all-points traversal behavior.
+                Group ids may be arbitrary ``int32`` values and are consumed on-device, so group assignments may
+                change between rebuilds, including during CUDA graph replay.
         """
         if not types_equal(points.dtype, self._vec_type):
             raise TypeError(f"Hash grid points should have type {self._vec_type.__name__}, got {points.dtype}")
@@ -7221,7 +7218,6 @@ class HashGrid:
             raise RuntimeError("points must live on the same device as this HashGrid")
 
         groups_arg = None
-        group_ids_arg = None
         if groups is not None:
             if groups.dtype != int32:
                 raise RuntimeError("groups should be an array of type wp.int32")
@@ -7234,29 +7230,11 @@ class HashGrid:
             if len(groups) != len(points):
                 raise RuntimeError("groups must have the same length as points")
 
-            group_capture_key = (groups.ptr, groups.shape, groups.device)
-            if self.device.is_capturing:
-                if self._group_capture_key != group_capture_key or self._group_ids is None:
-                    raise RuntimeError("HashGrid group ids must be initialized before graph capture")
-                self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z, len(self._group_ids))
-            else:
-                # Group values can change in-place while the array pointer and shape stay fixed.
-                group_ids_np = np.unique(groups.numpy()).astype(np.int32)
-                self._validate_cell_count(self._dim_x, self._dim_y, self._dim_z, len(group_ids_np))
-                self._group_ids = warp.array(group_ids_np, dtype=int32, device=self.device)
-                self._group_capture_key = group_capture_key
-
-            self.groups = groups
             groups_arg = ctypes.byref(groups.__ctype__())
-            group_ids_arg = ctypes.byref(self._group_ids.__ctype__())
-        else:
-            self.groups = None
-            self._group_ids = None
-            self._group_capture_key = None
 
-        self._native_func("update")(
-            self.id, self._type_id, radius, ctypes.byref(points.__ctype__()), groups_arg, group_ids_arg
-        )
+        self.groups = groups
+
+        self._native_func("update")(self.id, self._type_id, radius, ctypes.byref(points.__ctype__()), groups_arg)
         self.reserved = True
 
     def reserve(self, num_points):
