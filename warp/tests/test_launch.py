@@ -581,6 +581,16 @@ def test_launch_adjoint_block_dim_failure(test, device):
         )
 
 
+@wp.kernel
+def kernel_host_array_params(v: wp.array[wp.vec3], m: wp.array[wp.mat33], s: wp.array[float], out: wp.array[float]):
+    i = wp.tid()
+    out[i] = wp.dot(m[i] * v[i], wp.vec3(1.0, 2.0, 3.0)) + s[i]
+
+
+def host_array_params_reference(v, m, s):
+    return np.einsum("nij,nj,i->n", m.astype(np.float64), v.astype(np.float64), np.array([1.0, 2.0, 3.0])) + s
+
+
 devices = get_test_devices()
 cuda_devices = get_cuda_test_devices()
 
@@ -659,6 +669,64 @@ class TestLaunch(unittest.TestCase):
 
         # Explicit construction must keep working.
         cmd.set_param_by_name("v", wp.vec3(1.0, 2.0, 3.0))
+
+    def test_launch_numpy_array_params_cpu(self):
+        """Verify that NumPy arrays passed to CPU array parameters must match Warp arrays, including views."""
+        rng = np.random.default_rng(0)
+        n = 16
+        v = rng.normal(size=(2 * n, 3)).astype(np.float32)
+        m = rng.normal(size=(n, 3, 3)).astype(np.float32)
+        s = rng.normal(size=n).astype(np.float32)
+        expected = wp.empty(n, dtype=float, device="cpu")
+        wp.launch(
+            kernel_host_array_params,
+            dim=n,
+            inputs=[
+                wp.array(np.ascontiguousarray(v[::2]), dtype=wp.vec3, device="cpu"),
+                wp.array(m, dtype=wp.mat33, device="cpu"),
+                wp.array(s, dtype=float, device="cpu"),
+                expected,
+            ],
+            device="cpu",
+        )
+        assert_np_equal(expected.numpy(), host_array_params_reference(v[::2], m, s), tol=1.0e-5)
+
+        read_only = m.copy()
+        read_only.setflags(write=False)
+        # Outer-strided, read-only, and contiguous inputs, plus a NumPy output.
+        out = np.zeros(n, dtype=np.float32)
+        wp.launch(kernel_host_array_params, dim=n, inputs=[v[::2], read_only, s, out], device="cpu")
+        assert_np_equal(out, expected.numpy())
+
+        # A recorded launch keeps its NumPy arguments alive.
+        out = np.zeros(n, dtype=np.float32)
+        cmd = wp.launch(
+            kernel_host_array_params,
+            dim=n,
+            inputs=[v[::2].copy(), m.copy(), s.copy(), out],
+            device="cpu",
+            record_cmd=True,
+        )
+        cmd.launch()
+        assert_np_equal(out, expected.numpy())
+
+    def test_launch_numpy_array_params_cpu_rejected(self):
+        """Verify that NumPy arrays with a mismatched layout must still be rejected for CPU array parameters."""
+        n = 4
+        good_v = np.zeros((n, 3), dtype=np.float32)
+        good_m = np.zeros((n, 3, 3), dtype=np.float32)
+        good_s = np.zeros(n, dtype=np.float32)
+        out = np.zeros(n, dtype=np.float32)
+        cases = (
+            ("inner shape", [np.zeros((n, 4), dtype=np.float32), good_m, good_s, out], "inner shape"),
+            ("inner strides", [np.zeros((n, 6), dtype=np.float32)[:, ::2], good_m, good_s, out], "inner strides"),
+            ("vector dtype", [good_v.astype(np.float64), good_m, good_s, out], "typestr"),
+            ("scalar dtype", [good_v, good_m, good_s.astype(np.int32), out], "typestr"),
+        )
+        for label, inputs, message in cases:
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    wp.launch(kernel_host_array_params, dim=n, inputs=inputs, device="cpu")
 
 
 add_function_test(TestLaunch, "test_launch_1d", test1d, devices=devices)

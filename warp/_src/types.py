@@ -3275,6 +3275,58 @@ def array_ctype_from_interface(interface: dict, dtype=None, owner=None):
     return array_ctype
 
 
+@functools.cache
+def _ndarray_layout(dtype) -> tuple[np.dtype, tuple[int, ...], tuple[int, ...], int] | None:
+    """NumPy dtype, inner shape, inner byte strides, and scalar size accepted for Warp ``dtype``.
+
+    Returns ``None`` for dtypes whose NumPy conversion needs the general path.
+    """
+    scalar_type = getattr(dtype, "_wp_scalar_type_", dtype)
+    np_type = warp_type_to_np_dtype.get(scalar_type)
+    # Exclude dtypes stored as a different NumPy type (e.g. bfloat16 as uint16).
+    if np_type is None or dtype_from_numpy(np.dtype(np_type)) is not scalar_type:
+        return None
+    np_dtype = np.dtype(np_type)
+    inner_shape = tuple(getattr(dtype, "_shape_", ()))
+    stride = np_dtype.itemsize
+    inner_strides = []
+    for extent in reversed(inner_shape):
+        inner_strides.append(stride)
+        stride *= extent
+    return np_dtype, inner_shape, tuple(reversed(inner_strides)), np_dtype.itemsize
+
+
+_c_char_from_buffer = ctypes.c_char.from_buffer
+
+
+def array_ctype_from_ndarray(value: np.ndarray, dtype) -> array_t | None:
+    """Get a native array descriptor for a host NumPy array without building ``__array_interface__``.
+
+    This is a fast path for :func:`array_ctype_from_interface` with ``owner=value``. It returns
+    ``None`` when ``value`` needs the general conversion, which then also reports any error.
+    """
+    layout = _ndarray_layout(dtype)
+    if layout is None or value.dtype != layout[0] or value.ndim == 0:
+        return None
+    _, inner_shape, inner_strides, scalar_size = layout
+    shape = value.shape
+    strides = value.strides
+    if inner_shape:
+        dims = len(inner_shape)
+        if len(shape) < dims or shape[-dims:] != inner_shape or strides[-dims:] != inner_strides:
+            return None
+        shape = shape[:-dims] or (1,)
+        strides = strides[:-dims] or (scalar_size,)
+    try:
+        # Writable C-contiguous buffers: ~3x cheaper than reading __array_interface__.
+        ptr = ctypes.addressof(_c_char_from_buffer(value))
+    except (TypeError, ValueError, BufferError):
+        ptr = value.ctypes.data
+    array_ctype = array_t(ptr, 0, len(shape), shape, strides)
+    array_ctype._ref = value
+    return array_ctype
+
+
 class Reference:
     """Internal carrier for a pass-by-reference value.
 

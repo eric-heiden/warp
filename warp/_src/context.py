@@ -10808,6 +10808,22 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
             return value
 
         else:
+            # Fast paths for the most common arguments of regular array parameters. Anything they
+            # do not accept falls through to the general checks below, which also report errors.
+            if getattr(arg_type, "_concrete_cls", None) is warp.array:
+                value_type = type(value)
+                if value_type is warp.array:
+                    if (
+                        (value.dtype is arg_type.dtype or warp._src.types.types_equal(value.dtype, arg_type.dtype))
+                        and value.ndim == arg_type.ndim
+                        and warp.config.launch_array_access_mode == warp.config.LaunchArrayAccessMode.RELAXED
+                    ):
+                        return value.__ctype__()
+                elif value_type is np.ndarray and not device.is_cuda:
+                    array_ctype = warp._src.types.array_ctype_from_ndarray(value, arg_type.dtype)
+                    if array_ctype is not None:
+                        return array_ctype
+
             # check for array type
             # - in forward passes, array types have to match
             # - in backward passes, indexed array gradients are regular arrays
@@ -11034,16 +11050,14 @@ def _build_cpu_args_structs(kernel, hooks, params, adjoint):
         else:
             ArgsStruct, fields = cached
 
-        args = ArgsStruct()
-        for i, field in enumerate(fields):
-            setattr(args, field[0], params[1 + i])
+        # Positional construction assigns fields in order, like setattr() per field, in one call.
+        num_fields = len(fields)
+        args = ArgsStruct(*params[1 : 1 + num_fields])
 
         if not adjoint:
             return args, None
 
-        adj_args = AdjArgsStruct()
-        for i, field in enumerate(adj_fields):
-            setattr(adj_args, field[0], params[1 + len(fields) + i])
+        adj_args = AdjArgsStruct(*params[1 + num_fields : 1 + num_fields + len(adj_fields)])
         return args, adj_args
 
     # Slow path: build struct types and cache
@@ -11091,16 +11105,14 @@ def invoke(kernel, hooks, params: Sequence[Any], adjoint: bool):
         else:
             ArgsStruct, fields = cached
 
-        args = ArgsStruct()
-        for i, field in enumerate(fields):
-            setattr(args, field[0], params[1 + i])
+        # Positional construction assigns fields in order, like setattr() per field, in one call.
+        num_fields = len(fields)
+        args = ArgsStruct(*params[1 : 1 + num_fields])
 
         if not adjoint:
             hooks.forward(ctypes.byref(params[0]), ctypes.byref(args))
         else:
-            adj_args = AdjArgsStruct()
-            for i, field in enumerate(adj_fields):
-                setattr(adj_args, field[0], params[1 + len(fields) + i])
+            adj_args = AdjArgsStruct(*params[1 + num_fields : 1 + num_fields + len(adj_fields)])
             hooks.backward(ctypes.byref(params[0]), ctypes.byref(args), ctypes.byref(adj_args))
         return
 

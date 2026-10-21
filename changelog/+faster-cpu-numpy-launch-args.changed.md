@@ -1,0 +1,1 @@
+Reduce the host overhead of CPU kernel launches that pass NumPy arrays to array parameters by about 2–3 µs per argument, and shorten the packing of regular Warp array arguments, in `wp.launch()` and `wp.Launch`.

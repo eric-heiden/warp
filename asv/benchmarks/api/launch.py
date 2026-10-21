@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
+
 import warp as wp
 
 from ..benchmarks_utils import setup_once
@@ -276,3 +278,37 @@ class GraphLaunch:
     def time_ten_graph_on_stream(self):
         for _ in range(10):
             wp.capture_launch(self.graph, stream=self.stream)
+
+
+@wp.kernel
+def transform_multiply_kernel(a: wp.array[wp.transform], b: wp.array[wp.transform], out: wp.array[wp.transform]):
+    i = wp.tid()
+    out[i] = wp.transform_multiply(a[i], b[i])
+
+
+class CpuLaunchOverhead:
+    """Measure host overhead of a small CPU launch with three array arguments.
+
+    80 transforms per launch keep the kernel itself well below the Python-side cost.
+    """
+
+    number = 1000
+
+    @setup_once
+    def setup(self):
+        wp.init()
+        wp.load_module(device="cpu")
+        rows = np.zeros((80, 7), dtype=np.float32)
+        rows[:, 6] = 1.0
+        self.numpy_args = [rows.copy() for _ in range(3)]
+        self.warp_args = [wp.array(values, dtype=wp.transform, device="cpu") for values in self.numpy_args]
+        self.cmd = wp.launch(transform_multiply_kernel, dim=80, inputs=self.warp_args, device="cpu", record_cmd=True)
+
+    def time_launch_warp_arrays(self):
+        wp.launch(transform_multiply_kernel, dim=80, inputs=self.warp_args, device="cpu")
+
+    def time_launch_numpy_arrays(self):
+        wp.launch(transform_multiply_kernel, dim=80, inputs=self.numpy_args, device="cpu")
+
+    def time_launch_object(self):
+        self.cmd.launch()
