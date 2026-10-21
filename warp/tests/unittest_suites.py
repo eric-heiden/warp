@@ -188,6 +188,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_core_library_binary import TestCoreLibraryBinary
     from warp.tests.test_cpu_block_codegen import TestCpuBlockCodegen
     from warp.tests.test_cpu_block_dim import TestCpuBlockDim
+    from warp.tests.test_cpu_launch import TestCpuLaunch
     from warp.tests.test_cpu_precompiled_headers import TestCpuPrecompiledHeaders
     from warp.tests.test_cpu_vectorization import TestCpuVectorization
     from warp.tests.test_ctypes import TestCTypes
@@ -350,6 +351,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestCoreLibraryBinary,
         TestCpuBlockCodegen,
         TestCpuBlockDim,
+        TestCpuLaunch,
         TestCpuPrecompiledHeaders,
         TestCpuVectorization,
         TestCTypes,

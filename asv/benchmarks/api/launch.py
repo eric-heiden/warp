@@ -303,6 +303,7 @@ class CpuLaunchOverhead:
         self.numpy_args = [rows.copy() for _ in range(3)]
         self.warp_args = [wp.array(values, dtype=wp.transform, device="cpu") for values in self.numpy_args]
         self.cmd = wp.launch(transform_multiply_kernel, dim=80, inputs=self.warp_args, device="cpu", record_cmd=True)
+        self.launcher = wp.CpuLauncher(transform_multiply_kernel)
 
     def time_launch_warp_arrays(self):
         wp.launch(transform_multiply_kernel, dim=80, inputs=self.warp_args, device="cpu")
@@ -312,3 +313,9 @@ class CpuLaunchOverhead:
 
     def time_launch_object(self):
         self.cmd.launch()
+
+    def time_cpu_launcher_warp_arrays(self):
+        self.launcher(80, *self.warp_args)
+
+    def time_cpu_launcher_numpy_arrays(self):
+        self.launcher(80, *self.numpy_args)

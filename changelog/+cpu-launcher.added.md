@@ -1,0 +1,1 @@
+Add `wp.CpuLauncher` for repeated low-overhead launches of one kernel on the CPU. It packs `wp.array`, NumPy array, value, and scalar arguments into the kernel's argument struct in one write, so a launch costs about 1 µs plus a fraction of a microsecond per argument instead of 8–35 µs through `wp.launch()`.

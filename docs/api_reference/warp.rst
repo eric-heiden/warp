@@ -298,6 +298,7 @@ Kernel Execution
    :nosignatures:
    :toctree: _generated
 
+   CpuLauncher
    Function
    Kernel
    Launch

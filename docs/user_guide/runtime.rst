@@ -91,6 +91,38 @@ Additionally, :class:`Launch` objects can also be used to reduce the overhead of
 .. note::
     Kernels launched via :class:`Launch` objects currently do not get recorded onto the :class:`Tape`.
 
+.. _cpu_launcher:
+
+Low-Overhead CPU Launches
+#########################
+
+Host-side code sometimes launches a CPU kernel many times over small inputs, for example to
+transform tens to thousands of rows while building a scene. For such launches the Python-side cost of
+:func:`wp.launch() <warp.launch>` (several microseconds, plus a few microseconds per NumPy argument)
+can exceed the kernel's run time. A :class:`CpuLauncher` resolves the kernel's module, entry point, and
+argument layout once and packs each call's arguments with a single write, so a launch costs about
+1 µs plus a fraction of a microsecond per argument:
+
+.. code-block:: python
+
+    @wp.kernel
+    def transform_rows(x: wp.transform, src: wp.array[wp.transform], out: wp.array[wp.transform]):
+        i = wp.tid()
+        out[i] = wp.transform_multiply(x, src[i])
+
+    launch = wp.CpuLauncher(transform_rows)
+
+    rows = np.zeros((80, 7), dtype=np.float32)
+    rows[:, 6] = 1.0
+    out = np.empty_like(rows)
+    launch(len(rows), wp.transform((1.0, 2.0, 3.0), wp.quat_identity()), rows, out)
+
+Arguments follow the conversion rules of :func:`wp.launch() <warp.launch>`. NumPy arrays are passed to array
+parameters without copying, and vector, matrix, quaternion, and transform parameters also accept NumPy arrays
+of the matching shape. Launches run synchronously in the calling thread, and a launcher can be shared between
+threads. While a :class:`Tape` or a CPU graph capture is active, calls are forwarded to
+:func:`wp.launch() <warp.launch>` so they are recorded.
+
 
 .. _Arrays:
 

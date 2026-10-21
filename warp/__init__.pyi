@@ -115,6 +115,7 @@ from warp._src.builtins import static as static
 from warp._src.context import Kernel as Kernel
 from warp._src.context import Function as Function
 from warp._src.context import Launch as Launch
+from warp._src.cpu_launch import CpuLauncher as CpuLauncher
 from warp._src.context import Module as Module
 from warp._src.context import ModuleBuildOptions as ModuleBuildOptions
 from warp._src.context import launch as launch
