@@ -77,6 +77,7 @@ struct Plan {
     bool has_bias = false;
     bool has_aux = false;
     bool has_bgrad = false;
+    bool scale_f64 = false;  // alpha and beta are doubles (CUDA_R_64F scale type)
     size_t ws_needed = 0;
     std::vector<cublasLtMatmulAlgo_t> algos;  // heuristic candidates (best first)
     bool tuned = true;
@@ -202,6 +203,7 @@ WP_API void* wp_cublaslt_plan_create(
     cublasOperation_t opa = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;  // Lt "A" is our B
     cublasOperation_t opb = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;  // Lt "B" is our A
 
+    p->scale_f64 = scale_type == CUDA_R_64F;
     bool ok = lt_ok(
         pfn_cublasLtMatmulDescCreate(&p->desc, (cublasComputeType_t)compute, (cudaDataType_t)scale_type),
         "MatmulDescCreate"
@@ -344,12 +346,16 @@ WP_API bool wp_cublaslt_plan_run(
     void* C,
     const void* bias,
     void* aux,
-    float alpha,
-    float beta
+    double alpha,
+    double beta
 )
 {
     Plan* p = static_cast<Plan*>(plan);
     ContextGuard guard(p->context);
+    // the scalars must have the plan's scale type (float, or double for float64 GEMMs)
+    float alpha_f = float(alpha), beta_f = float(beta);
+    const void* alpha_ptr = p->scale_f64 ? static_cast<const void*>(&alpha) : static_cast<const void*>(&alpha_f);
+    const void* beta_ptr = p->scale_f64 ? static_cast<const void*>(&beta) : static_cast<const void*>(&beta_f);
     if (p->has_bias || p->has_bgrad) {
         const void* b = bias;
         if (!lt_ok(
@@ -366,7 +372,7 @@ WP_API bool wp_cublaslt_plan_run(
             ))
             return false;
     }
-    if (!p->tuned && beta == 0.0f) {
+    if (!p->tuned && beta == 0.0) {
         cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
         cudaStreamIsCapturing((cudaStream_t)stream, &cap);
         if (cap == cudaStreamCaptureStatusNone) {
@@ -380,8 +386,8 @@ WP_API bool wp_cublaslt_plan_run(
                 bool good = true;
                 for (int w = 0; w < 2 && good; ++w)  // warm-up
                     good = pfn_cublasLtMatmul(
-                               p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i],
-                               p->workspace, p->workspace_size, (cudaStream_t)stream
+                               p->handle, p->desc, alpha_ptr, B, p->la, A, p->lb, beta_ptr, C, p->lc, C, p->ld,
+                               &p->algos[i], p->workspace, p->workspace_size, (cudaStream_t)stream
                            )
                         == CUBLAS_STATUS_SUCCESS;
                 if (!good)
@@ -390,7 +396,7 @@ WP_API bool wp_cublaslt_plan_run(
                 cudaEventRecord(e0, (cudaStream_t)stream);
                 for (int r = 0; r < reps; ++r)
                     pfn_cublasLtMatmul(
-                        p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i],
+                        p->handle, p->desc, alpha_ptr, B, p->la, A, p->lb, beta_ptr, C, p->lc, C, p->ld, &p->algos[i],
                         p->workspace, p->workspace_size, (cudaStream_t)stream
                     );
                 cudaEventRecord(e1, (cudaStream_t)stream);
@@ -411,7 +417,7 @@ WP_API bool wp_cublaslt_plan_run(
     // Lt A = our B, Lt B = our A
     return lt_ok(
         pfn_cublasLtMatmul(
-            p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algo, p->workspace,
+            p->handle, p->desc, alpha_ptr, B, p->la, A, p->lb, beta_ptr, C, p->lc, C, p->ld, &p->algo, p->workspace,
             p->workspace_size, (cudaStream_t)stream
         ),
         "cublasLtMatmul"
@@ -471,7 +477,7 @@ WP_API void* wp_cublaslt_plan_create(
 {
     return nullptr;
 }
-WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, const void*, void*, float, float)
+WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, const void*, void*, double, double)
 {
     return false;
 }

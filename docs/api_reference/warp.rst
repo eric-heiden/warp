@@ -196,6 +196,7 @@ Arrays
    from_ptr
    full
    full_like
+   gemm
    ones
    ones_like
    zeros
@@ -262,6 +263,7 @@ Runtime
    get_cpu_kernel_cache_key
    init
    is_cpu_available
+   is_cublaslt_available
    is_cubql_available
    is_cuda_available
    print_diagnostics

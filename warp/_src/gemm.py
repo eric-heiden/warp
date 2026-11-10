@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""cuBLASLt-backed GEMM for Warp arrays.
+"""GEMM for Warp arrays, backed by cuBLASLt on CUDA devices.
 
 The wrapper loads cuBLASLt lazily at runtime (it is not linked into ``warp.so``), caches one heuristic plan
 per problem shape and issues a single ``cublasLtMatmul()`` per call. Plans are created on the first call
 (do a warm-up call before graph capture to keep plan creation outside of the captured region), and the
 launch itself is safe for CUDA graph capture.
+
+CPU arrays, CUDA devices without a loadable cuBLASLt, and CUDA API captures (``apic=True``, whose operation
+stream cannot represent cuBLASLt calls) use a built-in Warp kernel instead: it supports the same arguments,
+is recorded like any other kernel launch, and is much slower than cuBLASLt for large problems.
 """
 
 from __future__ import annotations
@@ -20,6 +24,12 @@ from typing import Any
 
 import warp._src.context as _ctx
 import warp._src.types as _types
+from warp._src.logger import log_warning
+
+_INSTALL_HINT = (
+    "install the cuBLAS wheel matching Warp's CUDA version (pip install warp-lang[cublas-cu12] or "
+    "warp-lang[cublas-cu13]), or set WARP_CUBLASLT_PATH to libcublasLt"
+)
 
 # cudaDataType_t
 _CUDA_R_32F, _CUDA_R_64F, _CUDA_R_16F, _CUDA_R_16BF = 0, 1, 2, 14
@@ -74,7 +84,13 @@ def _lib_candidates():
 
     for major in ("13", "12"):
         yield from found(
-            (f"nvidia/cu{major}/lib/libcublasLt.so.{major}*", f"nvidia/cublas/lib/libcublasLt.so.{major}*")
+            (
+                f"nvidia/cu{major}/lib/libcublasLt.so.{major}*",
+                f"nvidia/cublas/lib/libcublasLt.so.{major}*",
+                f"nvidia/cu{major}/bin/cublasLt64_{major}.dll",
+                f"nvidia/cu{major}/bin/*/cublasLt64_{major}.dll",
+                f"nvidia/cublas/bin/cublasLt64_{major}.dll",
+            )
         )
         yield f"libcublasLt.so.{major}"
         yield f"cublasLt64_{major}.dll"
@@ -112,7 +128,7 @@ def _setup_signatures(core):
         ctypes.c_int,  # epilogue, bias_type, aux_ld, aux_type, tune, align
     ]
     core.wp_cublaslt_plan_create.restype = ctypes.c_void_p
-    core.wp_cublaslt_plan_run.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_float, ctypes.c_float]
+    core.wp_cublaslt_plan_run.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_double, ctypes.c_double]
     core.wp_cublaslt_plan_run.restype = ctypes.c_bool
     core.wp_cublaslt_plan_destroy.argtypes = [ctypes.c_void_p]
     core.wp_cublaslt_plan_destroy.restype = None
@@ -121,7 +137,7 @@ def _setup_signatures(core):
 def _ensure_loaded():
     if _state["loaded"] is not None:
         if not _state["loaded"]:
-            raise RuntimeError("cuBLASLt could not be loaded; set WARP_CUBLASLT_PATH to libcublasLt")
+            raise RuntimeError(f"cuBLASLt could not be loaded; {_INSTALL_HINT}")
         return
     if _ctx.runtime is None:
         _ctx.init()
@@ -133,7 +149,49 @@ def _ensure_loaded():
             _state["loaded"], _state["version"] = True, v
             return
     _state["loaded"] = False
-    raise RuntimeError("cuBLASLt could not be loaded; set WARP_CUBLASLT_PATH to libcublasLt")
+    raise RuntimeError(f"cuBLASLt could not be loaded; {_INSTALL_HINT}")
+
+
+def is_cublaslt_available() -> bool:
+    """Return whether :func:`warp.gemm` can use cuBLASLt on CUDA devices.
+
+    cuBLASLt is loaded at runtime, on the first call of this function or of :func:`warp.gemm`, from the
+    ``nvidia-cublas`` wheels (``pip install warp-lang[cublas-cu12]`` or ``warp-lang[cublas-cu13]``), the CUDA
+    toolkit or the library search path; ``WARP_CUBLASLT_PATH`` selects a library explicitly. Without it,
+    :func:`warp.gemm` uses a much slower built-in Warp kernel.
+    """
+    if _ctx.runtime is None:
+        _ctx.init()
+    if not _ctx.is_cuda_available():
+        return False
+    try:
+        _ensure_loaded()
+    except RuntimeError:
+        return False
+    return True
+
+
+_force_fallback = False  # tests: use the built-in kernel on CUDA devices too
+
+
+def _select_backend(device) -> str:
+    """``"cublaslt"`` or ``"warp"`` (the built-in kernel) for a call on ``device``."""
+    if device.is_cpu or _force_fallback:
+        return "warp"
+    if _ctx._get_apic_capture_for_device(device) is not None:
+        log_warning(
+            "wp.gemm() inside an API capture (apic=True) uses the built-in Warp GEMM kernel, since the captured "
+            "operation stream cannot represent cuBLASLt calls; it is much slower than cuBLASLt for large problems.",
+            once=True,
+        )
+        return "warp"
+    if not is_cublaslt_available():
+        log_warning(
+            f"wp.gemm() uses the built-in Warp GEMM kernel, which is much slower than cuBLASLt: {_INSTALL_HINT}.",
+            once=True,
+        )
+        return "warp"
+    return "cublaslt"
 
 
 def _destroy_plans():
@@ -186,10 +244,14 @@ def gemm(
     stream=None,
     record_tape: bool = True,
 ):
-    """Compute ``out = activation(alpha * op(a) @ op(b) + bias) + beta * out`` with cuBLASLt.
+    """Compute ``out = activation(alpha * op(a) @ op(b) + bias) + beta * out``.
 
-    All arrays are row-major with contiguous rows, either 2D ``(rows, cols)`` or 3D ``(batch, rows, cols)``.
-    The call enqueues a single kernel launch on the device's current stream and can be captured in a CUDA graph.
+    All arrays are row-major with contiguous rows, either 2D ``(rows, cols)`` or 3D ``(batch, rows, cols)``, and
+    on the same device. On CUDA devices, the call enqueues a single cuBLASLt kernel launch on the device's current
+    stream and can be captured in a CUDA graph. cuBLASLt is loaded at runtime (see
+    :func:`warp.is_cublaslt_available`); CPU arrays, CUDA devices without cuBLASLt and API captures
+    (``apic=True``) use a built-in Warp kernel instead, which is recorded in CPU graphs and saved graphs like any
+    kernel launch but is much slower than cuBLASLt for large problems.
 
     Args:
         a: Left operand, shape ``(M, K)`` (or ``(K, M)`` if ``trans_a``).
@@ -201,13 +263,14 @@ def gemm(
         trans_b: Use the transpose of ``b``.
         bias: Optional 1D array of length ``N`` added to each output row (fused epilogue).
         activation: Optional fused activation: ``"relu"`` or ``"gelu"`` (tanh approximation).
-        aux: Optional output buffer ``(M, N)`` storing the pre-activation data needed for a fused activation backward pass.
+        aux: Optional output buffer ``(M, N)`` storing the pre-activation values needed by the backward epilogue
+            (``grad_aux``). Requires ``activation="gelu"``.
         grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * gelu'(grad_aux)`` where ``grad_aux`` is
             the pre-activation buffer saved by a forward call with ``aux``. Requires ``activation="gelu"``.
         bias_grad: Optional 1D output array of length ``N``. With ``grad_aux`` it receives the column sums of the result.
             Without ``grad_aux`` (weight-gradient GEMM ``a.T @ b`` with ``trans_a=True``) it receives the column sums
             of ``b`` over the reduction dimension, i.e. the bias gradient of a linear layer.
-        tf32: Allow TF32 tensor cores for float32 inputs.
+        tf32: Allow TF32 tensor cores for float32 inputs (cuBLASLt only).
         autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
             the fastest is kept. Use 0 or 1 to disable.
         stream: CUDA stream to launch on, defaults to the current stream of the device.
@@ -222,11 +285,27 @@ def gemm(
     Returns:
         The output array.
     """
-    _ensure_loaded()
+    if _ctx.runtime is None:
+        _ctx.init()
     if a.dtype != b.dtype:
         raise TypeError("gemm() operands must have the same dtype")
     if a.dtype not in _DTYPES:
         raise TypeError(f"gemm() unsupported dtype {a.dtype}")
+    for name, x in (
+        ("b", b),
+        ("out", out),
+        ("bias", bias),
+        ("aux", aux),
+        ("grad_aux", grad_aux),
+        ("bias_grad", bias_grad),
+    ):
+        if x is not None:
+            if x.device != a.device:
+                raise ValueError(
+                    f"gemm() array '{name}' is on device {x.device}, expected {a.device} (the device of 'a')"
+                )
+            if x.dtype != a.dtype:
+                raise TypeError(f"gemm() array '{name}' has dtype {x.dtype}, expected {a.dtype}")
     M, K, lda, batch, sa = _mat_info(a, trans_a)
     K2, N, ldb, batch_b, sb = _mat_info(b, trans_b)
     if K != K2 or batch != batch_b:
@@ -240,24 +319,110 @@ def gemm(
         out = _ctx.empty(
             ((batch, M, N) if a.ndim == 3 else (M, N)), dtype=a.dtype, device=a.device, requires_grad=recording
         )
-    M_c, N_c, ldc, batch_c, sc = _mat_info(out, False)
+    M_c, N_c, _ldc, batch_c, _sc = _mat_info(out, False)
     if (M_c, N_c, batch_c) != (M, N, batch):
         raise ValueError(
             f"gemm() output shape ({batch_c}, {M_c}, {N_c}) does not match the product ({batch}, {M}, {N})"
         )
+    if beta != 0.0 and activation is not None:
+        raise ValueError("gemm() does not support beta != 0 together with a fused activation")
+    if activation not in (None, "relu", "gelu"):
+        raise ValueError(f"gemm() unsupported activation {activation!r} (expected None, 'relu' or 'gelu')")
+    if aux is not None and activation != "gelu":
+        raise ValueError("gemm() aux requires activation='gelu'")
+    if grad_aux is not None and (activation != "gelu" or aux is not None):
+        raise ValueError("gemm() grad_aux requires activation='gelu' and no aux output")
+    if (
+        grad_aux is None
+        and bias_grad is not None
+        and (activation is not None or bias is not None or not trans_a or trans_b)
+    ):
+        raise ValueError(
+            "gemm() bias_grad without grad_aux requires trans_a=True, trans_b=False and no bias/activation"
+        )
+    for name, x in (("aux", aux), ("grad_aux", grad_aux)):
+        if x is not None and tuple(x.shape) != tuple(out.shape):
+            raise ValueError(f"gemm() {name} shape {tuple(x.shape)} does not match the output shape {tuple(out.shape)}")
+    for name, x in (("bias", bias), ("bias_grad", bias_grad)):
+        if x is not None and (x.ndim != 1 or x.shape[0] != N):
+            raise ValueError(f"gemm() {name} must be a 1D array of length {N}")
+    tape = _ctx.runtime.tape if record_tape else None
+    recorded = tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias))
+    if recorded and (activation is not None or grad_aux is not None or bias_grad is not None or beta != 0.0):
+        raise RuntimeError(
+            "gemm() can only be recorded on a wp.Tape without fused activations or backward epilogues and with beta=0"
+        )
+    if _select_backend(a.device) == "warp":
+        _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, aux, grad_aux, bias_grad, K)
+    else:
+        _ensure_loaded()
+        _cublaslt_gemm(
+            a,
+            b,
+            out,
+            alpha,
+            beta,
+            trans_a,
+            trans_b,
+            bias,
+            activation,
+            aux,
+            grad_aux,
+            bias_grad,
+            tf32,
+            autotune,
+            stream,
+            M,
+            N,
+            K,
+            lda,
+            ldb,
+            batch,
+            sa,
+            sb,
+        )
+
+    if recorded:
+        _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream)
+    return out
+
+
+def _cublaslt_gemm(
+    a,
+    b,
+    out,
+    alpha,
+    beta,
+    trans_a,
+    trans_b,
+    bias,
+    activation,
+    aux,
+    grad_aux,
+    bias_grad,
+    tf32,
+    autotune,
+    stream,
+    M,
+    N,
+    K,
+    lda,
+    ldb,
+    batch,
+    sa,
+    sb,
+):
+    """Launch the GEMM with cuBLASLt (arguments validated by :func:`gemm`)."""
+    _, _, ldc, _, sc = _mat_info(out, False)
     dt, _ = _DTYPES[a.dtype]
     if a.dtype == _types.float64:
         compute, scale = _COMPUTE_64F, _CUDA_R_64F
     else:
         compute = _COMPUTE_32F_TF32 if (tf32 and a.dtype == _types.float32) else _COMPUTE_32F
         scale = _CUDA_R_32F
-    if beta != 0.0 and activation is not None:
-        raise ValueError("gemm() does not support beta != 0 together with a fused activation")
     ep = _EP[(activation, bias is not None)]
     aux_ld = 0
     if aux is not None:
-        if activation is None:
-            raise ValueError("aux requires an activation")
         ep = {
             ("relu", True): _EP_RELU_AUX_BIAS,
             ("relu", False): _EP_RELU_AUX,
@@ -265,16 +430,12 @@ def gemm(
             ("gelu", False): _EP_GELU_AUX,
         }[(activation, bias is not None)]
     if grad_aux is not None:
-        if activation != "gelu" or aux is not None:
-            raise ValueError("grad_aux requires activation='gelu' and no aux output")
         ep = _EP_DGELU_BGRAD if bias_grad is not None else _EP_DGELU
         aux_ld = N
     elif aux is not None:
         aux_ld = N
     elif bias_grad is not None:
         # weight-gradient GEMM out = op(a) @ op(b): fuse the column sums of op(b) over K (the batch) into bias_grad
-        if activation is not None or bias is not None or not trans_a or trans_b:
-            raise ValueError("bias_grad without grad_aux requires trans_a=True, trans_b=False and no bias/activation")
         ep = _EP_BGRADA
     # pointer alignment is part of the plan: cuBLASLt algorithms are only valid for the alignment they were chosen for
     min_align = 256
@@ -355,14 +516,209 @@ def gemm(
     if not ok:
         raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")
 
-    tape = _ctx.runtime.tape if record_tape else None
-    if tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias)):
-        if activation is not None or aux is not None or grad_aux is not None or bias_grad is not None or beta != 0.0:
-            raise RuntimeError(
-                "gemm() can only be recorded on a wp.Tape without fused activations or backward epilogues and with beta=0"
-            )
-        _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream)
-    return out
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Built-in Warp kernel (CPU arrays, CUDA without cuBLASLt, CUDA API captures)
+
+_fallback_cache: dict = {}
+_GELU_C0 = 0.7978845608028654  # sqrt(2 / pi)
+_GELU_C1 = 0.044715
+_GELU_C3 = 3.0 * _GELU_C1
+
+
+def _fallback_kernels(dtype, ndim: int):
+    """GEMM and column-sum kernels for ``dtype`` and 2D or 3D (batched) arrays, created on first use."""
+    key = (dtype, ndim)
+    if key in _fallback_cache:
+        return _fallback_cache[key]
+    import warp as wp  # noqa: PLC0415
+
+    ACC = wp.float64 if dtype == _types.float64 else wp.float32  # accumulation type
+
+    @wp.func
+    def gelu(z: Any):
+        u = z.dtype(_GELU_C0) * (z + z.dtype(_GELU_C1) * z * z * z)
+        return z.dtype(0.5) * z * (z.dtype(1.0) + wp.tanh(u))
+
+    @wp.func
+    def gelu_grad(z: Any):
+        u = z.dtype(_GELU_C0) * (z + z.dtype(_GELU_C1) * z * z * z)
+        t = wp.tanh(u)
+        return z.dtype(0.5) * (z.dtype(1.0) + t) + z.dtype(0.5) * z * (z.dtype(1.0) - t * t) * z.dtype(_GELU_C0) * (
+            z.dtype(1.0) + z.dtype(_GELU_C3) * z * z
+        )
+
+    @wp.func
+    def epilogue(
+        v: Any, bias_v: Any, has_bias: int, z: Any, aux_out: int, act: int, grad_mode: int, beta: Any, old: Any
+    ):
+        # returns (output, pre-activation)
+        if grad_mode != 0:
+            return v * gelu_grad(z), v
+        if has_bias != 0:
+            v = v + bias_v
+        pre = v
+        if act == 1:
+            v = wp.max(v, v.dtype(0.0))
+        elif act == 2:
+            v = gelu(v)
+        if beta != v.dtype(0.0):
+            v = v + beta * old
+        return v, pre
+
+    if ndim == 2:
+
+        @wp.kernel(enable_backward=False, module="unique")
+        def gemm_kernel(
+            a: wp.array2d[Any],
+            b: wp.array2d[Any],
+            out: wp.array2d[Any],
+            bias: wp.array1d[Any],
+            aux: wp.array2d[Any],  # pre-activation output, or the GELU input of the backward epilogue
+            K: int,
+            trans_a: int,
+            trans_b: int,
+            alpha: float,
+            beta: float,
+            act: int,
+            grad_mode: int,
+        ):
+            i, j = wp.tid()
+            s = ACC(0.0)
+            for k in range(K):
+                av = ACC(0.0)
+                bv = ACC(0.0)
+                if trans_a != 0:
+                    av = ACC(a[k, i])
+                else:
+                    av = ACC(a[i, k])
+                if trans_b != 0:
+                    bv = ACC(b[j, k])
+                else:
+                    bv = ACC(b[k, j])
+                s += av * bv
+            has_bias = int(bias.shape[0] > 0)
+            has_aux = int(aux.shape[0] > 0)
+            bias_v = ACC(0.0)
+            if has_bias != 0:
+                bias_v = ACC(bias[j])
+            z = ACC(0.0)
+            if grad_mode != 0:
+                z = ACC(aux[i, j])
+            old = ACC(0.0)
+            if beta != 0.0:
+                old = ACC(out[i, j])
+            r, pre = epilogue(s * ACC(alpha), bias_v, has_bias, z, has_aux, act, grad_mode, ACC(beta), old)
+            if has_aux != 0 and grad_mode == 0:
+                aux[i, j] = aux.dtype(pre)
+            out[i, j] = out.dtype(r)
+
+        @wp.kernel(enable_backward=False, module="unique")
+        def colsum_kernel(x: wp.array2d[Any], g: wp.array1d[Any]):
+            j = wp.tid()
+            s = ACC(0.0)
+            for r in range(x.shape[0]):
+                s += ACC(x[r, j])
+            g[j] = g.dtype(s)
+
+    else:
+
+        @wp.kernel(enable_backward=False, module="unique")
+        def gemm_kernel(
+            a: wp.array3d[Any],
+            b: wp.array3d[Any],
+            out: wp.array3d[Any],
+            bias: wp.array1d[Any],
+            aux: wp.array3d[Any],
+            K: int,
+            trans_a: int,
+            trans_b: int,
+            alpha: float,
+            beta: float,
+            act: int,
+            grad_mode: int,
+        ):
+            n, i, j = wp.tid()
+            s = ACC(0.0)
+            for k in range(K):
+                av = ACC(0.0)
+                bv = ACC(0.0)
+                if trans_a != 0:
+                    av = ACC(a[n, k, i])
+                else:
+                    av = ACC(a[n, i, k])
+                if trans_b != 0:
+                    bv = ACC(b[n, j, k])
+                else:
+                    bv = ACC(b[n, k, j])
+                s += av * bv
+            has_bias = int(bias.shape[0] > 0)
+            has_aux = int(aux.shape[0] > 0)
+            bias_v = ACC(0.0)
+            if has_bias != 0:
+                bias_v = ACC(bias[j])
+            z = ACC(0.0)
+            if grad_mode != 0:
+                z = ACC(aux[n, i, j])
+            old = ACC(0.0)
+            if beta != 0.0:
+                old = ACC(out[n, i, j])
+            r, pre = epilogue(s * ACC(alpha), bias_v, has_bias, z, has_aux, act, grad_mode, ACC(beta), old)
+            if has_aux != 0 and grad_mode == 0:
+                aux[n, i, j] = aux.dtype(pre)
+            out[n, i, j] = out.dtype(r)
+
+        @wp.kernel(enable_backward=False, module="unique")
+        def colsum_kernel(x: wp.array3d[Any], g: wp.array1d[Any]):
+            j = wp.tid()
+            s = ACC(0.0)
+            for n in range(x.shape[0]):
+                for r in range(x.shape[1]):
+                    s += ACC(x[n, r, j])
+            g[j] = g.dtype(s)
+
+    _fallback_cache[key] = (gemm_kernel, colsum_kernel)
+    return _fallback_cache[key]
+
+
+def _placeholder(dtype, ndim: int, device):
+    """Empty array standing in for an absent optional argument of the built-in kernels."""
+    key = ("placeholder", dtype, ndim, str(device))
+    if key not in _fallback_cache:
+        _fallback_cache[key] = _ctx.empty((0,) * ndim, dtype=dtype, device=device)
+    return _fallback_cache[key]
+
+
+def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, aux, grad_aux, bias_grad, K):
+    """Launch the GEMM with the built-in Warp kernels (arguments validated by :func:`gemm`)."""
+    gemm_kernel, colsum_kernel = _fallback_kernels(a.dtype, a.ndim)
+    device = a.device
+    act = {None: 0, "relu": 1, "gelu": 2}[activation]
+    side = grad_aux if grad_aux is not None else aux
+    _ctx.launch(
+        gemm_kernel,
+        dim=out.shape,
+        inputs=[
+            a,
+            b,
+            out,
+            bias if bias is not None else _placeholder(a.dtype, 1, device),
+            side if side is not None else _placeholder(a.dtype, a.ndim, device),
+            K,
+            int(trans_a),
+            int(trans_b),
+            float(alpha),
+            float(beta),
+            act,
+            int(grad_aux is not None),
+        ],
+        device=device,
+        record_tape=False,
+    )
+    if bias_grad is not None:
+        # column sums of the result (backward epilogue) or of b over the reduction dimension (weight gradient)
+        source = out if grad_aux is not None else b
+        _ctx.launch(colsum_kernel, dim=bias_grad.shape[0], inputs=[source, bias_grad], device=device, record_tape=False)
 
 
 _colsum_kernel = None

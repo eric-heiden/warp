@@ -66,6 +66,12 @@ torch-cu13 = [
     "warp-lang[examples]",
     "torch>=2.9.0",
 ]
+cublas-cu12 = [
+    "nvidia-cublas-cu12",
+]
+cublas-cu13 = [
+    "nvidia-cublas>=13",
+]
 dev = [
     "warp-lang[examples]",
     "warp-lang[docs]",

@@ -2428,6 +2428,12 @@ benchmark = [
     { name = "usd-core", marker = "(platform_machine != 'ARM64' and platform_machine != 'aarch64' and platform_machine != 'arm64') or (platform_machine == 'ARM64' and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "usd-exchange", marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and sys_platform == 'linux'" },
 ]
+cublas-cu12 = [
+    { name = "nvidia-cublas-cu12" },
+]
+cublas-cu13 = [
+    { name = "nvidia-cublas" },
+]
 dev = [
     { name = "blosc", marker = "(platform_machine != 'ARM64' and platform_machine != 'aarch64' and platform_machine != 'arm64') or sys_platform != 'win32'" },
     { name = "coverage" },
@@ -2493,6 +2499,8 @@ requires-dist = [
     { name = "myst-parser", marker = "extra == 'docs'" },
     { name = "nlopt", marker = "(python_full_version < '3.15' and platform_machine != 'ARM64' and platform_machine != 'aarch64' and platform_machine != 'arm64' and extra == 'examples') or (python_full_version < '3.15' and sys_platform != 'win32' and extra == 'examples')" },
     { name = "numpy" },
+    { name = "nvidia-cublas", marker = "extra == 'cublas-cu13'", specifier = ">=13" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'cublas-cu12'" },
     { name = "nvidia-sphinx-theme", marker = "extra == 'docs'" },
     { name = "nvtx", marker = "extra == 'dev'", specifier = ">=0.2.16" },
     { name = "pillow", marker = "extra == 'examples'", specifier = ">=10.4.0" },
@@ -2511,4 +2519,4 @@ requires-dist = [
     { name = "warp-lang", extras = ["examples"], marker = "extra == 'torch-cu12'" },
     { name = "warp-lang", extras = ["examples"], marker = "extra == 'torch-cu13'" },
 ]
-provides-extras = ["docs", "benchmark", "examples", "torch-cu12", "torch-cu13", "dev"]
+provides-extras = ["docs", "benchmark", "examples", "torch-cu12", "torch-cu13", "cublas-cu12", "cublas-cu13", "dev"]
