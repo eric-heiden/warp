@@ -123,6 +123,30 @@ def test_gemm_graph_capture(test, device):
     assert_np_equal(out.numpy(), 3.0 * (a @ b), tol=1e-3)
 
 
+def test_gemm_tape_backward(test, device):
+    rng = np.random.default_rng(5)
+    M, N, K = 33, 20, 17
+    for ta, tb in [(False, False), (True, False), (False, True), (True, True)]:
+        an = rng.standard_normal((K, M) if ta else (M, K)).astype(np.float32)
+        bn = rng.standard_normal((N, K) if tb else (K, N)).astype(np.float32)
+        biasn = rng.standard_normal(N).astype(np.float32)
+        gn = rng.standard_normal((M, N)).astype(np.float32)
+        a = wp.array(an, device=device, requires_grad=True)
+        b = wp.array(bn, device=device, requires_grad=True)
+        bias = wp.array(biasn, device=device, requires_grad=True)
+        tape = wp.Tape()
+        with tape:
+            out = wp.gemm(a, b, bias=bias, trans_a=ta, trans_b=tb, alpha=0.5)
+        out.grad = wp.array(gn, device=device)
+        tape.backward()
+        opa, opb = (an.T if ta else an), (bn.T if tb else bn)
+        assert_np_equal(out.numpy(), 0.5 * opa @ opb + biasn, tol=1e-4)
+        ga, gb = 0.5 * gn @ opb.T, 0.5 * opa.T @ gn
+        assert_np_equal(a.grad.numpy(), ga.T if ta else ga, tol=1e-4)
+        assert_np_equal(b.grad.numpy(), gb.T if tb else gb, tol=1e-4)
+        assert_np_equal(bias.grad.numpy(), gn.sum(axis=0), tol=1e-4)
+
+
 devices = get_selected_cuda_test_devices(mode="basic") if _cublaslt_available() else []
 
 
@@ -136,6 +160,7 @@ for _name, _fn in [
     ("test_gemm_backward_epilogues", test_gemm_backward_epilogues),
     ("test_gemm_batched_and_misaligned", test_gemm_batched_and_misaligned),
     ("test_gemm_graph_capture", test_gemm_graph_capture),
+    ("test_gemm_tape_backward", test_gemm_tape_backward),
 ]:
     add_function_test(TestGemm, _name, _fn, devices=devices, check_output=False)
 

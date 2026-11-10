@@ -16,6 +16,7 @@ import ctypes
 import glob
 import os
 import sys
+from typing import Any
 
 import warp._src.context as _ctx
 import warp._src.types as _types
@@ -210,6 +211,10 @@ def gemm(
             the fastest is kept. Use 0 or 1 to disable.
         stream: CUDA stream to launch on, defaults to the current stream of the device.
 
+    When a :class:`warp.Tape` is recording and ``a``, ``b`` or ``bias`` require gradients, the adjoint GEMMs (and
+    the bias column sums) are recorded on the tape, so ``tape.backward()`` accumulates into their ``grad`` arrays.
+    This requires ``beta=0`` and no fused activation or backward epilogue.
+
     Returns:
         The output array.
     """
@@ -223,7 +228,10 @@ def gemm(
     if K != K2 or batch != batch_b:
         raise ValueError(f"gemm() shape mismatch: op(a) is ({M},{K}), op(b) is ({K2},{N})")
     if out is None:
-        out = _ctx.empty(((batch, M, N) if a.ndim == 3 else (M, N)), dtype=a.dtype, device=a.device)
+        recording = _ctx.runtime.tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias))
+        out = _ctx.empty(
+            ((batch, M, N) if a.ndim == 3 else (M, N)), dtype=a.dtype, device=a.device, requires_grad=recording
+        )
     M_c, N_c, ldc, batch_c, sc = _mat_info(out, False)
     if (M_c, N_c, batch_c) != (M, N, batch):
         raise ValueError(
@@ -338,4 +346,69 @@ def gemm(
     )
     if not ok:
         raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")
+
+    tape = _ctx.runtime.tape
+    if tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias)):
+        if activation is not None or aux is not None or grad_aux is not None or bias_grad is not None or beta != 0.0:
+            raise RuntimeError(
+                "gemm() can only be recorded on a wp.Tape without fused activations or backward epilogues and with beta=0"
+            )
+        _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream)
     return out
+
+
+_colsum_kernel = None
+
+
+def _colsum(dout, grad):
+    """grad[j] += sum over all rows (and batches) of dout[..., j]."""
+    global _colsum_kernel
+    import warp as wp  # noqa: PLC0415
+
+    if _colsum_kernel is None:
+        rows_per_thread = 64
+
+        @wp.kernel(enable_backward=False, module="unique")
+        def colsum(d: wp.array2d[Any], g: wp.array1d[Any]):
+            r, j = wp.tid()
+            s = d.dtype(0.0)
+            r0 = r * rows_per_thread
+            for k in range(rows_per_thread):
+                i = r0 + k
+                if i < d.shape[0]:
+                    s += d[i, j]
+            wp.atomic_add(g, j, s)
+
+        _colsum_kernel = (colsum, rows_per_thread)
+    kernel, rows_per_thread = _colsum_kernel
+    d2 = dout if dout.ndim == 2 else dout.reshape((-1, dout.shape[-1]))
+    nrb = (d2.shape[0] + rows_per_thread - 1) // rows_per_thread
+    wp.launch(kernel, dim=(nrb, d2.shape[1]), inputs=[d2, grad.flatten()], device=d2.device)
+
+
+def _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream):
+    """Record the adjoint of ``out = alpha * op(a) @ op(b) + bias`` on ``tape``.
+
+    With ``G = d(loss)/d(out)``: ``d op(a) = alpha * G @ op(b)^T``, ``d op(b) = alpha * op(a)^T @ G`` and
+    ``d bias = column sums of G``; gradients are accumulated into the ``grad`` arrays.
+    """
+
+    def backward():
+        g = out.grad
+        if g is None:
+            return
+        kw = {"tf32": tf32, "stream": stream, "alpha": alpha, "beta": 1.0}
+        if a.requires_grad and a.grad is not None:
+            if not trans_a:
+                gemm(g, b, a.grad, trans_b=not trans_b, **kw)  # (M,N) @ op(b)^T
+            else:
+                gemm(b, g, a.grad, trans_a=trans_b, trans_b=True, **kw)  # a.grad (K,M) += op(b) @ G^T
+        if b.requires_grad and b.grad is not None:
+            if not trans_b:
+                gemm(a, g, b.grad, trans_a=not trans_a, **kw)  # (K,N) = op(a)^T @ G
+            else:
+                gemm(g, a, b.grad, trans_a=True, trans_b=trans_a, **kw)  # b.grad (N,K) += G^T @ op(a)
+        if bias is not None and bias.requires_grad and bias.grad is not None:
+            _colsum(g, bias.grad)
+
+    tape.record_func(backward, [x for x in (a, b, out, bias) if x is not None and x.requires_grad])
