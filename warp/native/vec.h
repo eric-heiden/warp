@@ -538,6 +538,17 @@ inline CUDA_CALLABLE Type tensordot(vec_t<Length, Type> a, vec_t<Length, Type> b
 }
 
 
+// Element read through a pointer to a vector (e.g. a field of a struct kernel argument) with a runtime index.
+// Unlike extract(load(ptr), idx), this does not copy the whole vector into a local variable first, which would
+// force it into local memory when idx is not a compile-time constant.
+template <unsigned Length, typename Type> inline CUDA_CALLABLE Type extract_ref(const vec_t<Length, Type>* a, int idx)
+{
+    if (idx < 0) {
+        idx += Length;
+    }
+    return a->c[idx];
+}
+
 template <unsigned Length, typename Type> inline CUDA_CALLABLE Type extract(const vec_t<Length, Type>& a, int idx)
 {
 #ifndef NDEBUG

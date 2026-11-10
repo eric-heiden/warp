@@ -1,0 +1,1 @@
+Speed up reading an element of a vector or matrix field of a struct argument with a runtime index (for example `s.table[j]`) in kernels that do not need its gradient: the element is now read in place instead of copying the whole vector or matrix into local memory first, which made such kernels several times slower on CUDA devices.

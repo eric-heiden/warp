@@ -269,6 +269,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_special_values import TestSpecialValues
     from warp.tests.test_static import TestStatic
     from warp.tests.test_struct import TestStruct
+    from warp.tests.test_struct_vec_index import TestStructVecIndex
     from warp.tests.test_subscript_types import TestSubscriptTypes
     from warp.tests.test_tape import TestTape
     from warp.tests.test_template_launch_bounds import TestTemplateLaunchBounds
@@ -482,6 +483,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestStatic,
         TestStreams,
         TestStruct,
+        TestStructVecIndex,
         TestSubscriptTypes,
         TestSyncErrors,
         TestTape,

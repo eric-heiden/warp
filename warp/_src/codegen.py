@@ -5006,6 +5006,44 @@ class Adjoint:
         else:
             return tuple(adj.eval(x) for x in nodes)
 
+    def emit_extract_by_reference(adj, target, target_type, indices):
+        """Read one element of a referenced vector/matrix without materializing the whole value.
+
+        ``v = s.vec_field[i]`` on a struct argument used to load (copy) the full vector before indexing it. With a
+        runtime index the copy lives in local memory, which makes such reads very slow on GPUs. Reading through the
+        reference avoids the copy. Only used when no adjoint is needed for the element: integer elements, or
+        float elements in code generated without a backward pass.
+        """
+        if not is_reference(target.type):
+            return None
+        if not (type_is_vector(target_type) and len(indices) == 1) and not (
+            type_is_matrix(target_type) and len(indices) == 2
+        ):
+            return None
+        if not all(warp._src.types.type_is_int(strip_reference(x.type)) for x in indices):
+            return None
+        if all(isinstance(x, Var) and x.constant is not None for x in indices):
+            return None  # constant indices already compile to register accesses
+        scalar_type = target_type._wp_scalar_type_
+        if warp._src.types.type_is_int(scalar_type):
+            needs_adjoint = False
+        elif getattr(adj, "is_user_function", False):
+            # functions may later be called from a backward-enabled kernel: require a forward-only module
+            needs_adjoint = (
+                adj.builder_options.get("enable_backward", True)
+                or adj.used_by_backward_kernel
+                or adj.force_adjoint_codegen
+            )
+        else:
+            # kernels: build_kernel() sets used_by_backward_kernel from the merged module + kernel options
+            needs_adjoint = adj.used_by_backward_kernel or adj.force_adjoint_codegen
+        if needs_adjoint:
+            return None
+        idx = [adj.load(x) for x in indices]
+        out = adj.add_var(scalar_type)
+        adj.add_forward(f"{out.emit()} = wp::extract_ref({target.emit()}, {', '.join(i.emit() for i in idx)});")
+        return out
+
     def emit_indexing(adj, target, indices, *, as_target=False):
         target_type = strip_reference(target.type)
         indices = adj.eval_indices(target_type, indices)
@@ -5085,6 +5123,8 @@ class Adjoint:
                     origin = origin.extend_index(indices if type_is_matrix(target_type) else indices[0])
                 return adj.array_slot_reference(slot, origin)
             # handles non-array type indexing, e.g: vec3, mat33, etc
+            if not as_target and (out := adj.emit_extract_by_reference(target, target_type, indices)) is not None:
+                return out
             out = adj.add_builtin_call("extract", [target, *indices])
             if origin := adj.reference_origin_for_var(target):
                 index_types_are_int = all(warp._src.types.type_is_int(strip_reference(x.type)) for x in indices)

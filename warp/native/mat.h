@@ -561,6 +561,19 @@ inline CUDA_CALLABLE vec_t<Cols, Type> extract(const mat_t<Rows, Cols, Type>& m,
     return ret;
 }
 
+// Element read through a pointer to a matrix without copying the matrix (see extract_ref for vectors).
+template <unsigned Rows, unsigned Cols, typename Type>
+inline CUDA_CALLABLE Type extract_ref(const mat_t<Rows, Cols, Type>* m, int row, int col)
+{
+    if (row < 0) {
+        row += Rows;
+    }
+    if (col < 0) {
+        col += Cols;
+    }
+    return m->data[row][col];
+}
+
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE Type extract(const mat_t<Rows, Cols, Type>& m, int row, int col)
 {
