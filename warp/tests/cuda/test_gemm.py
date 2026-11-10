@@ -150,6 +150,19 @@ def test_gemm_tape_backward(test, device):
 devices = get_selected_cuda_test_devices(mode="basic") if _cublaslt_available() else []
 
 
+def test_gemm_record_tape_false(test, device):
+    rng = np.random.default_rng(3)
+    a = wp.array(rng.standard_normal((8, 5)).astype(np.float32), device=device, requires_grad=True)
+    b = wp.array(rng.standard_normal((5, 6)).astype(np.float32), device=device, requires_grad=True)
+    tape = wp.Tape()
+    with tape:
+        out = wp.gemm(a, b, record_tape=False)
+    # nothing is recorded, and the output allocated by the call does not require gradients
+    test.assertEqual(len(tape.launches), 0)
+    test.assertFalse(out.requires_grad)
+    np.testing.assert_allclose(out.numpy(), a.numpy() @ b.numpy(), rtol=1e-5, atol=1e-5)
+
+
 class TestGemm(unittest.TestCase):
     pass
 
@@ -161,6 +174,7 @@ for _name, _fn in [
     ("test_gemm_batched_and_misaligned", test_gemm_batched_and_misaligned),
     ("test_gemm_graph_capture", test_gemm_graph_capture),
     ("test_gemm_tape_backward", test_gemm_tape_backward),
+    ("test_gemm_record_tape_false", test_gemm_record_tape_false),
 ]:
     add_function_test(TestGemm, _name, _fn, devices=devices, check_output=False)
 

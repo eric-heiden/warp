@@ -184,6 +184,7 @@ def gemm(
     tf32: bool = False,
     autotune: int = 8,
     stream=None,
+    record_tape: bool = True,
 ):
     """Compute ``out = activation(alpha * op(a) @ op(b) + bias) + beta * out`` with cuBLASLt.
 
@@ -210,6 +211,9 @@ def gemm(
         autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
             the fastest is kept. Use 0 or 1 to disable.
         stream: CUDA stream to launch on, defaults to the current stream of the device.
+        record_tape: Whether to record the adjoint on the active :class:`warp.Tape` (if any). Pass ``False`` when
+            the caller records its own backward pass (e.g. with :meth:`warp.Tape.record_func`), like
+            ``record_tape`` of :func:`warp.launch`.
 
     When a :class:`warp.Tape` is recording and ``a``, ``b`` or ``bias`` require gradients, the adjoint GEMMs (and
     the bias column sums) are recorded on the tape, so ``tape.backward()`` accumulates into their ``grad`` arrays.
@@ -228,7 +232,11 @@ def gemm(
     if K != K2 or batch != batch_b:
         raise ValueError(f"gemm() shape mismatch: op(a) is ({M},{K}), op(b) is ({K2},{N})")
     if out is None:
-        recording = _ctx.runtime.tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias))
+        recording = (
+            record_tape
+            and _ctx.runtime.tape is not None
+            and any(x is not None and x.requires_grad for x in (a, b, bias))
+        )
         out = _ctx.empty(
             ((batch, M, N) if a.ndim == 3 else (M, N)), dtype=a.dtype, device=a.device, requires_grad=recording
         )
@@ -347,7 +355,7 @@ def gemm(
     if not ok:
         raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")
 
-    tape = _ctx.runtime.tape
+    tape = _ctx.runtime.tape if record_tape else None
     if tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias)):
         if activation is not None or aux is not None or grad_aux is not None or bias_grad is not None or beta != 0.0:
             raise RuntimeError(
