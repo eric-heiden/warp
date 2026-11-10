@@ -77,7 +77,11 @@ struct Plan {
     bool has_aux = false;
     bool has_bgrad = false;
     size_t ws_needed = 0;
+    std::vector<cublasLtMatmulAlgo_t> algos;  // heuristic candidates (best first)
+    bool tuned = true;
 };
+
+constexpr int MAX_CANDIDATES = 16;
 
 bool lt_ok(cublasStatus_t s, const char* what)
 {
@@ -158,7 +162,7 @@ WP_API void* wp_cublaslt_plan_create(
     int trans_a, int trans_b, int M, int N, int K,
     int lda, int ldb, int ldc,
     int batch, long long stride_a, long long stride_b, long long stride_c,
-    int epilogue, int bias_type, int aux_ld, int aux_type
+    int epilogue, int bias_type, int aux_ld, int aux_type, int tune_candidates
 )
 {
     if (!g_lib) {
@@ -257,9 +261,9 @@ WP_API void* wp_cublaslt_plan_create(
         return nullptr;
     size_t ws = WORKSPACE_BYTES;
     pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws, sizeof(ws));
-    cublasLtMatmulHeuristicResult_t res[1];
+    cublasLtMatmulHeuristicResult_t res[MAX_CANDIDATES];
     int found = 0;
-    cublasStatus_t st = pfn_cublasLtMatmulAlgoGetHeuristic(dev->handle, p->desc, p->la, p->lb, p->lc, p->ld, pref, 1, res, &found);
+    cublasStatus_t st = pfn_cublasLtMatmulAlgoGetHeuristic(dev->handle, p->desc, p->la, p->lb, p->lc, p->ld, pref, MAX_CANDIDATES, res, &found);
     pfn_cublasLtMatmulPreferenceDestroy(pref);
     if (!lt_ok(st, "AlgoGetHeuristic"))
         return nullptr;
@@ -269,6 +273,11 @@ WP_API void* wp_cublaslt_plan_create(
     }
     p->algo = res[0].algo;
     p->ws_needed = res[0].workspaceSize;
+    for (int i = 0; i < found; ++i)
+        p->algos.push_back(res[i].algo);
+    p->tuned = !(tune_candidates > 1 && found > 1);
+    if (!p->tuned && tune_candidates < (int)p->algos.size())
+        p->algos.resize(tune_candidates);
     return p.release();
 }
 
@@ -289,6 +298,41 @@ WP_API bool wp_cublaslt_plan_run(
         void* a = aux;
         if (!lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &a, sizeof(a)), "AUX_POINTER"))
             return false;
+    }
+    if (!p->tuned && beta == 0.0f) {
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing((cudaStream_t)stream, &cap);
+        if (cap == cudaStreamCaptureStatusNone) {
+            // measure each heuristic candidate and keep the fastest
+            cudaEvent_t e0, e1;
+            cudaEventCreate(&e0);
+            cudaEventCreate(&e1);
+            float best = 1e30f;
+            int best_i = 0;
+            for (size_t i = 0; i < p->algos.size(); ++i) {
+                bool good = true;
+                for (int w = 0; w < 2 && good; ++w)  // warm-up
+                    good = pfn_cublasLtMatmul(p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i], p->workspace, p->workspace_size, (cudaStream_t)stream) == CUBLAS_STATUS_SUCCESS;
+                if (!good)
+                    continue;
+                const int reps = 5;
+                cudaEventRecord(e0, (cudaStream_t)stream);
+                for (int r = 0; r < reps; ++r)
+                    pfn_cublasLtMatmul(p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i], p->workspace, p->workspace_size, (cudaStream_t)stream);
+                cudaEventRecord(e1, (cudaStream_t)stream);
+                cudaEventSynchronize(e1);
+                float ms = 0;
+                cudaEventElapsedTime(&ms, e0, e1);
+                if (ms < best) {
+                    best = ms;
+                    best_i = int(i);
+                }
+            }
+            cudaEventDestroy(e0);
+            cudaEventDestroy(e1);
+            p->algo = p->algos[best_i];
+            p->tuned = true;
+        }
     }
     // Lt A = our B, Lt B = our A
     return lt_ok(
@@ -319,7 +363,7 @@ WP_API void wp_cublaslt_plan_destroy(void* plan)
 
 extern "C" {
 WP_API int wp_cublaslt_init(const char*) { return 0; }
-WP_API void* wp_cublaslt_plan_create(void*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, long long, long long, long long, int, int, int, int) { return nullptr; }
+WP_API void* wp_cublaslt_plan_create(void*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, long long, long long, long long, int, int, int, int, int) { return nullptr; }
 WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, const void*, void*, float, float) { return false; }
 WP_API void wp_cublaslt_plan_destroy(void*) {}
 }

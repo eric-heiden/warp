@@ -74,7 +74,7 @@ def _setup_signatures(core):
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # ta, tb, M, N, K
         ctypes.c_int, ctypes.c_int, ctypes.c_int,  # lda ldb ldc
         ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_longlong,  # batch, strides
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # epilogue, bias_type, aux_ld, aux_type
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # epilogue, bias_type, aux_ld, aux_type, tune
     ]
     core.wp_cublaslt_plan_create.restype = ctypes.c_void_p
     core.wp_cublaslt_plan_run.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_float, ctypes.c_float]
@@ -144,7 +144,10 @@ def gemm(
     bias=None,
     activation: str | None = None,
     aux=None,
+    grad_aux=None,
+    bias_grad=None,
     tf32: bool = False,
+    autotune: int = 8,
     stream=None,
 ):
     """Compute ``out = activation(alpha * op(a) @ op(b) + bias) + beta * out`` with cuBLASLt.
@@ -162,8 +165,13 @@ def gemm(
         trans_b: Use the transpose of ``b``.
         bias: Optional 1D array of length ``N`` added to each output row (fused epilogue).
         activation: Optional fused activation: ``"relu"`` or ``"gelu"`` (tanh approximation).
-        aux: Optional output buffer storing the pre-activation data needed for a fused activation backward pass.
+        aux: Optional output buffer ``(M, N)`` storing the pre-activation data needed for a fused activation backward pass.
+        grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * gelu'(grad_aux)`` where ``grad_aux`` is
+            the pre-activation buffer saved by a forward call with ``aux``. Requires ``activation="gelu"``.
+        bias_grad: Optional 1D output array of length ``N`` receiving the column sums of the result when ``grad_aux`` is used.
         tf32: Allow TF32 tensor cores for float32 inputs.
+        autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
+            the fastest is kept. Use 0 or 1 to disable.
         stream: CUDA stream to launch on, defaults to the current stream of the device.
 
     Returns:
@@ -196,13 +204,19 @@ def gemm(
             raise ValueError("aux requires an activation")
         ep = {("relu", True): _EP_RELU_AUX_BIAS, ("relu", False): _EP_RELU_AUX,
               ("gelu", True): _EP_GELU_AUX_BIAS, ("gelu", False): _EP_GELU_AUX}[(activation, bias is not None)]
-        aux_ld = aux.strides[0] // aux.strides[1] if activation == "gelu" else N
+    if grad_aux is not None:
+        if activation != "gelu" or aux is not None:
+            raise ValueError("grad_aux requires activation='gelu' and no aux output")
+        ep = _EP_DGELU_BGRAD if bias_grad is not None else _EP_DGELU
+        aux_ld = N
+    elif aux is not None:
+        aux_ld = N
     key = (a.device.context, dt, compute, trans_a, trans_b, M, N, K, lda, ldb, ldc, batch, sa, sb, sc, ep, aux_ld)
     plan = _plans.get(key)
     if plan is None:
         plan = _ctx.runtime.core.wp_cublaslt_plan_create(
             a.device.context, dt, dt, dt, compute, scale, int(trans_a), int(trans_b), M, N, K,
-            lda, ldb, ldc, batch, sa, sb, sc, ep, dt, aux_ld, dt,
+            lda, ldb, ldc, batch, sa, sb, sc, ep, dt, aux_ld, dt, autotune,
         )
         if not plan:
             raise RuntimeError(f"gemm() failed to create a cuBLASLt plan: {_ctx.runtime.core.wp_get_error_string().decode()}")
@@ -212,8 +226,9 @@ def gemm(
     else:
         stream_ptr = stream.cuda_stream
     ok = _ctx.runtime.core.wp_cublaslt_plan_run(
-        plan, stream_ptr, a.ptr, b.ptr, out.ptr, bias.ptr if bias is not None else None,
-        aux.ptr if aux is not None else None, float(alpha), float(beta),
+        plan, stream_ptr, a.ptr, b.ptr, out.ptr,
+        (bias_grad.ptr if bias_grad is not None else (bias.ptr if bias is not None else None)),
+        (grad_aux.ptr if grad_aux is not None else (aux.ptr if aux is not None else None)), float(alpha), float(beta),
     )
     if not ok:
         raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")
