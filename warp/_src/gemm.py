@@ -49,19 +49,35 @@ _plans: dict = {}
 
 
 def _lib_candidates():
+    """Candidate cuBLASLt libraries, newest major version first.
+
+    Newer cuBLASLt releases carry native kernels for newer GPU architectures (older ones fall back to
+    forward-compatible PTX kernels), so CUDA 13 libraries are preferred over CUDA 12 ones, and pip wheels
+    (``nvidia-cublas``) or the configured CUDA toolkit are preferred over whatever the loader finds first.
+    """
     env = os.environ.get("WARP_CUBLASLT_PATH")
     if env:
         yield env
-    yield from ("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so", "cublasLt64_13.dll", "cublasLt64_12.dll")
-    pats = ("nvidia/cu13/lib/libcublasLt.so*", "nvidia/cublas/lib/libcublasLt.so*", "nvidia/cu12/lib/libcublasLt.so*")
-    for base in sys.path:
-        for p in pats:
-            yield from sorted(glob.glob(os.path.join(base, p)), reverse=True)
-    for var in ("WARP_CUDA_PATH", "CUDA_HOME", "CUDA_PATH"):
-        root = os.environ.get(var)
-        if root:
-            yield from sorted(glob.glob(os.path.join(root, "lib*", "libcublasLt.so*")), reverse=True)
-            yield from sorted(glob.glob(os.path.join(root, "targets", "*", "lib", "libcublasLt.so*")), reverse=True)
+
+    def found(patterns):
+        for base in sys.path:
+            for p in patterns:
+                yield from sorted(glob.glob(os.path.join(base, p)), reverse=True)
+        for var in ("WARP_CUDA_PATH", "CUDA_HOME", "CUDA_PATH"):
+            root = os.environ.get(var)
+            if root:
+                for p in patterns:
+                    name = os.path.basename(p)
+                    yield from sorted(glob.glob(os.path.join(root, "lib*", name)), reverse=True)
+                    yield from sorted(glob.glob(os.path.join(root, "targets", "*", "lib", name)), reverse=True)
+
+    for major in ("13", "12"):
+        yield from found(
+            (f"nvidia/cu{major}/lib/libcublasLt.so.{major}*", f"nvidia/cublas/lib/libcublasLt.so.{major}*")
+        )
+        yield f"libcublasLt.so.{major}"
+        yield f"cublasLt64_{major}.dll"
+    yield "libcublasLt.so"
 
 
 def _setup_signatures(core):
