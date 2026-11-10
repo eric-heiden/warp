@@ -3705,6 +3705,9 @@ class ModuleBuilder:
 
     def build_meta(self):
         meta = {}
+        if self.options.get("enable_pdl"):
+            # kernels carry the griddepcontrol.wait prologue and may be launched with PDL
+            meta["enable_pdl"] = True
 
         for kernel in self.kernels:
             forward_name = warp._src.codegen.cuda_kernel_forward_name(kernel)
@@ -3910,6 +3913,8 @@ class ModuleBuilder:
         else:
             extra_preamble = self.options.get("extra_cuda_preamble", "")
             module_header = warp._src.codegen.cuda_module_header.format(block_dim=self.options["block_dim"])
+            if self.options.get("enable_pdl"):
+                module_header = "#define WP_ENABLE_PDL 1\n" + module_header
 
         source = type_defines + module_header + extra_preamble + warp._src.codegen.codegen_cast_macros + source
 
@@ -4039,6 +4044,12 @@ class ModuleExec:
                 )
             else:
                 backward_kernel = None
+
+            # kernels of modules compiled with a PDL prologue are launched with programmatic dependent launch
+            if self.meta.get("enable_pdl"):
+                runtime.core.wp_cuda_set_kernel_pdl(forward_kernel, 1)
+                if backward_kernel:
+                    runtime.core.wp_cuda_set_kernel_pdl(backward_kernel, 1)
 
             # look up the required shared memory size for each kernel from module metadata
             forward_smem_bytes = self.meta[forward_name + "_smem_bytes"]
@@ -4269,6 +4280,7 @@ class Module:
             "deterministic": warp.config.deterministic,
             "deterministic_max_records": warp.config.deterministic_max_records,
             "default_grid_stride": None,  # None means inherit warp.config.default_grid_stride
+            "enable_pdl": None,  # None means inherit warp.config.enable_pdl
         }
 
         # Module dependencies are determined by scanning each function
@@ -4341,6 +4353,8 @@ class Module:
 
         if options["default_grid_stride"] is None:
             options["default_grid_stride"] = config.default_grid_stride
+        if options.get("enable_pdl") is None:
+            options["enable_pdl"] = config.enable_pdl
 
         # Fold in global config flags that affect compilation
         options["verify_fp"] = config.verify_fp
@@ -5561,6 +5575,85 @@ class CudaMempoolAllocator:
         runtime.core.wp_free_device_async(self.device.context, ptr, None)
 
 
+class CaptureArenaAllocator:
+    """Graph-owned memory arena serving allocations made during CUDA graph capture.
+
+    Installed on a device by :func:`capture_begin` with ``static_alloc=True``. Instead of recording
+    stream-ordered allocation and free nodes in the graph, allocations are carved out of device memory
+    chunks owned by the arena (allocated with ``cudaMalloc()`` under a temporarily relaxed capture mode).
+    This removes memory-allocation nodes from the graph and makes allocating code legal inside conditional
+    graph bodies (:func:`capture_if`, :func:`capture_while`), where allocation nodes are not supported.
+
+    Blocks freed during the capture are reused by later allocations of the same size. This is safe for
+    captures whose work is ordered on a single stream, which is the common case.
+
+    The arena is referenced by the resulting :class:`Graph` and by every array allocated from it; its
+    memory is released when the last of them is destroyed.
+    """
+
+    deallocate_requires_context_guard = False
+    memory_kind = MemoryKind.CUDA_DEVICE
+    CHUNK_BYTES = 16 << 20
+    ALIGN = 256
+
+    def __init__(self, device, fallback):
+        self.device = device
+        self.context = device.context
+        self.fallback = fallback
+        self.chunks: list[tuple[int, int]] = []
+        self._cur = 0
+        self._off = 0
+        self._size = 0
+        self._free: dict[int, list[int]] = {}
+        self.bytes_reserved = 0
+        self.bytes_live = 0
+
+    def _owns(self, ptr: int) -> bool:
+        for base, size in self.chunks:
+            if base <= ptr < base + size:
+                return True
+        return False
+
+    def allocate(self, size_in_bytes: int) -> int:
+        n = max(self.ALIGN, (size_in_bytes + self.ALIGN - 1) // self.ALIGN * self.ALIGN)
+        lst = self._free.get(n)
+        if lst:
+            self.bytes_live += n
+            return lst.pop()
+        if self._off + n > self._size:
+            chunk = max(self.CHUNK_BYTES, n)
+            ptr = runtime.core.wp_alloc_device_relaxed(self.context, chunk, None)
+            if not ptr:
+                raise RuntimeError(
+                    f"Failed to allocate {chunk} bytes for the graph capture arena on device '{self.device}'"
+                )
+            self.chunks.append((ptr, chunk))
+            self.bytes_reserved += chunk
+            self._cur, self._off, self._size = ptr, 0, chunk
+        ptr = self._cur + self._off
+        self._off += n
+        self.bytes_live += n
+        return ptr
+
+    def deallocate(self, ptr: int, size_in_bytes: int) -> None:
+        if self._owns(ptr):
+            n = max(self.ALIGN, (size_in_bytes + self.ALIGN - 1) // self.ALIGN * self.ALIGN)
+            self._free.setdefault(n, []).append(ptr)
+            self.bytes_live -= n
+        elif self.fallback is not None:
+            self.fallback.deallocate(ptr, size_in_bytes)
+
+    def __del__(self):
+        try:
+            if runtime is None or runtime.core is None:
+                return
+            for base, _ in self.chunks:
+                runtime.core.wp_free_device_default(self.context, base)
+            self.chunks = []
+        except (TypeError, AttributeError):
+            pass
+
+
 class CudaManagedAllocator:
     """Allocator that creates CUDA managed-memory arrays.
 
@@ -6571,6 +6664,10 @@ class Graph:
 
         # APIC loaded graph (from .wrp file)
         self._native_graph: ctypes.c_void_p | None = None  # APICGraph*
+
+        # graph-owned capture arena (static_alloc=True captures)
+        self._arena: CaptureArenaAllocator | None = None
+        self._arena_saved_allocator = None
         self._params: dict = {}  # name -> {"size": int}
 
     def __del__(self):
@@ -6888,6 +6985,8 @@ class Runtime:
             self.core.wp_alloc_device.restype = ctypes.c_void_p
             self.core.wp_alloc_device_default.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
             self.core.wp_alloc_device_default.restype = ctypes.c_void_p
+            self.core.wp_alloc_device_relaxed.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+            self.core.wp_alloc_device_relaxed.restype = ctypes.c_void_p
             self.core.wp_alloc_device_async.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_size_t,
@@ -8517,6 +8616,8 @@ class Runtime:
             self.core.wp_cuda_get_max_shared_memory.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_get_max_shared_memory.restype = ctypes.c_int
 
+            self.core.wp_cuda_set_kernel_pdl.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self.core.wp_cuda_set_kernel_pdl.restype = None
             self.core.wp_cuda_configure_kernel_shared_memory.argtypes = [ctypes.c_void_p, ctypes.c_int]
             self.core.wp_cuda_configure_kernel_shared_memory.restype = ctypes.c_bool
 
@@ -13489,6 +13590,7 @@ def capture_begin(
     external: bool = False,
     apic: bool = False,
     capture_mode: CaptureMode = CaptureMode.THREAD_LOCAL,
+    static_alloc: bool = False,
 ):
     """Begin capture of a graph.
 
@@ -13524,6 +13626,11 @@ def capture_begin(
           :attr:`CaptureMode.RELAXED` when composing with libraries that
           may call capture-unsafe CUDA runtime APIs during the capture
           (e.g. lazy context initialization). Ignored on CPU devices.
+        static_alloc: If ``True`` (CUDA only), serve memory allocations made during the capture from a
+          graph-owned :class:`CaptureArenaAllocator` instead of recording memory-allocation nodes. This keeps
+          allocation and free nodes out of the graph and allows code that allocates temporaries to run inside
+          :func:`capture_if` / :func:`capture_while` bodies. The memory stays reserved while the graph, or any
+          array allocated during the capture, is alive.
     """
     # IMPORTANT: Keep imports out of capture_begin's shared path. Some hosts retain import
     # tracebacks, which can keep large objects in caller frames alive.
@@ -13620,6 +13727,12 @@ def capture_begin(
 
     _register_capture(device, stream, graph, capture_id)
 
+    if static_alloc:
+        arena = CaptureArenaAllocator(device, device.get_allocator())
+        graph._arena = arena
+        graph._arena_saved_allocator = device._custom_allocator
+        device._custom_allocator = arena
+
 
 def capture_end(device: DeviceLike = None, stream: Stream | None = None) -> Graph:
     """End the capture of a graph.
@@ -13658,6 +13771,10 @@ def capture_end(device: DeviceLike = None, stream: Stream | None = None) -> Grap
         raise RuntimeError("Graph capture is not active on this stream")
 
     _unregister_capture(device, stream, graph)
+
+    if getattr(graph, "_arena", None) is not None and device._custom_allocator is graph._arena:
+        device._custom_allocator = graph._arena_saved_allocator
+        graph._arena_saved_allocator = None
 
     # get the graph executable
     g = ctypes.c_void_p()

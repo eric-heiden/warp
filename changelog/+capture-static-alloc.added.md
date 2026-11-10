@@ -1,0 +1,1 @@
+Add a `static_alloc` option to `wp.capture_begin()` and `wp.ScopedCapture` that serves allocations made during the capture from a graph-owned arena instead of graph memory-allocation nodes, which also makes allocating code (for example MuJoCo Warp's `forward()`) usable inside `wp.capture_if()` and `wp.capture_while()` bodies.

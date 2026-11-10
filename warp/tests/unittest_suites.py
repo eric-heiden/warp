@@ -100,15 +100,18 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.cuda.test_async import TestAsync
     from warp.tests.cuda.test_capture_mode import TestCaptureMode
     from warp.tests.cuda.test_capture_release import TestCaptureRelease
+    from warp.tests.cuda.test_capture_static_alloc import TestCaptureStaticAlloc
     from warp.tests.cuda.test_clang_cuda import TestClangCUDA
     from warp.tests.cuda.test_cluster_dim import TestClusterDim
     from warp.tests.cuda.test_cuda_arch_suffix import TestCudaArchSuffix
     from warp.tests.cuda.test_cuda_max_registers import TestCudaMaxRegisters
     from warp.tests.cuda.test_cuda_smem_spilling import TestCudaSmemSpilling
+    from warp.tests.cuda.test_gemm import TestGemm
     from warp.tests.cuda.test_kernel_attributes import TestKernelAttributes
     from warp.tests.cuda.test_mempool import TestMempool
     from warp.tests.cuda.test_multigpu import TestMultiGPU
     from warp.tests.cuda.test_occupancy import TestOccupancy
+    from warp.tests.cuda.test_pdl import TestPDL
     from warp.tests.cuda.test_peer import TestPeer
     from warp.tests.cuda.test_pinned import TestPinned
     from warp.tests.cuda.test_streams import TestStreams
@@ -343,6 +346,9 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestBuiltinsResolution,
         TestBvh,
         TestCaptureMode,
+        TestCaptureStaticAlloc,
+        TestGemm,
+        TestPDL,
         TestCaptureRelease,
         TestClangCUDA,
         TestClosestPointEdgeEdgeMethods,

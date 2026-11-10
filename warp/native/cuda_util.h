@@ -140,6 +140,8 @@ CUresult cuLaunchKernel_f(
     void** kernelParams,
     void** extra
 );
+CUresult cuLaunchKernelEx_f(const CUlaunchConfig* config, CUfunction f, void** kernelParams, void** extra);
+bool cuLaunchKernelEx_available();
 CUresult cuOccupancyMaxPotentialBlockSize_f(
     int* minGridSize,
     int* blockSize,

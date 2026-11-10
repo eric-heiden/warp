@@ -112,6 +112,7 @@ from warp._src.context import overload as overload
 from warp._src.types import constant as constant
 from warp._src.types import address_of as address_of
 from warp._src.utils import map as map
+from warp._src.gemm import gemm as gemm
 from warp._src.builtins import static as static
 from warp._src.context import Kernel as Kernel
 from warp._src.context import Function as Function

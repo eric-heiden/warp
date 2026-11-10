@@ -1990,6 +1990,15 @@ template <typename T> CUDA_CALLABLE inline bool unot(const T& b) { return !b; }
 
 static constexpr int LAUNCH_MAX_DIMS = 4;  // should match types.py
 
+// Programmatic dependent launch: wait for the preceding grid (and its memory operations) to complete. Emitted at
+// the start of every kernel of modules compiled with the "enable_pdl" option; a no-op when the kernel was not
+// launched with programmatic stream serialization.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && defined(WP_ENABLE_PDL)
+#define WP_PDL_WAIT() asm volatile("griddepcontrol.wait;" ::: "memory")
+#else
+#define WP_PDL_WAIT()
+#endif
+
 template <int N> struct launch_bounds_t {
     static_assert(N > 0 && N <= LAUNCH_MAX_DIMS, "launch_bounds_t<N> only supports 1-4 dimensions");
 

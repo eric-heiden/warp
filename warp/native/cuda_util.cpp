@@ -112,6 +112,7 @@ static PFN_cuModuleLoadDataEx_v2010 pfn_cuModuleLoadDataEx;
 static PFN_cuModuleUnload_v2000 pfn_cuModuleUnload;
 static PFN_cuModuleGetFunction_v2000 pfn_cuModuleGetFunction;
 static PFN_cuLaunchKernel_v4000 pfn_cuLaunchKernel;
+static PFN_cuLaunchKernelEx_v11060 pfn_cuLaunchKernelEx;
 static PFN_cuOccupancyMaxPotentialBlockSize_v6050 pfn_cuOccupancyMaxPotentialBlockSize;
 static PFN_cuOccupancyMaxActiveClusters_v11070 pfn_cuOccupancyMaxActiveClusters;
 static PFN_cuMemcpyPeerAsync_v4000 pfn_cuMemcpyPeerAsync;
@@ -288,6 +289,7 @@ bool init_cuda_driver()
     get_driver_entry_point("cuModuleUnload", 2000, &(void*&)pfn_cuModuleUnload);
     get_driver_entry_point("cuModuleGetFunction", 2000, &(void*&)pfn_cuModuleGetFunction);
     get_driver_entry_point("cuLaunchKernel", 4000, &(void*&)pfn_cuLaunchKernel);
+    get_driver_entry_point("cuLaunchKernelEx", 11060, &(void*&)pfn_cuLaunchKernelEx);
     get_driver_entry_point("cuOccupancyMaxPotentialBlockSize", 6050, &(void*&)pfn_cuOccupancyMaxPotentialBlockSize);
     get_driver_entry_point("cuOccupancyMaxActiveClusters", 11070, &(void*&)pfn_cuOccupancyMaxActiveClusters);
     get_driver_entry_point("cuMemcpyPeerAsync", 4000, &(void*&)pfn_cuMemcpyPeerAsync);
@@ -888,6 +890,13 @@ CUresult cuLaunchKernel_f(
                                 )
                               : DRIVER_ENTRY_POINT_ERROR;
 }
+
+CUresult cuLaunchKernelEx_f(const CUlaunchConfig* config, CUfunction f, void** kernelParams, void** extra)
+{
+    return pfn_cuLaunchKernelEx ? pfn_cuLaunchKernelEx(config, f, kernelParams, extra) : DRIVER_ENTRY_POINT_ERROR;
+}
+
+bool cuLaunchKernelEx_available() { return pfn_cuLaunchKernelEx != nullptr; }
 
 CUresult cuOccupancyMaxPotentialBlockSize_f(
     int* minGridSize,

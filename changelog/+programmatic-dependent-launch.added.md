@@ -1,0 +1,1 @@
+Add `wp.config.enable_pdl` and the `"enable_pdl"` module option to compile kernels with a programmatic dependent launch prologue and launch them with PDL on compute capability 9.0+ devices, reducing the per-kernel cost of graphs made of many small dependent kernels.

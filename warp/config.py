@@ -265,6 +265,16 @@ register pressure, but ``max_blocks`` cannot be capped). Lowest precedence: a pe
 ``@wp.kernel(grid_stride=...)`` argument or the module ``"default_grid_stride"`` option overrides it.
 """
 
+enable_pdl: bool = False
+"""Compile CUDA kernels with a programmatic dependent launch (PDL) prologue and launch them with PDL.
+
+Each kernel begins with ``griddepcontrol.wait``, which waits for the preceding kernel on the stream (or in the
+captured graph) to complete before executing, so results are unchanged. Launches set the programmatic stream
+serialization attribute, which lets the GPU overlap a kernel's launch processing with the tail of its predecessor.
+This reduces the per-kernel cost of graphs made of many small, dependent kernels (for example a MuJoCo Warp step).
+Requires compute capability 9.0+ (the prologue is a no-op elsewhere). The ``"enable_pdl"`` module option overrides it.
+"""
+
 enable_mathdx_gemm: bool = True
 """Use libmathdx (cuBLASDx) for tile_matmul on GPU when available.
 

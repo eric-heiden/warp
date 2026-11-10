@@ -1,0 +1,1 @@
+Add `wp.gemm()`, a CUDA-graph-capturable GEMM backed by a runtime-loaded cuBLASLt (no link-time dependency) with per-shape plan caching, autotuning, pointer-alignment-aware algorithm selection, and fused bias/ReLU/GELU epilogues including backward (dGELU and bias-gradient) epilogues.

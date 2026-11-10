@@ -7592,7 +7592,8 @@ cuda_kernel_template_forward = """
 {line_directive}extern "C" {launch_bounds_str}{cluster_dims_str}__global__ void {max_registers_str}{forward_name}(
     {forward_args})
 {{
-{forward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
+{forward_smem_spilling_str}{line_directive}    WP_PDL_WAIT();
+{line_directive}    wp::tile_shared_storage_t tile_mem;
 
 {line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
 {line_directive}    if (_idx >= dim.size) return;
@@ -7608,7 +7609,8 @@ cuda_kernel_template_backward = """
 {line_directive}extern "C" {launch_bounds_str}{cluster_dims_str}__global__ void {max_registers_str}{backward_name}(
     {reverse_args})
 {{
-{backward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
+{backward_smem_spilling_str}{line_directive}    WP_PDL_WAIT();
+{line_directive}    wp::tile_shared_storage_t tile_mem;
 
 {line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
 {line_directive}    if (_idx >= dim.size) return;
@@ -7624,7 +7626,8 @@ cuda_kernel_template_forward_grid_stride = """
 {line_directive}extern "C" {launch_bounds_str}{cluster_dims_str}__global__ void {max_registers_str}{forward_name}(
     {forward_args})
 {{
-{forward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
+{forward_smem_spilling_str}{line_directive}    WP_PDL_WAIT();
+{line_directive}    wp::tile_shared_storage_t tile_mem;
 
 {line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
 {line_directive}         _idx < dim.size;
@@ -7643,7 +7646,8 @@ cuda_kernel_template_backward_grid_stride = """
 {line_directive}extern "C" {launch_bounds_str}{cluster_dims_str}__global__ void {max_registers_str}{backward_name}(
     {reverse_args})
 {{
-{backward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
+{backward_smem_spilling_str}{line_directive}    WP_PDL_WAIT();
+{line_directive}    wp::tile_shared_storage_t tile_mem;
 
 {line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
 {line_directive}         _idx < dim.size;

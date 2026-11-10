@@ -35,6 +35,7 @@ _EP = {
 }
 _EP_RELU_AUX_BIAS, _EP_RELU_AUX, _EP_GELU_AUX_BIAS, _EP_GELU_AUX = 134, 130, 164, 160
 _EP_DRELU_BGRAD, _EP_DRELU, _EP_DGELU_BGRAD, _EP_DGELU = 152, 136, 208, 192
+_EP_BGRADA = 256
 
 _DTYPES = {
     _types.float32: (_CUDA_R_32F, 4),
@@ -51,8 +52,7 @@ def _lib_candidates():
     env = os.environ.get("WARP_CUBLASLT_PATH")
     if env:
         yield env
-    for name in ("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so", "cublasLt64_13.dll", "cublasLt64_12.dll"):
-        yield name
+    yield from ("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so", "cublasLt64_13.dll", "cublasLt64_12.dll")
     pats = ("nvidia/cu13/lib/libcublasLt.so*", "nvidia/cublas/lib/libcublasLt.so*", "nvidia/cu12/lib/libcublasLt.so*")
     for base in sys.path:
         for p in pats:
@@ -70,11 +70,29 @@ def _setup_signatures(core):
     # NB: argument order must match the native signature (see wp_cublaslt_plan_create)
     core.wp_cublaslt_plan_create.argtypes = [
         ctypes.c_void_p,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # a,b,c types, compute, scale
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # ta, tb, M, N, K
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,  # lda ldb ldc
-        ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_longlong,  # batch, strides
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,  # epilogue, bias_type, aux_ld, aux_type, tune
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,  # a,b,c types, compute, scale
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,  # ta, tb, M, N, K
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,  # lda ldb ldc
+        ctypes.c_int,
+        ctypes.c_longlong,
+        ctypes.c_longlong,
+        ctypes.c_longlong,  # batch, strides
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,  # epilogue, bias_type, aux_ld, aux_type, tune, align
     ]
     core.wp_cublaslt_plan_create.restype = ctypes.c_void_p
     core.wp_cublaslt_plan_run.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_float, ctypes.c_float]
@@ -168,7 +186,9 @@ def gemm(
         aux: Optional output buffer ``(M, N)`` storing the pre-activation data needed for a fused activation backward pass.
         grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * gelu'(grad_aux)`` where ``grad_aux`` is
             the pre-activation buffer saved by a forward call with ``aux``. Requires ``activation="gelu"``.
-        bias_grad: Optional 1D output array of length ``N`` receiving the column sums of the result when ``grad_aux`` is used.
+        bias_grad: Optional 1D output array of length ``N``. With ``grad_aux`` it receives the column sums of the result.
+            Without ``grad_aux`` (weight-gradient GEMM ``a.T @ b`` with ``trans_a=True``) it receives the column sums
+            of ``b`` over the reduction dimension, i.e. the bias gradient of a linear layer.
         tf32: Allow TF32 tensor cores for float32 inputs.
         autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
             the fastest is kept. Use 0 or 1 to disable.
@@ -188,7 +208,11 @@ def gemm(
         raise ValueError(f"gemm() shape mismatch: op(a) is ({M},{K}), op(b) is ({K2},{N})")
     if out is None:
         out = _ctx.empty(((batch, M, N) if a.ndim == 3 else (M, N)), dtype=a.dtype, device=a.device)
-    _, _, ldc, batch_c, sc = _mat_info(out, False)
+    M_c, N_c, ldc, batch_c, sc = _mat_info(out, False)
+    if (M_c, N_c, batch_c) != (M, N, batch):
+        raise ValueError(
+            f"gemm() output shape ({batch_c}, {M_c}, {N_c}) does not match the product ({batch}, {M}, {N})"
+        )
     dt, _ = _DTYPES[a.dtype]
     if a.dtype == _types.float64:
         compute, scale = _COMPUTE_64F, _CUDA_R_64F
@@ -202,8 +226,12 @@ def gemm(
     if aux is not None:
         if activation is None:
             raise ValueError("aux requires an activation")
-        ep = {("relu", True): _EP_RELU_AUX_BIAS, ("relu", False): _EP_RELU_AUX,
-              ("gelu", True): _EP_GELU_AUX_BIAS, ("gelu", False): _EP_GELU_AUX}[(activation, bias is not None)]
+        ep = {
+            ("relu", True): _EP_RELU_AUX_BIAS,
+            ("relu", False): _EP_RELU_AUX,
+            ("gelu", True): _EP_GELU_AUX_BIAS,
+            ("gelu", False): _EP_GELU_AUX,
+        }[(activation, bias is not None)]
     if grad_aux is not None:
         if activation != "gelu" or aux is not None:
             raise ValueError("grad_aux requires activation='gelu' and no aux output")
@@ -211,24 +239,86 @@ def gemm(
         aux_ld = N
     elif aux is not None:
         aux_ld = N
-    key = (a.device.context, dt, compute, trans_a, trans_b, M, N, K, lda, ldb, ldc, batch, sa, sb, sc, ep, aux_ld)
+    elif bias_grad is not None:
+        # weight-gradient GEMM out = op(a) @ op(b): fuse the column sums of op(b) over K (the batch) into bias_grad
+        if activation is not None or bias is not None or not trans_a or trans_b:
+            raise ValueError("bias_grad without grad_aux requires trans_a=True, trans_b=False and no bias/activation")
+        ep = _EP_BGRADA
+    # pointer alignment is part of the plan: cuBLASLt algorithms are only valid for the alignment they were chosen for
+    min_align = 256
+    for arr in (a, b, out, bias, aux, grad_aux, bias_grad):
+        if arr is not None and arr.ptr:
+            min_align = min(min_align, arr.ptr & -arr.ptr)
+    for ld_elems in (lda, ldb, ldc):
+        ld_bytes = ld_elems * _DTYPES[a.dtype][1]
+        min_align = min(min_align, ld_bytes & -ld_bytes)
+    key = (
+        a.device.context,
+        min_align,
+        dt,
+        compute,
+        trans_a,
+        trans_b,
+        M,
+        N,
+        K,
+        lda,
+        ldb,
+        ldc,
+        batch,
+        sa,
+        sb,
+        sc,
+        ep,
+        aux_ld,
+    )
     plan = _plans.get(key)
     if plan is None:
         plan = _ctx.runtime.core.wp_cublaslt_plan_create(
-            a.device.context, dt, dt, dt, compute, scale, int(trans_a), int(trans_b), M, N, K,
-            lda, ldb, ldc, batch, sa, sb, sc, ep, dt, aux_ld, dt, autotune,
+            a.device.context,
+            dt,
+            dt,
+            dt,
+            compute,
+            scale,
+            int(trans_a),
+            int(trans_b),
+            M,
+            N,
+            K,
+            lda,
+            ldb,
+            ldc,
+            batch,
+            sa,
+            sb,
+            sc,
+            ep,
+            dt,
+            aux_ld,
+            dt,
+            autotune,
+            min_align,
         )
         if not plan:
-            raise RuntimeError(f"gemm() failed to create a cuBLASLt plan: {_ctx.runtime.core.wp_get_error_string().decode()}")
+            raise RuntimeError(
+                f"gemm() failed to create a cuBLASLt plan: {_ctx.runtime.core.wp_get_error_string().decode()}"
+            )
         _plans[key] = plan
     if stream is None:
         stream_ptr = a.device.stream.cuda_stream
     else:
         stream_ptr = stream.cuda_stream
     ok = _ctx.runtime.core.wp_cublaslt_plan_run(
-        plan, stream_ptr, a.ptr, b.ptr, out.ptr,
+        plan,
+        stream_ptr,
+        a.ptr,
+        b.ptr,
+        out.ptr,
         (bias_grad.ptr if bias_grad is not None else (bias.ptr if bias is not None else None)),
-        (grad_aux.ptr if grad_aux is not None else (aux.ptr if aux is not None else None)), float(alpha), float(beta),
+        (grad_aux.ptr if grad_aux is not None else (aux.ptr if aux is not None else None)),
+        float(alpha),
+        float(beta),
     )
     if not ok:
         raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")

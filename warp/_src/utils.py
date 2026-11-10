@@ -2215,6 +2215,8 @@ class ScopedCapture:
         capture_mode: The :class:`~warp.CaptureMode` to use when opening
             the capture. Defaults to :attr:`CaptureMode.THREAD_LOCAL`.
             See :func:`capture_begin` for details.
+        static_alloc: If ``True``, serve allocations made during the capture from graph-owned memory
+            instead of graph memory-allocation nodes (CUDA only). See :func:`capture_begin` for details.
 
     Attributes:
         graph: The captured graph, available after context exit.
@@ -2241,9 +2243,11 @@ class ScopedCapture:
         external=False,
         apic: bool = False,
         capture_mode: CaptureMode = CaptureMode.THREAD_LOCAL,
+        static_alloc: bool = False,
     ):
         self.device = device
         self.stream = stream
+        self.static_alloc = static_alloc
         self.force_module_load = force_module_load
         self.external = external
         self.apic = apic
@@ -2260,6 +2264,7 @@ class ScopedCapture:
                 external=self.external,
                 apic=self.apic,
                 capture_mode=self.capture_mode,
+                static_alloc=self.static_alloc,
             )
             self.active = True
             return self

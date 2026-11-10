@@ -819,6 +819,27 @@ void* wp_alloc_device_default(void* context, size_t s, const char* tag)
     return ptr;
 }
 
+void* wp_alloc_device_relaxed(void* context, size_t s, const char* tag)
+{
+    // Allocate with cudaMalloc() even while this thread is capturing a CUDA graph: temporarily switch the
+    // thread's capture interaction mode to relaxed so the (capture-unsafe) allocation call is permitted.
+    // Used by graph-owned capture arenas so that captured code can allocate without memory-allocation nodes,
+    // including inside conditional graph bodies where allocation nodes are not supported.
+    ContextGuard guard(context);
+
+    cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+    check_cuda(cudaThreadExchangeStreamCaptureMode(&mode));
+
+    void* ptr = NULL;
+    check_cuda(cudaMalloc(&ptr, s));
+
+    check_cuda(cudaThreadExchangeStreamCaptureMode(&mode));
+
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_DEVICE, wp_cuda_context_get_device_ordinal(context), tag);
+    return ptr;
+}
+
 void wp_free_device_default(void* context, void* ptr)
 {
     if (g_alloc_tracker.enabled && ptr)
@@ -5849,6 +5870,34 @@ void* wp_cuda_get_kernel(void* context, void* module, const char* name)
     return kernel;
 }
 
+// Kernels compiled with a programmatic-dependent-launch prologue (griddepcontrol.wait, see WP_PDL_WAIT in
+// builtin.h). Launches of these kernels set CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION so that the
+// launch of a kernel can overlap the tail of its predecessor on the same stream / in the same graph. Because the
+// kernel waits for full completion (and memory visibility) of its predecessor before executing, this is safe.
+static std::mutex g_pdl_mutex;
+static std::unordered_set<void*> g_pdl_kernels;
+static std::atomic<int> g_pdl_count { 0 };
+
+void wp_cuda_set_kernel_pdl(void* kernel, int enabled)
+{
+    if (!kernel)
+        return;
+    std::lock_guard<std::mutex> lock(g_pdl_mutex);
+    if (enabled)
+        g_pdl_kernels.insert(kernel);
+    else
+        g_pdl_kernels.erase(kernel);
+    g_pdl_count = (int)g_pdl_kernels.size();
+}
+
+static bool kernel_uses_pdl(void* kernel)
+{
+    if (g_pdl_count.load(std::memory_order_relaxed) == 0)
+        return false;
+    std::lock_guard<std::mutex> lock(g_pdl_mutex);
+    return g_pdl_kernels.count(kernel) != 0;
+}
+
 size_t wp_cuda_launch_kernel(
     void* context,
     void* kernel,
@@ -5968,11 +6017,30 @@ size_t wp_cuda_launch_kernel(
     // of cluster_dim, so an empty clustered launch (e.g. a recorded lean launch resized via
     // set_dim(0)) would otherwise be rejected by CUDA.
     CUresult res = CUDA_SUCCESS;
-    if (dim > 0)
-        res = cuLaunchKernel_f(
-            (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
-            static_cast<CUstream>(stream), args, 0
-        );
+    if (dim > 0) {
+        if (kernel_uses_pdl(kernel) && cuLaunchKernelEx_available()) {
+            CUlaunchAttribute attr[1];
+            attr[0].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+            attr[0].value.programmaticStreamSerializationAllowed = 1;
+            CUlaunchConfig cfg = {};
+            cfg.gridDimX = grid_x;
+            cfg.gridDimY = grid_y;
+            cfg.gridDimZ = grid_z;
+            cfg.blockDimX = block_dim;
+            cfg.blockDimY = 1;
+            cfg.blockDimZ = 1;
+            cfg.sharedMemBytes = shared_memory_bytes;
+            cfg.hStream = static_cast<CUstream>(stream);
+            cfg.attrs = attr;
+            cfg.numAttrs = 1;
+            res = cuLaunchKernelEx_f(&cfg, (CUfunction)kernel, args, 0);
+        } else {
+            res = cuLaunchKernel_f(
+                (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
+                static_cast<CUstream>(stream), args, 0
+            );
+        }
+    }
 
     check_cu(res);
 

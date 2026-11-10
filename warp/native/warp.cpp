@@ -1033,6 +1033,7 @@ void wp_free_pinned(void* ptr) { wp_free_host(ptr); }
 void* wp_alloc_device(void* context, size_t s, const char* tag) { return NULL; }
 
 void* wp_alloc_device_default(void* context, size_t s, const char* tag) { return NULL; }
+void* wp_alloc_device_relaxed(void* context, size_t s, const char* tag) { return NULL; }
 
 void* wp_alloc_device_async(void* context, size_t s, void* stream, const char* tag) { return NULL; }
 
@@ -1240,6 +1241,7 @@ WP_API size_t wp_cuda_compile_program(
 WP_API void* wp_cuda_load_module(void* context, const char* ptx) { return NULL; }
 WP_API void wp_cuda_unload_module(void* context, void* module) { }
 WP_API void* wp_cuda_get_kernel(void* context, void* module, const char* name) { return NULL; }
+WP_API void wp_cuda_set_kernel_pdl(void* kernel, int enabled) { }
 WP_API size_t wp_cuda_launch_kernel(
     void* context,
     void* kernel,

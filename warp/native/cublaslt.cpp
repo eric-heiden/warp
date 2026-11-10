@@ -12,20 +12,21 @@
 // calls by swapping the operands: C^T = op(B)^T * op(A)^T.
 
 #include "warp.h"
+
 #include "error.h"
 
 #if WP_ENABLE_CUDA
 
 #include "cuda_util.h"
 
-#include <cublasLt.h>
-#include <cuda_runtime.h>
-
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include <cublasLt.h>
+#include <cuda_runtime.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -158,11 +159,29 @@ WP_API int wp_cublaslt_init(const char* path)
 //   aux_ld / aux_type: leading dimension (row-major, elements per row) of the epilogue auxiliary buffer
 WP_API void* wp_cublaslt_plan_create(
     void* context,
-    int a_type, int b_type, int c_type, int compute, int scale_type,
-    int trans_a, int trans_b, int M, int N, int K,
-    int lda, int ldb, int ldc,
-    int batch, long long stride_a, long long stride_b, long long stride_c,
-    int epilogue, int bias_type, int aux_ld, int aux_type, int tune_candidates
+    int a_type,
+    int b_type,
+    int c_type,
+    int compute,
+    int scale_type,
+    int trans_a,
+    int trans_b,
+    int M,
+    int N,
+    int K,
+    int lda,
+    int ldb,
+    int ldc,
+    int batch,
+    long long stride_a,
+    long long stride_b,
+    long long stride_c,
+    int epilogue,
+    int bias_type,
+    int aux_ld,
+    int aux_type,
+    int tune_candidates,
+    int min_align
 )
 {
     if (!g_lib) {
@@ -183,15 +202,22 @@ WP_API void* wp_cublaslt_plan_create(
     cublasOperation_t opa = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;  // Lt "A" is our B
     cublasOperation_t opb = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;  // Lt "B" is our A
 
-    bool ok = lt_ok(pfn_cublasLtMatmulDescCreate(&p->desc, (cublasComputeType_t)compute, (cudaDataType_t)scale_type), "MatmulDescCreate");
-    ok = ok && lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_TRANSA, &opa, sizeof(opa)), "TRANSA");
-    ok = ok && lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_TRANSB, &opb, sizeof(opb)), "TRANSB");
+    bool ok = lt_ok(
+        pfn_cublasLtMatmulDescCreate(&p->desc, (cublasComputeType_t)compute, (cudaDataType_t)scale_type),
+        "MatmulDescCreate"
+    );
+    ok = ok
+        && lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_TRANSA, &opa, sizeof(opa)), "TRANSA");
+    ok = ok
+        && lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_TRANSB, &opb, sizeof(opb)), "TRANSB");
     if (!ok)
         return nullptr;
 
     if (epilogue != 0) {
         cublasLtEpilogue_t ep = (cublasLtEpilogue_t)epilogue;
-        ok = lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof(ep)), "EPILOGUE");
+        ok = lt_ok(
+            pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof(ep)), "EPILOGUE"
+        );
         // Epilogue enum bit 2 (value 4) means bias, bit 3 (8) relu/gelu... query by known values below.
         switch (ep) {
         case CUBLASLT_EPILOGUE_BIAS:
@@ -203,6 +229,8 @@ WP_API void* wp_cublaslt_plan_create(
             break;
         case CUBLASLT_EPILOGUE_DRELU_BGRAD:
         case CUBLASLT_EPILOGUE_DGELU_BGRAD:
+        case CUBLASLT_EPILOGUE_BGRADA:
+        case CUBLASLT_EPILOGUE_BGRADB:
             p->has_bgrad = true;
             break;
         default:
@@ -224,29 +252,44 @@ WP_API void* wp_cublaslt_plan_create(
         }
         if (ok && (p->has_bias || p->has_bgrad)) {
             cudaDataType_t bt = (cudaDataType_t)bias_type;
-            ok = lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bt, sizeof(bt)), "BIAS_DATA_TYPE");
+            ok = lt_ok(
+                pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bt, sizeof(bt)),
+                "BIAS_DATA_TYPE"
+            );
         }
         if (ok && p->has_aux) {
             int64_t ald = aux_ld;
-            ok = lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &ald, sizeof(ald)), "AUX_LD");
+            ok = lt_ok(
+                pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &ald, sizeof(ald)),
+                "AUX_LD"
+            );
         }
         if (!ok)
             return nullptr;
     }
 
     // layouts (column-major view of our row-major buffers)
-    auto make_layout = [&](cublasLtMatrixLayout_t* l, int type, uint64_t rows, uint64_t cols, int64_t ld, int64_t stride) {
-        if (!lt_ok(pfn_cublasLtMatrixLayoutCreate(l, (cudaDataType_t)type, rows, cols, ld), "LayoutCreate"))
-            return false;
-        if (batch > 1) {
-            int32_t b = batch;
-            if (!lt_ok(pfn_cublasLtMatrixLayoutSetAttribute(*l, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &b, sizeof(b)), "BATCH_COUNT"))
-                return false;
-            if (!lt_ok(pfn_cublasLtMatrixLayoutSetAttribute(*l, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride, sizeof(stride)), "STRIDE"))
-                return false;
-        }
-        return true;
-    };
+    auto make_layout
+        = [&](cublasLtMatrixLayout_t* l, int type, uint64_t rows, uint64_t cols, int64_t ld, int64_t stride) {
+              if (!lt_ok(pfn_cublasLtMatrixLayoutCreate(l, (cudaDataType_t)type, rows, cols, ld), "LayoutCreate"))
+                  return false;
+              if (batch > 1) {
+                  int32_t b = batch;
+                  if (!lt_ok(
+                          pfn_cublasLtMatrixLayoutSetAttribute(*l, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &b, sizeof(b)),
+                          "BATCH_COUNT"
+                      ))
+                      return false;
+                  if (!lt_ok(
+                          pfn_cublasLtMatrixLayoutSetAttribute(
+                              *l, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride, sizeof(stride)
+                          ),
+                          "STRIDE"
+                      ))
+                      return false;
+              }
+              return true;
+          };
     // Lt A = our B: shape (N x K) if !trans_b else (K x N) in column-major
     ok = make_layout(&p->la, b_type, trans_b ? K : N, trans_b ? N : K, ldb, stride_b);
     // Lt B = our A: (K x M) if !trans_a else (M x K)
@@ -261,9 +304,19 @@ WP_API void* wp_cublaslt_plan_create(
         return nullptr;
     size_t ws = WORKSPACE_BYTES;
     pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws, sizeof(ws));
+    if (min_align > 0) {
+        // restrict candidates to algorithms valid for the actual pointer alignment of the operands
+        uint32_t al = (uint32_t)min_align;
+        pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &al, sizeof(al));
+        pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, &al, sizeof(al));
+        pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &al, sizeof(al));
+        pfn_cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &al, sizeof(al));
+    }
     cublasLtMatmulHeuristicResult_t res[MAX_CANDIDATES];
     int found = 0;
-    cublasStatus_t st = pfn_cublasLtMatmulAlgoGetHeuristic(dev->handle, p->desc, p->la, p->lb, p->lc, p->ld, pref, MAX_CANDIDATES, res, &found);
+    cublasStatus_t st = pfn_cublasLtMatmulAlgoGetHeuristic(
+        dev->handle, p->desc, p->la, p->lb, p->lc, p->ld, pref, MAX_CANDIDATES, res, &found
+    );
     pfn_cublasLtMatmulPreferenceDestroy(pref);
     if (!lt_ok(st, "AlgoGetHeuristic"))
         return nullptr;
@@ -284,19 +337,33 @@ WP_API void* wp_cublaslt_plan_create(
 // bias: bias vector for *_BIAS epilogues (length N); for *_BGRAD epilogues this is the output bias gradient.
 // aux: epilogue auxiliary buffer (activation input / mask), or null.
 WP_API bool wp_cublaslt_plan_run(
-    void* plan, void* stream, const void* A, const void* B, void* C, const void* bias, void* aux, float alpha, float beta
+    void* plan,
+    void* stream,
+    const void* A,
+    const void* B,
+    void* C,
+    const void* bias,
+    void* aux,
+    float alpha,
+    float beta
 )
 {
     Plan* p = static_cast<Plan*>(plan);
     ContextGuard guard(p->context);
     if (p->has_bias || p->has_bgrad) {
         const void* b = bias;
-        if (!lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &b, sizeof(b)), "BIAS_POINTER"))
+        if (!lt_ok(
+                pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &b, sizeof(b)),
+                "BIAS_POINTER"
+            ))
             return false;
     }
     if (p->has_aux) {
         void* a = aux;
-        if (!lt_ok(pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &a, sizeof(a)), "AUX_POINTER"))
+        if (!lt_ok(
+                pfn_cublasLtMatmulDescSetAttribute(p->desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &a, sizeof(a)),
+                "AUX_POINTER"
+            ))
             return false;
     }
     if (!p->tuned && beta == 0.0f) {
@@ -312,13 +379,20 @@ WP_API bool wp_cublaslt_plan_run(
             for (size_t i = 0; i < p->algos.size(); ++i) {
                 bool good = true;
                 for (int w = 0; w < 2 && good; ++w)  // warm-up
-                    good = pfn_cublasLtMatmul(p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i], p->workspace, p->workspace_size, (cudaStream_t)stream) == CUBLAS_STATUS_SUCCESS;
+                    good = pfn_cublasLtMatmul(
+                               p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i],
+                               p->workspace, p->workspace_size, (cudaStream_t)stream
+                           )
+                        == CUBLAS_STATUS_SUCCESS;
                 if (!good)
                     continue;
                 const int reps = 5;
                 cudaEventRecord(e0, (cudaStream_t)stream);
                 for (int r = 0; r < reps; ++r)
-                    pfn_cublasLtMatmul(p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i], p->workspace, p->workspace_size, (cudaStream_t)stream);
+                    pfn_cublasLtMatmul(
+                        p->handle, p->desc, &alpha, B, p->la, A, p->lb, &beta, C, p->lc, C, p->ld, &p->algos[i],
+                        p->workspace, p->workspace_size, (cudaStream_t)stream
+                    );
                 cudaEventRecord(e1, (cudaStream_t)stream);
                 cudaEventSynchronize(e1);
                 float ms = 0;
@@ -349,11 +423,16 @@ WP_API void wp_cublaslt_plan_destroy(void* plan)
     Plan* p = static_cast<Plan*>(plan);
     if (!p)
         return;
-    if (p->desc) pfn_cublasLtMatmulDescDestroy(p->desc);
-    if (p->la) pfn_cublasLtMatrixLayoutDestroy(p->la);
-    if (p->lb) pfn_cublasLtMatrixLayoutDestroy(p->lb);
-    if (p->lc) pfn_cublasLtMatrixLayoutDestroy(p->lc);
-    if (p->ld) pfn_cublasLtMatrixLayoutDestroy(p->ld);
+    if (p->desc)
+        pfn_cublasLtMatmulDescDestroy(p->desc);
+    if (p->la)
+        pfn_cublasLtMatrixLayoutDestroy(p->la);
+    if (p->lb)
+        pfn_cublasLtMatrixLayoutDestroy(p->lb);
+    if (p->lc)
+        pfn_cublasLtMatrixLayoutDestroy(p->lc);
+    if (p->ld)
+        pfn_cublasLtMatrixLayoutDestroy(p->ld);
     delete p;
 }
 
@@ -363,9 +442,40 @@ WP_API void wp_cublaslt_plan_destroy(void* plan)
 
 extern "C" {
 WP_API int wp_cublaslt_init(const char*) { return 0; }
-WP_API void* wp_cublaslt_plan_create(void*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, long long, long long, long long, int, int, int, int, int) { return nullptr; }
-WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, const void*, void*, float, float) { return false; }
-WP_API void wp_cublaslt_plan_destroy(void*) {}
+WP_API void* wp_cublaslt_plan_create(
+    void*,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    long long,
+    long long,
+    long long,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int
+)
+{
+    return nullptr;
+}
+WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, const void*, void*, float, float)
+{
+    return false;
+}
+WP_API void wp_cublaslt_plan_destroy(void*) { }
 }
 
 #endif

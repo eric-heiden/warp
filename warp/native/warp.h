@@ -70,6 +70,8 @@ WP_API void* wp_alloc_host(size_t s, const char* tag = nullptr);
 WP_API void* wp_alloc_pinned(size_t s, const char* tag = nullptr);
 WP_API void* wp_alloc_device(void* context, size_t s, const char* tag = nullptr);
 WP_API void* wp_alloc_device_default(void* context, size_t s, const char* tag = nullptr);
+// like wp_alloc_device_default(), but also permitted while the calling thread is capturing a CUDA graph
+WP_API void* wp_alloc_device_relaxed(void* context, size_t s, const char* tag = nullptr);
 WP_API void*
 wp_alloc_device_async(void* context, size_t s, void* stream = WP_CURRENT_STREAM, const char* tag = nullptr);
 WP_API void* wp_alloc_device_managed(void* context, size_t s, const char* tag = nullptr);
@@ -900,6 +902,8 @@ WP_API void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj
 WP_API void* wp_cuda_load_module(void* context, const char* ptx);
 WP_API void wp_cuda_unload_module(void* context, void* module);
 WP_API void* wp_cuda_get_kernel(void* context, void* module, const char* name);
+// Mark a kernel as compiled with a programmatic-dependent-launch prologue (launch it with PDL enabled)
+WP_API void wp_cuda_set_kernel_pdl(void* kernel, int enabled);
 WP_API size_t wp_cuda_launch_kernel(
     void* context,
     void* kernel,
