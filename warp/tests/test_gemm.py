@@ -195,9 +195,7 @@ def test_gemm_argument_checks(test, device):
     b = wp.zeros((3, 2), dtype=float, device=device)
     with test.assertRaisesRegex(TypeError, "dtype"):
         wp.gemm(a, b, wp.zeros((4, 2), dtype=wp.float64, device=device))
-    with test.assertRaisesRegex(ValueError, "aux requires activation='relu' or 'gelu'"):
-        wp.gemm(a, b, aux=wp.zeros((4, 2), dtype=float, device=device))
-    with test.assertRaisesRegex(TypeError, "expected .*uint8"):
+    with test.assertRaisesRegex(ValueError, "aux requires activation='gelu'"):
         wp.gemm(a, b, activation="relu", aux=wp.zeros((4, 2), dtype=float, device=device))
     with test.assertRaisesRegex(ValueError, "shape"):
         wp.gemm(a, a)
@@ -256,75 +254,6 @@ def _with_builtin_kernel(fn):
     return wrapped
 
 
-def _unpack_mask(mask, cols):
-    bits = np.unpackbits(mask, axis=1, bitorder="little")
-    return bits[:, :cols].astype(bool)
-
-
-def test_gemm_relu_mask(test, device):
-    rng = np.random.default_rng(7)
-    for M, N, K in [(64, 48, 32), (33, 130, 20), (16, 64, 64)]:
-        x = rng.standard_normal((M, K)).astype(np.float32)
-        w = rng.standard_normal((K, N)).astype(np.float32)
-        bias = rng.standard_normal(N).astype(np.float32)
-        pre = x @ w + bias
-        mask = wp.zeros(wp.gemm_relu_mask_shape(M, N), dtype=wp.uint8, device=device)
-        y = wp.gemm(
-            wp.array(x, device=device),
-            wp.array(w, device=device),
-            bias=wp.array(bias, device=device),
-            activation="relu",
-            aux=mask,
-        )
-        assert_np_equal(y.numpy(), np.maximum(pre, 0.0), tol=1e-4)
-        bits = _unpack_mask(mask.numpy(), N)
-        sure = np.abs(pre) > 1e-3  # elements far from zero have a definite sign
-        test.assertTrue(np.array_equal(bits[sure], (pre > 0)[sure]))
-        # backward: dx = (dy @ w2^T) * relu'(pre), bias_grad = column sums of dx
-        P = 24
-        w2 = rng.standard_normal((N, P)).astype(np.float32)
-        dy = rng.standard_normal((M, P)).astype(np.float32)
-        db = wp.zeros(N, dtype=float, device=device)
-        dx = wp.gemm(
-            wp.array(dy, device=device),
-            wp.array(w2, device=device),
-            trans_b=True,
-            activation="relu",
-            grad_aux=mask,
-            bias_grad=db,
-        )
-        ref = (dy @ w2.T) * bits
-        assert_np_equal(dx.numpy(), ref, tol=1e-4)
-        assert_np_equal(db.numpy(), ref.sum(0), tol=1e-3)
-
-
-def test_gemm_relu_mask_mixed(test, device):
-    # bfloat16 operands, output, bias and bias gradient
-    rng = np.random.default_rng(8)
-    M, N, K = 64, 128, 32
-    x = rng.standard_normal((M, K)).astype(np.float32)
-    w = rng.standard_normal((K, N)).astype(np.float32)
-    bias = rng.standard_normal(N).astype(np.float32)
-    xb = wp.array(x, dtype=wp.bfloat16, device=device)
-    wb = wp.array(w, dtype=wp.bfloat16, device=device)
-    xf, wf = xb.numpy().astype(np.float32), wb.numpy().astype(np.float32)
-    mask = wp.zeros(wp.gemm_relu_mask_shape(M, N), dtype=wp.uint8, device=device)
-    y = wp.empty((M, N), dtype=wp.bfloat16, device=device)
-    bias16 = wp.array(bias, dtype=wp.bfloat16, device=device)
-    wp.gemm(xb, wb, y, bias=bias16, activation="relu", aux=mask)
-    pre = xf @ wf + bias16.numpy().astype(np.float32)
-    np.testing.assert_allclose(y.numpy().astype(np.float32), np.maximum(pre, 0.0), rtol=2e-2, atol=5e-2)
-    db = wp.zeros(N, dtype=wp.bfloat16, device=device)
-    dy = wp.array(rng.standard_normal((M, 16)).astype(np.float32), dtype=wp.bfloat16, device=device)
-    w2 = wp.array(rng.standard_normal((N, 16)).astype(np.float32), dtype=wp.bfloat16, device=device)
-    dx = wp.empty((M, N), dtype=wp.bfloat16, device=device)
-    wp.gemm(dy, w2, dx, trans_b=True, activation="relu", grad_aux=mask, bias_grad=db)
-    bits = _unpack_mask(mask.numpy(), N)
-    ref = (dy.numpy().astype(np.float32) @ w2.numpy().astype(np.float32).T) * bits
-    np.testing.assert_allclose(dx.numpy().astype(np.float32), ref, rtol=2e-2, atol=5e-2)
-    np.testing.assert_allclose(db.numpy().astype(np.float32), ref.sum(0), rtol=3e-2, atol=0.5)
-
-
 class TestGemm(unittest.TestCase):
     pass
 
@@ -342,8 +271,6 @@ _tests = [
     ("test_gemm_record_tape_false", test_gemm_record_tape_false),
     ("test_gemm_float64_batched", test_gemm_float64_batched),
     ("test_gemm_mixed_precision", test_gemm_mixed_precision),
-    ("test_gemm_relu_mask", test_gemm_relu_mask),
-    ("test_gemm_relu_mask_mixed", test_gemm_relu_mask_mixed),
 ]
 for _name, _fn in _tests:
     add_function_test(TestGemm, _name, _fn, devices=devices, check_output=False)

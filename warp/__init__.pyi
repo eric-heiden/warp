@@ -113,7 +113,6 @@ from warp._src.types import constant as constant
 from warp._src.types import address_of as address_of
 from warp._src.utils import map as map
 from warp._src.gemm import gemm as gemm
-from warp._src.gemm import gemm_relu_mask_shape as gemm_relu_mask_shape
 from warp._src.gemm import is_cublaslt_available as is_cublaslt_available
 from warp._src.builtins import static as static
 from warp._src.context import Kernel as Kernel
@@ -6071,60 +6070,6 @@ def tile_sum(a: Tile[Any, tuple[int, ...]]) -> Tile[Any, tuple[Literal[1]]]:
         .. testoutput::
 
             [21.]"""
-    ...
-
-def warp_sum(x: Scalar, width: int32 | int = 32) -> Scalar:
-    """Return the sum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes).
-
-    With ``width`` (a power of two up to 32), the warp is split into ``32 / width`` independent segments of
-    ``width`` consecutive lanes, each reduced on its own (like the ``width`` argument of CUDA's warp shuffles), e.g.
-    two 16-lane groups per warp for rows of 16 elements.
-
-    This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
-    thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the
-    call together, without divergent control flow; the launch dimension should be a multiple of 32. Every thread
-    receives the result. ``float16`` and ``bfloat16`` values are reduced in ``float32``, 8- and 16-bit integers in
-    ``int32``. On the CPU, every thread
-    is its own warp and the input is returned unchanged.
-
-    Warp reductions are cheaper than the equivalent block reductions with :func:`tile_sum` (no shared memory or
-    block synchronization) and allow several independent groups of 32 threads per block, e.g. one warp per row of
-    a matrix.
-
-    Example:
-
-        .. code-block:: python
-
-            @wp.kernel
-            def row_dots(a: wp.array2d[float], b: wp.array2d[float], out: wp.array[float]):
-                # one warp per row of 32 columns, launched with dim=rows * 32
-                tid = wp.tid()
-                row = tid // 32
-                lane = tid % 32
-                s = wp.warp_sum(a[row, lane] * b[row, lane])
-                if lane == 0:
-                    out[row] = s"""
-    ...
-
-def warp_max(x: Scalar, width: int32 | int = 32) -> Scalar:
-    """Return the maximum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes).
-
-    The gradient flows to every thread holding the maximum.
-
-    With ``width`` (a power of two up to 32), the warp is split into ``32 / width`` independent segments of
-    ``width`` consecutive lanes, each reduced on its own (like the ``width`` argument of CUDA's warp shuffles), e.g.
-    two 16-lane groups per warp for rows of 16 elements.
-
-    This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
-    thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the
-    call together, without divergent control flow; the launch dimension should be a multiple of 32. Every thread
-    receives the result. ``float16`` and ``bfloat16`` values are reduced in ``float32``, 8- and 16-bit integers in
-    ``int32``. On the CPU, every thread
-    is its own warp and the input is returned unchanged.
-
-    Warp reductions are cheaper than the equivalent block reductions with :func:`tile_sum` (no shared memory or
-    block synchronization) and allow several independent groups of 32 threads per block, e.g. one warp per row of
-    a matrix."""
     ...
 
 def tile_dot(a: Tile[Any, tuple[int, ...]], b: Tile[Any, tuple[int, ...]]) -> Tile[Any, tuple[Literal[1]]]:

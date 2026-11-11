@@ -197,7 +197,6 @@ Arrays
    full
    full_like
    gemm
-   gemm_relu_mask_shape
    ones
    ones_like
    zeros

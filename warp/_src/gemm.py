@@ -266,15 +266,10 @@ def gemm(
         trans_b: Use the transpose of ``b``.
         bias: Optional 1D array of length ``N`` added to each output row (fused epilogue).
         activation: Optional fused activation: ``"relu"`` or ``"gelu"`` (tanh approximation).
-        aux: Optional output buffer storing what the backward epilogue (``grad_aux``) needs: with ``activation="gelu"``
-            the pre-activation values, an ``(M, N)`` array with the dtype of ``out``; with ``activation="relu"`` a
-            bitmask of the positive pre-activations, a ``uint8`` array of shape :func:`gemm_relu_mask_shape` ``(M, N)``
-            (bit ``j % 8`` of byte ``j // 8`` in row ``i``; rows padded to a multiple of 128 bits). 2D only.
-            cuBLASLt fuses the ReLU-mask epilogues into the GEMM kernel for 16-bit operands; for ``float32`` (and
-            TF32) it may run them as separate epilogue kernels.
-        grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * act'(grad_aux)`` where ``grad_aux`` is
-            the buffer saved by a forward call with ``aux`` and the same ``activation`` (``"gelu"``: pre-activations;
-            ``"relu"``: bitmask, i.e. the gradient of a ReLU layer).
+        aux: Optional output buffer ``(M, N)`` storing the pre-activation values needed by the backward epilogue
+            (``grad_aux``). Requires ``activation="gelu"``.
+        grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * gelu'(grad_aux)`` where ``grad_aux`` is
+            the pre-activation buffer saved by a forward call with ``aux``. Requires ``activation="gelu"``.
         bias_grad: Optional 1D output array of length ``N``. With ``grad_aux`` it receives the column sums of the result.
             Without ``grad_aux`` (weight-gradient GEMM ``a.T @ b`` with ``trans_a=True``) it receives the column sums
             of ``b`` over the reduction dimension, i.e. the bias gradient of a linear layer.
@@ -319,8 +314,6 @@ def gemm(
                     f"gemm() array '{name}' is on device {x.device}, expected {a.device} (the device of 'a')"
                 )
             expected = a.dtype if name == "b" else out_dtype
-            if name in ("aux", "grad_aux") and activation == "relu":
-                expected = _types.uint8
             if x.dtype != expected:
                 raise TypeError(f"gemm() array '{name}' has dtype {x.dtype}, expected {expected}")
     M, K, lda, batch, sa = _mat_info(a, trans_a)
@@ -345,15 +338,10 @@ def gemm(
         raise ValueError("gemm() does not support beta != 0 together with a fused activation")
     if activation not in (None, "relu", "gelu"):
         raise ValueError(f"gemm() unsupported activation {activation!r} (expected None, 'relu' or 'gelu')")
-    if aux is not None and activation not in ("relu", "gelu"):
-        raise ValueError("gemm() aux requires activation='relu' or 'gelu'")
-    if grad_aux is not None and (activation not in ("relu", "gelu") or aux is not None):
-        raise ValueError("gemm() grad_aux requires activation='relu' or 'gelu' and no aux output")
-    relu_mask = activation == "relu" and (aux is not None or grad_aux is not None)
-    if relu_mask and a.ndim != 2:
-        raise ValueError("gemm() ReLU masks (aux / grad_aux with activation='relu') require 2D arrays")
-    if relu_mask and grad_aux is not None and (bias is not None or beta != 0.0):
-        raise ValueError("gemm() the ReLU backward epilogue does not take bias or beta")
+    if aux is not None and activation != "gelu":
+        raise ValueError("gemm() aux requires activation='gelu'")
+    if grad_aux is not None and (activation != "gelu" or aux is not None):
+        raise ValueError("gemm() grad_aux requires activation='gelu' and no aux output")
     if (
         grad_aux is None
         and bias_grad is not None
@@ -363,13 +351,8 @@ def gemm(
             "gemm() bias_grad without grad_aux requires trans_a=True, trans_b=False and no bias/activation"
         )
     for name, x in (("aux", aux), ("grad_aux", grad_aux)):
-        expected_shape = gemm_relu_mask_shape(M, N) if relu_mask else tuple(out.shape)
-        if x is not None and tuple(x.shape) != tuple(expected_shape):
-            raise ValueError(f"gemm() {name} shape {tuple(x.shape)} does not match the expected shape {expected_shape}")
-    if relu_mask:
-        x = aux if aux is not None else grad_aux
-        if x.strides[1] != 1 or x.strides[0] != gemm_relu_mask_shape(M, N)[1]:
-            raise ValueError("gemm() ReLU masks must be contiguous")
+        if x is not None and tuple(x.shape) != tuple(out.shape):
+            raise ValueError(f"gemm() {name} shape {tuple(x.shape)} does not match the output shape {tuple(out.shape)}")
     for name, x in (("bias", bias), ("bias_grad", bias_grad)):
         if x is not None and (x.ndim != 1 or x.shape[0] != N):
             raise ValueError(f"gemm() {name} must be a 1D array of length {N}")
@@ -460,18 +443,13 @@ def _cublaslt_gemm(
             ("gelu", False): _EP_GELU_AUX,
         }[(activation, bias is not None)]
     if grad_aux is not None:
-        if activation == "relu":
-            ep = _EP_DRELU_BGRAD if bias_grad is not None else _EP_DRELU
-        else:
-            ep = _EP_DGELU_BGRAD if bias_grad is not None else _EP_DGELU
+        ep = _EP_DGELU_BGRAD if bias_grad is not None else _EP_DGELU
         aux_ld = N
     elif aux is not None:
         aux_ld = N
     elif bias_grad is not None:
         # weight-gradient GEMM out = op(a) @ op(b): fuse the column sums of op(b) over K (the batch) into bias_grad
         ep = _EP_BGRADA
-    if activation == "relu" and (aux is not None or grad_aux is not None):
-        aux_ld = gemm_relu_mask_shape(M, N)[1] * 8  # the ReLU bitmask's leading dimension is in bits
     # pointer alignment is part of the plan: cuBLASLt algorithms are only valid for the alignment they were chosen for
     min_align = 256
     for arr in (a, b, out, bias, aux, grad_aux, bias_grad):
@@ -729,20 +707,6 @@ def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, a
     """Launch the GEMM with the built-in Warp kernels (arguments validated by :func:`gemm`)."""
     gemm_kernel, colsum_kernel = _fallback_kernels(a.dtype, a.ndim)
     device = a.device
-    if activation == "relu" and (aux is not None or grad_aux is not None):
-        # ReLU bitmask epilogues: the plain (or ReLU) GEMM, then a packing / masking kernel
-        pack, apply = _relu_mask_kernels()
-        if aux is not None:
-            _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, "relu", None, None, None, K)
-            _ctx.launch(pack, dim=aux.shape, inputs=[out, aux], device=device, record_tape=False)
-        else:
-            _fallback_gemm(a, b, out, alpha, 0.0, trans_a, trans_b, None, None, None, None, None, K)
-            _ctx.launch(apply, dim=out.shape, inputs=[out, grad_aux], device=device, record_tape=False)
-            if bias_grad is not None:
-                _ctx.launch(
-                    colsum_kernel, dim=bias_grad.shape[0], inputs=[out, bias_grad], device=device, record_tape=False
-                )
-        return
     act = {None: 0, "relu": 1, "gelu": 2}[activation]
     side = grad_aux if grad_aux is not None else aux
     _ctx.launch(
@@ -769,42 +733,6 @@ def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, a
         # column sums of the result (backward epilogue) or of b over the reduction dimension (weight gradient)
         source = out if grad_aux is not None else b
         _ctx.launch(colsum_kernel, dim=bias_grad.shape[0], inputs=[source, bias_grad], device=device, record_tape=False)
-
-
-_relu_mask_cache: list = []
-
-
-def _relu_mask_kernels():
-    """Kernels packing ``out > 0`` into a ReLU bitmask and applying a bitmask to a GEMM result (built-in path)."""
-    if _relu_mask_cache:
-        return _relu_mask_cache[0]
-    import warp as wp  # noqa: PLC0415
-
-    @wp.kernel(enable_backward=False, module="unique")
-    def pack(out: wp.array2d[Any], mask: wp.array2d[wp.uint8]):
-        i, byte = wp.tid()
-        bits = int(0)
-        for k in range(8):
-            j = byte * 8 + k
-            if j < out.shape[1]:
-                if out[i, j] > out.dtype(0.0):
-                    bits = bits | (1 << k)
-        mask[i, byte] = wp.uint8(bits)
-
-    @wp.kernel(enable_backward=False, module="unique")
-    def apply(out: wp.array2d[Any], mask: wp.array2d[wp.uint8]):
-        i, j = wp.tid()
-        if (int(mask[i, j // 8]) >> (j % 8)) & 1 == 0:
-            out[i, j] = out.dtype(0.0)
-
-    _relu_mask_cache.append((pack, apply))
-    return pack, apply
-
-
-def gemm_relu_mask_shape(rows: int, cols: int) -> tuple[int, int]:
-    """Shape of the ``uint8`` ReLU bitmask (``aux`` / ``grad_aux`` of :func:`gemm` with ``activation="relu"``) for an
-    output of ``rows x cols``: one bit per element, rows padded to a multiple of 128 bits (cuBLASLt's layout)."""
-    return (int(rows), (int(cols) + 127) // 128 * 16)
 
 
 _colsum_kernel = None
