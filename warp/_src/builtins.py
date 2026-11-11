@@ -7946,6 +7946,58 @@ add_builtin(
 )
 
 
+_WARP_REDUCE_NOTE = """
+
+    This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
+    thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the
+    call together, without divergent control flow; the launch dimension should be a multiple of 32. Every thread
+    receives the result. ``float16`` and ``bfloat16`` values are reduced in ``float32``, 8- and 16-bit integers in
+    ``int32``. On the CPU, every thread
+    is its own warp and the input is returned unchanged.
+
+    Warp reductions are cheaper than the equivalent block reductions with :func:`tile_sum` (no shared memory or
+    block synchronization) and allow several independent groups of 32 threads per block, e.g. one warp per row of
+    a matrix."""
+
+add_builtin(
+    "warp_sum",
+    input_types={"x": Scalar},
+    value_func=sametypes_create_value_func(Scalar),
+    doc="""Return the sum of ``x`` over the 32 threads of the warp."""
+    + _WARP_REDUCE_NOTE
+    + """
+
+    Example:
+
+        .. code-block:: python
+
+            @wp.kernel
+            def row_dots(a: wp.array2d[float], b: wp.array2d[float], out: wp.array[float]):
+                # one warp per row of 32 columns, launched with dim=rows * 32
+                tid = wp.tid()
+                row = tid // 32
+                lane = tid % 32
+                s = wp.warp_sum(a[row, lane] * b[row, lane])
+                if lane == 0:
+                    out[row] = s""",
+    group="Warp-Level Primitives",
+    export=False,
+)
+
+add_builtin(
+    "warp_max",
+    input_types={"x": Scalar},
+    value_func=sametypes_create_value_func(Scalar),
+    doc="""Return the maximum of ``x`` over the 32 threads of the warp.
+
+    The gradient flows to every thread holding the maximum."""
+    + _WARP_REDUCE_NOTE,
+    group="Warp-Level Primitives",
+    export=False,
+    require_original_output_arg=True,
+)
+
+
 def tile_dot_value_func(arg_types, arg_values):
     # return generic type (for doc builds)
     if arg_types is None:

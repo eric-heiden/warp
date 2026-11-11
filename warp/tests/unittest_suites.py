@@ -284,6 +284,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_vec_scalar_ops import TestVecScalarOps
     from warp.tests.test_verify_fp import TestVerifyFP
     from warp.tests.test_version import TestVersion
+    from warp.tests.test_warp_reduce import TestWarpReduce
     from warp.tests.tile.test_tile import TestTile
     from warp.tests.tile.test_tile_atomic_bitwise import TestTileAtomicBitwise
     from warp.tests.tile.test_tile_block_dim_mismatch import TestTileBlockDimMismatch
@@ -542,6 +543,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestVolume,
         TestVolumeValidation,
         TestVolumeWrite,
+        TestWarpReduce,
     ]
 
     return _create_suite_from_test_classes(test_loader, test_classes)

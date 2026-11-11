@@ -241,6 +241,17 @@ Tile Primitives
    tile_zeros
    untile
 
+Warp-Level Primitives
+---------------------
+
+.. autosummary::
+   :nosignatures:
+   :toctree: _generated
+   :template: warp_function.rst
+
+   warp_max
+   warp_sum
+
 Geometry
 --------
 
