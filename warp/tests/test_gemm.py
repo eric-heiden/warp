@@ -172,7 +172,7 @@ def test_gemm_float64_batched(test, device):
 def test_gemm_mixed_precision(test, device):
     """float16 / bfloat16 operands with float32 outputs (and bias)."""
     rng = np.random.default_rng(8)
-    for dtype, np_dtype in ((wp.float16, np.float16), (wp.bfloat16, None)):
+    for dtype in (wp.float16, wp.bfloat16):
         a = rng.standard_normal((48, 32)).astype(np.float32)
         b = rng.standard_normal((40, 32)).astype(np.float32)
         bias = rng.standard_normal(40).astype(np.float32)
