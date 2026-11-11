@@ -169,6 +169,27 @@ def test_gemm_float64_batched(test, device):
     assert_np_equal(out.numpy(), 0.25 * a @ b.transpose(0, 2, 1) - 1.5 * c, tol=1e-12)
 
 
+def test_gemm_mixed_precision(test, device):
+    """float16 / bfloat16 operands with float32 outputs (and bias)."""
+    rng = np.random.default_rng(8)
+    for dtype, np_dtype in ((wp.float16, np.float16), (wp.bfloat16, None)):
+        a = rng.standard_normal((48, 32)).astype(np.float32)
+        b = rng.standard_normal((40, 32)).astype(np.float32)
+        bias = rng.standard_normal(40).astype(np.float32)
+        wa, wb = wp.array(a, dtype=dtype, device=device), wp.array(b, dtype=dtype, device=device)
+        # reference on the operands rounded to their precision
+        ar, br = wa.numpy().astype(np.float32), wb.numpy().astype(np.float32)
+        out = wp.zeros((48, 40), dtype=wp.float32, device=device)
+        wp.gemm(wa, wb, out, trans_b=True, bias=wp.array(bias, device=device))
+        assert_np_equal(out.numpy(), ar @ br.T + bias, tol=1e-3)
+    with test.assertRaisesRegex(TypeError, "output dtype"):
+        wp.gemm(
+            wp.zeros((4, 4), dtype=wp.float32, device=device),
+            wp.zeros((4, 4), dtype=wp.float32, device=device),
+            wp.zeros((4, 4), dtype=wp.float16, device=device),
+        )
+
+
 def test_gemm_argument_checks(test, device):
     a = wp.zeros((4, 3), dtype=float, device=device)
     b = wp.zeros((3, 2), dtype=float, device=device)
@@ -249,6 +270,7 @@ _tests = [
     ("test_gemm_tape_backward", test_gemm_tape_backward),
     ("test_gemm_record_tape_false", test_gemm_record_tape_false),
     ("test_gemm_float64_batched", test_gemm_float64_batched),
+    ("test_gemm_mixed_precision", test_gemm_mixed_precision),
 ]
 for _name, _fn in _tests:
     add_function_test(TestGemm, _name, _fn, devices=devices, check_output=False)

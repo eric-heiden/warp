@@ -247,7 +247,10 @@ def gemm(
     """Compute ``out = activation(alpha * op(a) @ op(b) + bias) + beta * out``.
 
     All arrays are row-major with contiguous rows, either 2D ``(rows, cols)`` or 3D ``(batch, rows, cols)``, and
-    on the same device. On CUDA devices, the call enqueues a single cuBLASLt kernel launch on the device's current
+    on the same device. ``a`` and ``b`` have the same dtype (``float16``, ``bfloat16``, ``float32`` or ``float64``);
+    the other arrays have the dtype of ``out``: the dtype of the operands or, for mixed precision, ``float32``
+    with ``float16`` or ``bfloat16`` operands (the products are accumulated in ``float32`` in all cases but
+    ``float64``). On CUDA devices, the call enqueues a single cuBLASLt kernel launch on the device's current
     stream and can be captured in a CUDA graph. cuBLASLt is loaded at runtime (see
     :func:`warp.is_cublaslt_available`); CPU arrays, CUDA devices without cuBLASLt and API captures
     (``apic=True``) use a built-in Warp kernel instead, which is recorded in CPU graphs and saved graphs like any
@@ -291,6 +294,12 @@ def gemm(
         raise TypeError("gemm() operands must have the same dtype")
     if a.dtype not in _DTYPES:
         raise TypeError(f"gemm() unsupported dtype {a.dtype}")
+    out_dtype = out.dtype if out is not None else a.dtype
+    if out_dtype != a.dtype and not (a.dtype in (_types.float16, _types.bfloat16) and out_dtype == _types.float32):
+        raise TypeError(
+            f"gemm() output dtype {out_dtype} is not supported with {a.dtype} operands (expected {a.dtype}, or "
+            "float32 for float16 and bfloat16 operands)"
+        )
     for name, x in (
         ("b", b),
         ("out", out),
@@ -304,8 +313,9 @@ def gemm(
                 raise ValueError(
                     f"gemm() array '{name}' is on device {x.device}, expected {a.device} (the device of 'a')"
                 )
-            if x.dtype != a.dtype:
-                raise TypeError(f"gemm() array '{name}' has dtype {x.dtype}, expected {a.dtype}")
+            expected = a.dtype if name == "b" else out_dtype
+            if x.dtype != expected:
+                raise TypeError(f"gemm() array '{name}' has dtype {x.dtype}, expected {expected}")
     M, K, lda, batch, sa = _mat_info(a, trans_a)
     K2, N, ldb, batch_b, sb = _mat_info(b, trans_b)
     if K != K2 or batch != batch_b:
@@ -352,6 +362,8 @@ def gemm(
         raise RuntimeError(
             "gemm() can only be recorded on a wp.Tape without fused activations or backward epilogues and with beta=0"
         )
+    if recorded and out.dtype != a.dtype:
+        raise RuntimeError("gemm() with mixed operand and output dtypes cannot be recorded on a wp.Tape")
     if _select_backend(a.device) == "warp":
         _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, aux, grad_aux, bias_grad, K)
     else:
@@ -415,6 +427,7 @@ def _cublaslt_gemm(
     """Launch the GEMM with cuBLASLt (arguments validated by :func:`gemm`)."""
     _, _, ldc, _, sc = _mat_info(out, False)
     dt, _ = _DTYPES[a.dtype]
+    ct, _ = _DTYPES[out.dtype]  # output (and bias / auxiliary buffer) type: float32 for mixed precision
     if a.dtype == _types.float64:
         compute, scale = _COMPUTE_64F, _CUDA_R_64F
     else:
@@ -442,13 +455,14 @@ def _cublaslt_gemm(
     for arr in (a, b, out, bias, aux, grad_aux, bias_grad):
         if arr is not None and arr.ptr:
             min_align = min(min_align, arr.ptr & -arr.ptr)
-    for ld_elems in (lda, ldb, ldc):
-        ld_bytes = ld_elems * _DTYPES[a.dtype][1]
+    for ld_elems, x in ((lda, a), (ldb, b), (ldc, out)):
+        ld_bytes = ld_elems * _DTYPES[x.dtype][1]
         min_align = min(min_align, ld_bytes & -ld_bytes)
     key = (
         a.device.context,
         min_align,
         dt,
+        ct,
         compute,
         trans_a,
         trans_b,
@@ -471,7 +485,7 @@ def _cublaslt_gemm(
             a.device.context,
             dt,
             dt,
-            dt,
+            ct,
             compute,
             scale,
             int(trans_a),
@@ -487,9 +501,9 @@ def _cublaslt_gemm(
             sb,
             sc,
             ep,
-            dt,
+            ct,
             aux_ld,
-            dt,
+            ct,
             autotune,
             min_align,
         )
@@ -702,8 +716,8 @@ def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, a
             a,
             b,
             out,
-            bias if bias is not None else _placeholder(a.dtype, 1, device),
-            side if side is not None else _placeholder(a.dtype, a.ndim, device),
+            bias if bias is not None else _placeholder(out.dtype, 1, device),
+            side if side is not None else _placeholder(out.dtype, a.ndim, device),
             K,
             int(trans_a),
             int(trans_b),
