@@ -324,6 +324,7 @@ from warp._src.types import constant as constant
 from warp._src.types import address_of as address_of
 from warp._src.utils import map as map
 from warp._src.gemm import gemm as gemm
+from warp._src.gemm import gemm_relu_mask_shape as gemm_relu_mask_shape
 from warp._src.gemm import is_cublaslt_available as is_cublaslt_available
 from warp._src.builtins import static as static
 
