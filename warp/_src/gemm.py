@@ -41,11 +41,7 @@ _EP = {
     (None, True): 4,
     ("relu", False): 2,
     ("relu", True): 6,
-    ("gelu", False): 32,
-    ("gelu", True): 36,
 }
-_EP_RELU_AUX_BIAS, _EP_RELU_AUX, _EP_GELU_AUX_BIAS, _EP_GELU_AUX = 134, 130, 164, 160
-_EP_DRELU_BGRAD, _EP_DRELU, _EP_DGELU_BGRAD, _EP_DGELU = 152, 136, 208, 192
 _EP_BGRADA = 256
 
 _DTYPES = {
@@ -236,8 +232,6 @@ def gemm(
     trans_b: bool = False,
     bias=None,
     activation: str | None = None,
-    aux=None,
-    grad_aux=None,
     bias_grad=None,
     tf32: bool = False,
     autotune: int = 8,
@@ -265,14 +259,10 @@ def gemm(
         trans_a: Use the transpose of ``a``.
         trans_b: Use the transpose of ``b``.
         bias: Optional 1D array of length ``N`` added to each output row (fused epilogue).
-        activation: Optional fused activation: ``"relu"`` or ``"gelu"`` (tanh approximation).
-        aux: Optional output buffer ``(M, N)`` storing the pre-activation values needed by the backward epilogue
-            (``grad_aux``). Requires ``activation="gelu"``.
-        grad_aux: If given, runs the backward epilogue ``out = (op(a) @ op(b)) * gelu'(grad_aux)`` where ``grad_aux`` is
-            the pre-activation buffer saved by a forward call with ``aux``. Requires ``activation="gelu"``.
-        bias_grad: Optional 1D output array of length ``N``. With ``grad_aux`` it receives the column sums of the result.
-            Without ``grad_aux`` (weight-gradient GEMM ``a.T @ b`` with ``trans_a=True``) it receives the column sums
-            of ``b`` over the reduction dimension, i.e. the bias gradient of a linear layer.
+        activation: Optional fused activation: ``"relu"``. Its backward pass needs only the output (``out > 0``).
+        bias_grad: Optional 1D output array of length ``N`` receiving, for a weight-gradient GEMM ``a.T @ b``
+            (``trans_a=True``, ``trans_b=False``, no bias or activation), the column sums of ``b`` over the reduction
+            dimension, i.e. the bias gradient of a linear layer.
         tf32: Allow TF32 tensor cores for float32 inputs (cuBLASLt only).
         autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
             the fastest is kept. Use 0 or 1 to disable.
@@ -283,7 +273,7 @@ def gemm(
 
     When a :class:`warp.Tape` is recording and ``a``, ``b`` or ``bias`` require gradients, the adjoint GEMMs (and
     the bias column sums) are recorded on the tape, so ``tape.backward()`` accumulates into their ``grad`` arrays.
-    This requires ``beta=0`` and no fused activation or backward epilogue.
+    This requires ``beta=0``, no fused activation and no ``bias_grad``.
 
     Returns:
         The output array.
@@ -304,8 +294,6 @@ def gemm(
         ("b", b),
         ("out", out),
         ("bias", bias),
-        ("aux", aux),
-        ("grad_aux", grad_aux),
         ("bias_grad", bias_grad),
     ):
         if x is not None:
@@ -336,36 +324,23 @@ def gemm(
         )
     if beta != 0.0 and activation is not None:
         raise ValueError("gemm() does not support beta != 0 together with a fused activation")
-    if activation not in (None, "relu", "gelu"):
-        raise ValueError(f"gemm() unsupported activation {activation!r} (expected None, 'relu' or 'gelu')")
-    if aux is not None and activation != "gelu":
-        raise ValueError("gemm() aux requires activation='gelu'")
-    if grad_aux is not None and (activation != "gelu" or aux is not None):
-        raise ValueError("gemm() grad_aux requires activation='gelu' and no aux output")
-    if (
-        grad_aux is None
-        and bias_grad is not None
-        and (activation is not None or bias is not None or not trans_a or trans_b)
-    ):
-        raise ValueError(
-            "gemm() bias_grad without grad_aux requires trans_a=True, trans_b=False and no bias/activation"
-        )
-    for name, x in (("aux", aux), ("grad_aux", grad_aux)):
-        if x is not None and tuple(x.shape) != tuple(out.shape):
-            raise ValueError(f"gemm() {name} shape {tuple(x.shape)} does not match the output shape {tuple(out.shape)}")
+    if activation not in (None, "relu"):
+        raise ValueError(f"gemm() unsupported activation {activation!r} (expected None or 'relu')")
+    if bias_grad is not None and (activation is not None or bias is not None or not trans_a or trans_b):
+        raise ValueError("gemm() bias_grad requires trans_a=True, trans_b=False and no bias or activation")
     for name, x in (("bias", bias), ("bias_grad", bias_grad)):
         if x is not None and (x.ndim != 1 or x.shape[0] != N):
             raise ValueError(f"gemm() {name} must be a 1D array of length {N}")
     tape = _ctx.runtime.tape if record_tape else None
     recorded = tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias))
-    if recorded and (activation is not None or grad_aux is not None or bias_grad is not None or beta != 0.0):
+    if recorded and (activation is not None or bias_grad is not None or beta != 0.0):
         raise RuntimeError(
-            "gemm() can only be recorded on a wp.Tape without fused activations or backward epilogues and with beta=0"
+            "gemm() can only be recorded on a wp.Tape without a fused activation or bias_grad and with beta=0"
         )
     if recorded and out.dtype != a.dtype:
         raise RuntimeError("gemm() with mixed operand and output dtypes cannot be recorded on a wp.Tape")
     if _select_backend(a.device) == "warp":
-        _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, aux, grad_aux, bias_grad, K)
+        _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, bias_grad, K)
     else:
         _ensure_loaded()
         _cublaslt_gemm(
@@ -378,8 +353,6 @@ def gemm(
             trans_b,
             bias,
             activation,
-            aux,
-            grad_aux,
             bias_grad,
             tf32,
             autotune,
@@ -409,8 +382,6 @@ def _cublaslt_gemm(
     trans_b,
     bias,
     activation,
-    aux,
-    grad_aux,
     bias_grad,
     tf32,
     autotune,
@@ -427,7 +398,7 @@ def _cublaslt_gemm(
     """Launch the GEMM with cuBLASLt (arguments validated by :func:`gemm`)."""
     _, _, ldc, _, sc = _mat_info(out, False)
     dt, _ = _DTYPES[a.dtype]
-    ct, _ = _DTYPES[out.dtype]  # output (and bias / auxiliary buffer) type: float32 for mixed precision
+    ct, _ = _DTYPES[out.dtype]  # output (and bias) type: float32 for mixed precision
     if a.dtype == _types.float64:
         compute, scale = _COMPUTE_64F, _CUDA_R_64F
     else:
@@ -435,24 +406,12 @@ def _cublaslt_gemm(
         scale = _CUDA_R_32F
     ep = _EP[(activation, bias is not None)]
     aux_ld = 0
-    if aux is not None:
-        ep = {
-            ("relu", True): _EP_RELU_AUX_BIAS,
-            ("relu", False): _EP_RELU_AUX,
-            ("gelu", True): _EP_GELU_AUX_BIAS,
-            ("gelu", False): _EP_GELU_AUX,
-        }[(activation, bias is not None)]
-    if grad_aux is not None:
-        ep = _EP_DGELU_BGRAD if bias_grad is not None else _EP_DGELU
-        aux_ld = N
-    elif aux is not None:
-        aux_ld = N
-    elif bias_grad is not None:
+    if bias_grad is not None:
         # weight-gradient GEMM out = op(a) @ op(b): fuse the column sums of op(b) over K (the batch) into bias_grad
         ep = _EP_BGRADA
     # pointer alignment is part of the plan: cuBLASLt algorithms are only valid for the alignment they were chosen for
     min_align = 256
-    for arr in (a, b, out, bias, aux, grad_aux, bias_grad):
+    for arr in (a, b, out, bias, bias_grad):
         if arr is not None and arr.ptr:
             min_align = min(min_align, arr.ptr & -arr.ptr)
     for ld_elems, x in ((lda, a), (ldb, b), (ldc, out)):
@@ -523,7 +482,7 @@ def _cublaslt_gemm(
         b.ptr,
         out.ptr,
         (bias_grad.ptr if bias_grad is not None else (bias.ptr if bias is not None else None)),
-        (grad_aux.ptr if grad_aux is not None else (aux.ptr if aux is not None else None)),
+        None,
         float(alpha),
         float(beta),
     )
@@ -535,9 +494,6 @@ def _cublaslt_gemm(
 # Built-in Warp kernel (CPU arrays, CUDA without cuBLASLt, CUDA API captures)
 
 _fallback_cache: dict = {}
-_GELU_C0 = 0.7978845608028654  # sqrt(2 / pi)
-_GELU_C1 = 0.044715
-_GELU_C3 = 3.0 * _GELU_C1
 
 
 def _fallback_kernels(dtype, ndim: int):
@@ -550,35 +506,14 @@ def _fallback_kernels(dtype, ndim: int):
     ACC = wp.float64 if dtype == _types.float64 else wp.float32  # accumulation type
 
     @wp.func
-    def gelu(z: Any):
-        u = z.dtype(_GELU_C0) * (z + z.dtype(_GELU_C1) * z * z * z)
-        return z.dtype(0.5) * z * (z.dtype(1.0) + wp.tanh(u))
-
-    @wp.func
-    def gelu_grad(z: Any):
-        u = z.dtype(_GELU_C0) * (z + z.dtype(_GELU_C1) * z * z * z)
-        t = wp.tanh(u)
-        return z.dtype(0.5) * (z.dtype(1.0) + t) + z.dtype(0.5) * z * (z.dtype(1.0) - t * t) * z.dtype(_GELU_C0) * (
-            z.dtype(1.0) + z.dtype(_GELU_C3) * z * z
-        )
-
-    @wp.func
-    def epilogue(
-        v: Any, bias_v: Any, has_bias: int, z: Any, aux_out: int, act: int, grad_mode: int, beta: Any, old: Any
-    ):
-        # returns (output, pre-activation)
-        if grad_mode != 0:
-            return v * gelu_grad(z), v
+    def epilogue(v: Any, bias_v: Any, has_bias: int, relu: int, beta: Any, old: Any):
         if has_bias != 0:
             v = v + bias_v
-        pre = v
-        if act == 1:
+        if relu != 0:
             v = wp.max(v, v.dtype(0.0))
-        elif act == 2:
-            v = gelu(v)
         if beta != v.dtype(0.0):
             v = v + beta * old
-        return v, pre
+        return v
 
     if ndim == 2:
 
@@ -588,14 +523,12 @@ def _fallback_kernels(dtype, ndim: int):
             b: wp.array2d[Any],
             out: wp.array2d[Any],
             bias: wp.array1d[Any],
-            aux: wp.array2d[Any],  # pre-activation output, or the GELU input of the backward epilogue
             K: int,
             trans_a: int,
             trans_b: int,
             alpha: float,
             beta: float,
-            act: int,
-            grad_mode: int,
+            relu: int,
         ):
             i, j = wp.tid()
             s = ACC(0.0)
@@ -612,20 +545,13 @@ def _fallback_kernels(dtype, ndim: int):
                     bv = ACC(b[k, j])
                 s += av * bv
             has_bias = int(bias.shape[0] > 0)
-            has_aux = int(aux.shape[0] > 0)
             bias_v = ACC(0.0)
             if has_bias != 0:
                 bias_v = ACC(bias[j])
-            z = ACC(0.0)
-            if grad_mode != 0:
-                z = ACC(aux[i, j])
             old = ACC(0.0)
             if beta != 0.0:
                 old = ACC(out[i, j])
-            r, pre = epilogue(s * ACC(alpha), bias_v, has_bias, z, has_aux, act, grad_mode, ACC(beta), old)
-            if has_aux != 0 and grad_mode == 0:
-                aux[i, j] = aux.dtype(pre)
-            out[i, j] = out.dtype(r)
+            out[i, j] = out.dtype(epilogue(s * ACC(alpha), bias_v, has_bias, relu, ACC(beta), old))
 
         @wp.kernel(enable_backward=False, module="unique")
         def colsum_kernel(x: wp.array2d[Any], g: wp.array1d[Any]):
@@ -643,14 +569,12 @@ def _fallback_kernels(dtype, ndim: int):
             b: wp.array3d[Any],
             out: wp.array3d[Any],
             bias: wp.array1d[Any],
-            aux: wp.array3d[Any],
             K: int,
             trans_a: int,
             trans_b: int,
             alpha: float,
             beta: float,
-            act: int,
-            grad_mode: int,
+            relu: int,
         ):
             n, i, j = wp.tid()
             s = ACC(0.0)
@@ -667,20 +591,13 @@ def _fallback_kernels(dtype, ndim: int):
                     bv = ACC(b[n, k, j])
                 s += av * bv
             has_bias = int(bias.shape[0] > 0)
-            has_aux = int(aux.shape[0] > 0)
             bias_v = ACC(0.0)
             if has_bias != 0:
                 bias_v = ACC(bias[j])
-            z = ACC(0.0)
-            if grad_mode != 0:
-                z = ACC(aux[n, i, j])
             old = ACC(0.0)
             if beta != 0.0:
                 old = ACC(out[n, i, j])
-            r, pre = epilogue(s * ACC(alpha), bias_v, has_bias, z, has_aux, act, grad_mode, ACC(beta), old)
-            if has_aux != 0 and grad_mode == 0:
-                aux[n, i, j] = aux.dtype(pre)
-            out[n, i, j] = out.dtype(r)
+            out[n, i, j] = out.dtype(epilogue(s * ACC(alpha), bias_v, has_bias, relu, ACC(beta), old))
 
         @wp.kernel(enable_backward=False, module="unique")
         def colsum_kernel(x: wp.array3d[Any], g: wp.array1d[Any]):
@@ -703,12 +620,10 @@ def _placeholder(dtype, ndim: int, device):
     return _fallback_cache[key]
 
 
-def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, aux, grad_aux, bias_grad, K):
+def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, bias_grad, K):
     """Launch the GEMM with the built-in Warp kernels (arguments validated by :func:`gemm`)."""
     gemm_kernel, colsum_kernel = _fallback_kernels(a.dtype, a.ndim)
     device = a.device
-    act = {None: 0, "relu": 1, "gelu": 2}[activation]
-    side = grad_aux if grad_aux is not None else aux
     _ctx.launch(
         gemm_kernel,
         dim=out.shape,
@@ -717,22 +632,19 @@ def _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, a
             b,
             out,
             bias if bias is not None else _placeholder(out.dtype, 1, device),
-            side if side is not None else _placeholder(out.dtype, a.ndim, device),
             K,
             int(trans_a),
             int(trans_b),
             float(alpha),
             float(beta),
-            act,
-            int(grad_aux is not None),
+            int(activation == "relu"),
         ],
         device=device,
         record_tape=False,
     )
     if bias_grad is not None:
-        # column sums of the result (backward epilogue) or of b over the reduction dimension (weight gradient)
-        source = out if grad_aux is not None else b
-        _ctx.launch(colsum_kernel, dim=bias_grad.shape[0], inputs=[source, bias_grad], device=device, record_tape=False)
+        # weight gradient a.T @ b: column sums of b over the reduction dimension
+        _ctx.launch(colsum_kernel, dim=bias_grad.shape[0], inputs=[b, bias_grad], device=device, record_tape=False)
 
 
 _colsum_kernel = None

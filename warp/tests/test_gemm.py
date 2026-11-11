@@ -13,16 +13,6 @@ import warp as wp
 from warp.tests.unittest_utils import *
 
 
-def _gelu_tanh(z):
-    return 0.5 * z * (1.0 + np.tanh(0.7978845608028654 * (z + 0.044715 * z**3)))
-
-
-def _gelu_tanh_grad(z):
-    u = 0.7978845608028654 * (z + 0.044715 * z**3)
-    t = np.tanh(u)
-    return 0.5 * (1.0 + t) + 0.5 * z * (1.0 - t * t) * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * z * z)
-
-
 def test_gemm_basic(test, device):
     rng = np.random.default_rng(0)
     for M, N, K, ta, tb in [
@@ -50,33 +40,14 @@ def test_gemm_alpha_beta_bias_activation(test, device):
     assert_np_equal(wc.numpy(), 0.5 * a @ b + 2.0 * c0, tol=1e-4)
     out = wp.gemm(wa, wb, bias=wp.array(bias, device=device), activation="relu")
     assert_np_equal(out.numpy(), np.maximum(a @ b + bias, 0.0), tol=1e-4)
-    aux = wp.zeros((M, N), dtype=float, device=device)
-    out = wp.gemm(wa, wb, bias=wp.array(bias, device=device), activation="gelu", aux=aux)
-    assert_np_equal(aux.numpy(), a @ b + bias, tol=1e-4)
-    assert_np_equal(out.numpy(), _gelu_tanh(a @ b + bias), tol=1e-3)
+    out = wp.gemm(wa, wb, activation="relu")
+    assert_np_equal(out.numpy(), np.maximum(a @ b, 0.0), tol=1e-4)
 
 
-def test_gemm_backward_epilogues(test, device):
+def test_gemm_bias_grad(test, device):
     rng = np.random.default_rng(2)
     B, D, H = 256, 32, 48
-    z = rng.standard_normal((B, H)).astype(np.float32)  # pre-activation of the layer below
     dy = rng.standard_normal((B, D)).astype(np.float32)
-    w = rng.standard_normal((H, D)).astype(np.float32)
-    # dZ = (dY @ W^T) * gelu'(Z) and the bias gradient sum_rows(dZ)
-    dz = wp.zeros((B, H), dtype=float, device=device)
-    gb = wp.zeros(H, dtype=float, device=device)
-    wp.gemm(
-        wp.array(dy, device=device),
-        wp.array(w, device=device),
-        dz,
-        trans_b=True,
-        activation="gelu",
-        grad_aux=wp.array(z, device=device),
-        bias_grad=gb,
-    )
-    ref = (dy @ w.T) * _gelu_tanh_grad(z)
-    assert_np_equal(dz.numpy(), ref, tol=1e-3)
-    assert_np_equal(gb.numpy(), ref.sum(axis=0), tol=1e-2)
     # weight gradient with fused bias gradient (BGRADA): gW = X^T @ dY, gb = sum_rows(dY)
     x = rng.standard_normal((B, H)).astype(np.float32)
     gw = wp.zeros((H, D), dtype=float, device=device)
@@ -195,8 +166,10 @@ def test_gemm_argument_checks(test, device):
     b = wp.zeros((3, 2), dtype=float, device=device)
     with test.assertRaisesRegex(TypeError, "dtype"):
         wp.gemm(a, b, wp.zeros((4, 2), dtype=wp.float64, device=device))
-    with test.assertRaisesRegex(ValueError, "aux requires activation='gelu'"):
-        wp.gemm(a, b, activation="relu", aux=wp.zeros((4, 2), dtype=float, device=device))
+    with test.assertRaisesRegex(ValueError, "unsupported activation"):
+        wp.gemm(a, b, activation="gelu")
+    with test.assertRaisesRegex(ValueError, "bias_grad requires trans_a=True"):
+        wp.gemm(a, b, bias_grad=wp.zeros(2, dtype=float, device=device))
     with test.assertRaisesRegex(ValueError, "shape"):
         wp.gemm(a, a)
     with test.assertRaisesRegex(ValueError, "bias must be a 1D array"):
@@ -264,7 +237,7 @@ cuda_devices = get_selected_cuda_test_devices(mode="basic")
 _tests = [
     ("test_gemm_basic", test_gemm_basic),
     ("test_gemm_alpha_beta_bias_activation", test_gemm_alpha_beta_bias_activation),
-    ("test_gemm_backward_epilogues", test_gemm_backward_epilogues),
+    ("test_gemm_bias_grad", test_gemm_bias_grad),
     ("test_gemm_batched_and_misaligned", test_gemm_batched_and_misaligned),
     ("test_gemm_graph_capture", test_gemm_graph_capture),
     ("test_gemm_tape_backward", test_gemm_tape_backward),
