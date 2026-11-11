@@ -5528,7 +5528,8 @@ def tile_extract(a: Tile[Any, tuple[int]], i: int32 | int) -> Any:
     index gives every thread the same value while a per-thread index gives each thread its
     own element. The current implementation places ``a`` in shared memory before
     extraction, where it counts against the block's shared-memory budget (see
-    :ref:`tile_shared_memory_budget`).
+    :ref:`tile_shared_memory_budget`), except in CUDA blocks of at most one warp
+    (``block_dim <= 32``), where register tiles are read with warp shuffles.
 
     Pass one index per tile dimension to read the element itself. A tile of vectors
     accepts one extra index, which selects a scalar component. A tile of matrices accepts

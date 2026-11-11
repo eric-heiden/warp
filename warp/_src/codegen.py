@@ -41,6 +41,8 @@ from warp._src.types import (
 # used as a globally accessible copy
 # of current compile options (block_dim) etc
 options = {}
+# backend of the module being built ("cpu", "cuda", or None for backend-neutral analysis)
+target = None
 
 # wp.tid() coordinates are signed 32-bit integers. An extent of 2**31 is
 # valid because its largest coordinate is 2**31 - 1.
@@ -2387,8 +2389,9 @@ class Adjoint:
         else:
             adj.builder_options = default_builder_options
 
-        global options
+        global options, target
         options = adj.builder_options
+        target = adj.builder.target if adj.builder else None
 
         adj.deterministic.begin_build(adj.builder_options)
 

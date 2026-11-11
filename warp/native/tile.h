@@ -938,6 +938,31 @@ struct tile_empty_t { };
 template <typename T, typename L, bool Owner> struct tile_shared_t;
 
 // represents a tile stored in registers across a block
+#if defined(__CUDA_ARCH__)
+// Lanes of a block of at most one warp.
+constexpr wp_tile_lane_mask_bits_t tile_warp_mask()
+{
+    return WP_TILE_BLOCK_DIM >= WP_TILE_WARP_SIZE ? WP_TILE_LANE_MASK_ALL
+                                                  : ((((wp_tile_lane_mask_bits_t)1) << WP_TILE_BLOCK_DIM) - 1);
+}
+
+// Read `value` from lane `src_lane` (which may differ per lane) in a block of at most one warp, 32 bits at a time
+// (any trivially copyable tile element type: scalars, vectors, matrices, half precision).
+template <typename T> inline CUDA_CALLABLE_DEVICE T tile_warp_broadcast(const T& value, int src_lane)
+{
+    constexpr wp_tile_lane_mask_bits_t mask = tile_warp_mask();
+    constexpr int words = (sizeof(T) + sizeof(unsigned int) - 1) / sizeof(unsigned int);
+    unsigned int w[words] = {};
+    memcpy(w, &value, sizeof(T));
+    WP_PRAGMA_UNROLL
+    for (int i = 0; i < words; ++i)
+        w[i] = __shfl_sync(mask, w[i], src_lane);
+    T result = value;
+    memcpy(&result, w, sizeof(T));
+    return result;
+}
+#endif
+
 template <typename T, typename L> struct tile_register_t {
     using Type = T;
     using Layout = L;
@@ -1029,19 +1054,37 @@ template <typename T, typename L> struct tile_register_t {
         const int reg = Layout::register_from_linear(linear);
 
 #if defined(__CUDA_ARCH__)
-        __shared__ Type scratch;
+        if constexpr (WP_TILE_BLOCK_DIM <= WP_TILE_WARP_SIZE) {
+            // The block is a single warp: read the owner's register with warp shuffles instead of a shared-memory
+            // round trip and two block barriers (e.g. wp.tile_extract(wp.tile_sum(t), 0)). Each lane may ask for a
+            // different element, so every register slot is shuffled and the requested one kept.
+            if constexpr (Layout::NumRegs == 1) {
+                return tile_warp_broadcast(data[0], thread);
+            } else {
+                Type result = data[0];
+                WP_PRAGMA_UNROLL
+                for (int r = 0; r < Layout::NumRegs; ++r) {
+                    const Type v = tile_warp_broadcast(data[r], thread);
+                    if (r == reg)
+                        result = v;
+                }
+                return result;
+            }
+        } else {
+            __shared__ Type scratch;
 
-        // ensure any previously scheduled threads have finished reading from scratch
-        WP_TILE_SYNC();
+            // ensure any previously scheduled threads have finished reading from scratch
+            WP_TILE_SYNC();
 
-        if (WP_TILE_THREAD_IDX == thread) {
-            scratch = data[reg];
+            if (WP_TILE_THREAD_IDX == thread) {
+                scratch = data[reg];
+            }
+
+            // ensure extraction thread has updated smem
+            WP_TILE_SYNC();
+
+            return scratch;
         }
-
-        // ensure extraction thread has updated smem
-        WP_TILE_SYNC();
-
-        return scratch;
 #else
         if constexpr (WP_TILE_BLOCK_DIM == 1) {
             return data[linear];
@@ -1075,6 +1118,25 @@ template <typename T, typename L> struct tile_register_t {
         const int thread = Layout::thread_from_linear(linear);
         const int reg = Layout::register_from_linear(linear);
 
+#if defined(__CUDA_ARCH__)
+        if constexpr (WP_TILE_BLOCK_DIM <= WP_TILE_WARP_SIZE) {
+            // every lane may have extracted any element: hand each lane's adjoint to the lane owning its element
+            constexpr wp_tile_lane_mask_bits_t mask = tile_warp_mask();
+            for (int src = 0; src < WP_TILE_BLOCK_DIM; ++src) {
+                const int t = __shfl_sync(mask, thread, src);
+                const int r = __shfl_sync(mask, reg, src);
+                const Type a = tile_warp_broadcast(adj_ret, src);
+                if (WP_TILE_THREAD_IDX == t) {
+                    WP_PRAGMA_UNROLL
+                    for (int k = 0; k < Layout::NumRegs; ++k) {
+                        if (k == r)
+                            data[k] += a;
+                    }
+                }
+            }
+            return;
+        }
+#endif
         if (WP_TILE_THREAD_IDX == thread) {
             data[reg] += adj_ret;
         }

@@ -123,5 +123,54 @@ add_function_test(
 )
 
 
+# Register tiles read by other threads: single-warp CUDA blocks (block_dim <= 32) read them with warp shuffles,
+# larger blocks through shared memory. Each thread reads its own (per-thread) index of a two-register tile and the
+# block-wide sum; several threads read the same element, so the adjoint must accumulate all of them.
+@wp.kernel(module="unique")
+def tile_extract_register_kernel(x: wp.array[float], idx: wp.array[int], y: wp.array[float], s: wp.array[float]):
+    _blk, i = wp.tid()
+    t = wp.tile_load(x, shape=64, storage="register")
+    t2 = t * t
+    y[i] = wp.tile_extract(t2, idx[i])
+    s[i] = wp.tile_extract(wp.tile_sum(t2), 0)
+
+
+def test_tile_extract_register(test, device):
+    rng = np.random.default_rng(5)
+    x_np = rng.standard_normal(64).astype(np.float32)
+    for block_dim in (16, 32, 64):
+        idx_np = rng.integers(0, 64, block_dim).astype(np.int32)
+        idx_np[: block_dim // 2] = 7  # half the threads read the same element
+        x = wp.array(x_np, dtype=float, device=device, requires_grad=True)
+        y = wp.zeros(block_dim, dtype=float, device=device, requires_grad=True)
+        s = wp.zeros(block_dim, dtype=float, device=device, requires_grad=True)
+        tape = wp.Tape()
+        with tape:
+            wp.launch_tiled(
+                tile_extract_register_kernel,
+                dim=[1],
+                inputs=[x, wp.array(idx_np, dtype=int, device=device)],
+                outputs=[y, s],
+                block_dim=block_dim,
+                device=device,
+            )
+        np.testing.assert_allclose(y.numpy(), x_np[idx_np] ** 2, rtol=1e-6)
+        np.testing.assert_allclose(s.numpy(), np.full(block_dim, (x_np**2).sum()), rtol=1e-5)
+        y.grad = wp.ones(block_dim, dtype=float, device=device)
+        s.grad = wp.ones(block_dim, dtype=float, device=device)
+        tape.backward()
+        counts = np.bincount(idx_np, minlength=64).astype(np.float32)
+        expected = 2.0 * x_np * (counts + block_dim)
+        np.testing.assert_allclose(x.grad.numpy(), expected, rtol=1e-5, err_msg=f"block_dim={block_dim}")
+
+
+add_function_test(
+    TestTileLoadExtract,
+    "test_tile_extract_register",
+    test_tile_extract_register,
+    devices=get_selected_cuda_test_devices(),
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

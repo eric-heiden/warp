@@ -6908,8 +6908,11 @@ def tile_extract_value_func(arg_types, arg_values):
     if arg_types is None:
         return Any
 
-    # force the input tile to shared memory
-    arg_types["a"].storage = "shared"
+    # Other threads' register elements are read through shared memory, except in CUDA blocks of at most one warp,
+    # where register tiles are read with warp shuffles (no shared memory or block barriers).
+    single_warp = warp._src.codegen.target == "cuda" and warp._src.codegen.options.get("block_dim", 256) <= 32
+    if not single_warp:
+        arg_types["a"].storage = "shared"
 
     # count the number of indices (all parameters except the tile "a")
     num_indices = len(arg_types) - 1
@@ -6957,7 +6960,8 @@ add_builtin(
     index gives every thread the same value while a per-thread index gives each thread its
     own element. The current implementation places ``a`` in shared memory before
     extraction, where it counts against the block's shared-memory budget (see
-    :ref:`tile_shared_memory_budget`).
+    :ref:`tile_shared_memory_budget`), except in CUDA blocks of at most one warp
+    (``block_dim <= 32``), where register tiles are read with warp shuffles.
 
     Pass one index per tile dimension to read the element itself. A tile of vectors
     accepts one extra index, which selects a scalar component. A tile of matrices accepts

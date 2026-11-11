@@ -347,8 +347,16 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
 
     // step 2: combine thread results across block
     T block_sum = thread_sum;
-    if constexpr (warp_count == 1) {
-        // fast path: single warp, just do warp reduction
+    if constexpr (warp_count == 1 && WP_TILE_BLOCK_DIM == WP_TILE_WARP_SIZE && Layout::Size >= WP_TILE_BLOCK_DIM) {
+        // fast path: one full warp in which every lane holds an element; an xor butterfly leaves the total in
+        // every lane (no ballot, and a following tile_extract of element 0 reads it without shared memory)
+        const int lane = threadIdx.x % WP_TILE_WARP_SIZE;
+        WP_PRAGMA_UNROLL
+        for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2)
+            block_sum = f(block_sum, tile_warp_broadcast(block_sum, lane ^ offset));
+        output.data[0] = block_sum;
+    } else if constexpr (warp_count == 1) {
+        // single warp, partially filled: warp reduction over the lanes holding data
         wp_tile_lane_mask_bits_t mask = __ballot_sync(WP_TILE_LANE_MASK_ALL, thread_has_data);
         if (thread_has_data)
             block_sum = warp_reduce(thread_sum, f, mask);
