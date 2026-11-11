@@ -6072,8 +6072,12 @@ def tile_sum(a: Tile[Any, tuple[int, ...]]) -> Tile[Any, tuple[Literal[1]]]:
             [21.]"""
     ...
 
-def warp_sum(x: Scalar) -> Scalar:
-    """Return the sum of ``x`` over the 32 threads of the warp.
+def warp_sum(x: Scalar, width: int32 | int = 32) -> Scalar:
+    """Return the sum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes).
+
+    With ``width`` (a power of two up to 32), the warp is split into ``32 / width`` independent segments of
+    ``width`` consecutive lanes, each reduced on its own (like the ``width`` argument of CUDA's warp shuffles), e.g.
+    two 16-lane groups per warp for rows of 16 elements.
 
     This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
     thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the
@@ -6101,10 +6105,14 @@ def warp_sum(x: Scalar) -> Scalar:
                     out[row] = s"""
     ...
 
-def warp_max(x: Scalar) -> Scalar:
-    """Return the maximum of ``x`` over the 32 threads of the warp.
+def warp_max(x: Scalar, width: int32 | int = 32) -> Scalar:
+    """Return the maximum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes).
 
     The gradient flows to every thread holding the maximum.
+
+    With ``width`` (a power of two up to 32), the warp is split into ``32 / width`` independent segments of
+    ``width`` consecutive lanes, each reduced on its own (like the ``width`` argument of CUDA's warp shuffles), e.g.
+    two 16-lane groups per warp for rows of 16 elements.
 
     This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
     thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the

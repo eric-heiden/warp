@@ -92,6 +92,48 @@ def test_warp_reduce_rows(test, device):
     np.testing.assert_allclose(out.numpy(), (a * a).sum(1), rtol=1e-5)
 
 
+@wp.kernel(module="unique")
+def warp_segment_kernel(x: wp.array[float], s16: wp.array[float], m8: wp.array[float], s1: wp.array[float]):
+    i = wp.tid()
+    s16[i] = wp.warp_sum(x[i], 16)
+    m8[i] = wp.warp_max(x[i], width=8)
+    s1[i] = wp.warp_sum(x[i], 1)
+
+
+def test_warp_reduce_width(test, device):
+    rng = np.random.default_rng(3)
+    n = 32 * 5
+    x = rng.standard_normal(n).astype(np.float32)
+    s16, m8, s1 = (wp.zeros(n, dtype=float, device=device) for _ in range(3))
+    wp.launch(
+        warp_segment_kernel,
+        dim=n,
+        inputs=[wp.array(x, device=device)],
+        outputs=[s16, m8, s1],
+        block_dim=64,
+        device=device,
+    )
+    if wp.get_device(device).is_cuda:
+        e16 = np.repeat(x.reshape(-1, 16).sum(1), 16)
+        e8 = np.repeat(x.reshape(-1, 8).max(1), 8)
+    else:
+        e16, e8 = x, x
+    np.testing.assert_allclose(s16.numpy(), e16, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(m8.numpy(), e8, rtol=0, atol=0)
+    np.testing.assert_allclose(s1.numpy(), x, rtol=0, atol=0)
+
+
+def test_warp_reduce_width_check(test, device):
+    with test.assertRaisesRegex(ValueError, "power of two"):
+
+        @wp.kernel(module="unique")
+        def bad(x: wp.array[float]):
+            i = wp.tid()
+            x[i] = wp.warp_sum(x[i], 12)
+
+        wp.launch(bad, dim=32, inputs=[wp.zeros(32, dtype=float, device=device)], device=device)
+
+
 @wp.kernel
 def warp_grad_kernel(x: wp.array[float], w: wp.array[float], loss: wp.array[float]):
     i = wp.tid()
@@ -131,6 +173,8 @@ add_function_test(TestWarpReduce, "test_warp_reduce_types", test_warp_reduce_typ
 add_function_test(TestWarpReduce, "test_warp_reduce_bfloat16", test_warp_reduce_bfloat16, devices=devices)
 add_function_test(TestWarpReduce, "test_warp_reduce_rows", test_warp_reduce_rows, devices=devices)
 add_function_test(TestWarpReduce, "test_warp_reduce_grad", test_warp_reduce_grad, devices=devices)
+add_function_test(TestWarpReduce, "test_warp_reduce_width", test_warp_reduce_width, devices=devices)
+add_function_test(TestWarpReduce, "test_warp_reduce_width_check", test_warp_reduce_width_check, devices=devices)
 
 
 if __name__ == "__main__":

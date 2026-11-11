@@ -7946,7 +7946,20 @@ add_builtin(
 )
 
 
+def warp_reduce_value_func(arg_types, arg_values):
+    if arg_types is None:
+        return Scalar
+    width = arg_values.get("width") if arg_values else None
+    if isinstance(width, int) and (width < 1 or width > 32 or width & (width - 1)):
+        raise ValueError(f"warp reduction width must be a power of two between 1 and 32, got {width}")
+    return arg_types["x"]
+
+
 _WARP_REDUCE_NOTE = """
+
+    With ``width`` (a power of two up to 32), the warp is split into ``32 / width`` independent segments of
+    ``width`` consecutive lanes, each reduced on its own (like the ``width`` argument of CUDA's warp shuffles), e.g.
+    two 16-lane groups per warp for rows of 16 elements.
 
     This is a warp-synchronous operation for SIMT kernels: on CUDA devices, all 32 threads of a warp (consecutive
     thread indices ``32 * w ... 32 * w + 31`` of a launch whose ``block_dim`` is a multiple of 32) must reach the
@@ -7961,9 +7974,10 @@ _WARP_REDUCE_NOTE = """
 
 add_builtin(
     "warp_sum",
-    input_types={"x": Scalar},
-    value_func=sametypes_create_value_func(Scalar),
-    doc="""Return the sum of ``x`` over the 32 threads of the warp."""
+    input_types={"x": Scalar, "width": int},
+    defaults={"width": 32},
+    value_func=warp_reduce_value_func,
+    doc="""Return the sum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes)."""
     + _WARP_REDUCE_NOTE
     + """
 
@@ -7986,9 +8000,10 @@ add_builtin(
 
 add_builtin(
     "warp_max",
-    input_types={"x": Scalar},
-    value_func=sametypes_create_value_func(Scalar),
-    doc="""Return the maximum of ``x`` over the 32 threads of the warp.
+    input_types={"x": Scalar, "width": int},
+    defaults={"width": 32},
+    value_func=warp_reduce_value_func,
+    doc="""Return the maximum of ``x`` over the 32 threads of the warp (or over segments of ``width`` lanes).
 
     The gradient flows to every thread holding the maximum."""
     + _WARP_REDUCE_NOTE,
