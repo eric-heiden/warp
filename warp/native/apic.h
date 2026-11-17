@@ -239,6 +239,8 @@ WP_API const char* wp_apic_get_param_name(APICGraph* graph, int index);
 WP_API size_t wp_apic_get_param_size(APICGraph* graph, const char* name);
 
 WP_API bool wp_apic_launch(APICGraph* graph, void* stream);
+// Whether a loaded graph's operation stream (including conditional bodies) contains APICOpType ``op``.
+WP_API bool wp_apic_graph_has_op(APICGraph* graph, uint32_t op);
 
 // CPU kernel resolution for loaded graphs (called from Python after loading .o modules)
 WP_API void wp_apic_register_loaded_cpu_kernel(

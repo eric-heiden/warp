@@ -14,6 +14,7 @@
 
 #include "apic.h"
 #include "apic_internal.h"
+#include "gemm.h"
 #include "mesh.h"
 #include "version.h"
 
@@ -905,6 +906,37 @@ static bool apic_replay_ops_into_cuda_capture(
             break;
         }
 
+        case APIC_OP_GEMM: {
+            const APICGemmRecord* rec = reinterpret_cast<const APICGemmRecord*>(ptr);
+            const wp_gemm_desc d = wp_gemm_desc_from_record(*rec);
+            uint64_t a_bytes, b_bytes, c_bytes, bias_bytes;
+            wp_gemm_spans(
+                d, apic_type_size(rec->ab_dtype), apic_type_size(rec->c_dtype), &a_bytes, &b_bytes, &c_bytes,
+                &bias_bytes
+            );
+            void* a = apic_resolve_region_ptr(graph, rec->a_region_id, rec->a_offset, a_bytes);
+            void* b = apic_resolve_region_ptr(graph, rec->b_region_id, rec->b_offset, b_bytes);
+            void* c = apic_resolve_region_ptr(graph, rec->c_region_id, rec->c_offset, c_bytes);
+            void* bias = rec->bias_region_id > 0
+                ? apic_resolve_region_ptr(graph, rec->bias_region_id, rec->bias_offset, bias_bytes)
+                : nullptr;
+            if (!a || !b || !c || (rec->bias_region_id > 0 && !bias)) {
+                wp::set_error_string("Warp APIC error: GEMM failed to resolve region (op %u)", i);
+                success = false;
+                break;
+            }
+            // Re-plan with this process's cuBLASLt (prepared before the capture began), or use the
+            // built-in device GEMM compiled into warp.so when cuBLASLt is unavailable.
+            bool ok = wp_gemm_cublaslt_loaded()
+                ? wp_gemm_cublaslt(graph->cuda_context, (void*)stream, d, a, b, c, bias)
+                : wp_gemm_builtin_device(graph->cuda_context, (void*)stream, d, a, b, c, bias);
+            if (!ok) {
+                success = false;
+                break;
+            }
+            break;
+        }
+
         case APIC_OP_IF: {
             const APICCondRecord* rec = reinterpret_cast<const APICCondRecord*>(ptr);
             const uint8_t* branch_a = ptr + sizeof(APICCondRecord);
@@ -1085,6 +1117,23 @@ static bool apic_rebuild_cuda_graph(APICGraph* graph, CUstream stream)
                 target_diagnostic.c_str()
             );
             return false;
+        }
+    }
+
+    // GEMM ops replay through cuBLASLt when this process can load it. Its handle and
+    // workspace allocation must exist before the capture starts; plans themselves
+    // only query host-side heuristics and are created during the replay.
+    if (apic_stream_has_op(
+            graph->operation_stream.data(), graph->operation_stream.size(), graph->operation_count, APIC_OP_GEMM
+        )) {
+        if (wp_cublaslt_init_default() == 0 || !wp_gemm_cublaslt_prepare(graph->cuda_context)) {
+            static bool warned = false;
+            if (!warned) {
+                fprintf(
+                    stderr, "Warp APIC warning: cuBLASLt is unavailable; GEMM operations use the built-in device GEMM\n"
+                );
+                warned = true;
+            }
         }
     }
 

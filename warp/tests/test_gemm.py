@@ -140,6 +140,13 @@ def test_gemm_float64_batched(test, device):
     assert_np_equal(out.numpy(), 0.25 * a @ b.transpose(0, 2, 1) - 1.5 * c, tol=1e-12)
 
 
+def _to_float32(x):
+    v = x.numpy()
+    if x.dtype == wp.bfloat16:
+        return (v.astype(np.uint32) << 16).view(np.float32)
+    return v.astype(np.float32)
+
+
 def test_gemm_mixed_precision(test, device):
     """float16 / bfloat16 operands with float32 outputs (and bias)."""
     rng = np.random.default_rng(8)
@@ -148,8 +155,8 @@ def test_gemm_mixed_precision(test, device):
         b = rng.standard_normal((40, 32)).astype(np.float32)
         bias = rng.standard_normal(40).astype(np.float32)
         wa, wb = wp.array(a, dtype=dtype, device=device), wp.array(b, dtype=dtype, device=device)
-        # reference on the operands rounded to their precision
-        ar, br = wa.numpy().astype(np.float32), wb.numpy().astype(np.float32)
+        # reference on the operands rounded to their precision (bfloat16 arrays are returned as raw uint16 bits)
+        ar, br = _to_float32(wa), _to_float32(wb)
         out = wp.zeros((48, 40), dtype=wp.float32, device=device)
         wp.gemm(wa, wb, out, trans_b=True, bias=wp.array(bias, device=device))
         assert_np_equal(out.numpy(), ar @ br.T + bias, tol=1e-3)
@@ -180,7 +187,7 @@ def test_gemm_argument_checks(test, device):
 
 
 def test_gemm_api_capture_save_load(test, device):
-    """A GEMM inside an API capture uses the built-in kernel, so saved graphs contain it."""
+    """A GEMM inside an API capture is recorded as a GEMM operation that saved graphs replay natively."""
     rng = np.random.default_rng(7)
     an, bn = rng.standard_normal((24, 16)).astype(np.float32), rng.standard_normal((16, 8)).astype(np.float32)
     biasn = rng.standard_normal(8).astype(np.float32)
@@ -198,10 +205,45 @@ def test_gemm_api_capture_save_load(test, device):
         path = os.path.join(tmpdir, "gemm_graph")
         wp.capture_save(capture.graph, path, inputs={"a": a, "b": b, "bias": bias}, outputs={"out": out})
         loaded = wp.capture_load(path, device=device)
+        test.assertTrue(wp._src.context.runtime.core.wp_apic_graph_has_op(loaded._native_graph, 21))  # APIC_OP_GEMM
         wp.capture_launch(loaded)
         result = wp.zeros((24, 8), dtype=float, device=device)
         loaded.get_param("out", result)
         assert_np_equal(result.numpy(), expected, tol=1e-4)
+        del loaded
+
+
+def test_gemm_api_capture_transposed_and_bias_grad(test, device):
+    """Saved graphs replay transposed, batched and bias-gradient GEMMs."""
+    rng = np.random.default_rng(9)
+    xn, gn = rng.standard_normal((40, 12)).astype(np.float32), rng.standard_normal((40, 7)).astype(np.float32)
+    an, bn = rng.standard_normal((3, 5, 6)).astype(np.float32), rng.standard_normal((3, 4, 6)).astype(np.float32)
+    x, g = wp.array(xn, device=device), wp.array(gn, device=device)
+    a, b = wp.array(an, device=device), wp.array(bn, device=device)
+    dw = wp.zeros((12, 7), dtype=float, device=device)
+    db = wp.zeros(7, dtype=float, device=device)
+    c = wp.zeros((3, 5, 4), dtype=float, device=device)
+    wp.gemm(x, g, dw, trans_a=True, bias_grad=db)
+    wp.gemm(a, b, c, trans_b=True, alpha=0.5)
+    with wp.ScopedCapture(device=device, apic=True) as capture:
+        wp.gemm(x, g, dw, trans_a=True, bias_grad=db)
+        wp.gemm(a, b, c, trans_b=True, alpha=0.5)
+    expected_c = 0.5 * an @ np.swapaxes(bn, 1, 2)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "gemm_graph")
+        wp.capture_save(capture.graph, path, inputs={"x": x, "g": g}, outputs={"dw": dw, "db": db, "c": c})
+        loaded = wp.capture_load(path, device=device)
+        wp.capture_launch(loaded)
+        results = {
+            "dw": wp.zeros((12, 7), dtype=float, device=device),
+            "db": wp.zeros(7, dtype=float, device=device),
+            "c": wp.zeros((3, 5, 4), dtype=float, device=device),
+        }
+        for name, arr in results.items():
+            loaded.get_param(name, arr)
+        assert_np_equal(results["dw"].numpy(), xn.T @ gn, tol=1e-4)
+        assert_np_equal(results["db"].numpy(), gn.sum(axis=0), tol=1e-4)
+        assert_np_equal(results["c"].numpy(), expected_c, tol=1e-4)
         del loaded
 
 
@@ -254,6 +296,13 @@ for _name, _fn in _tests:
 add_function_test(TestGemm, "test_gemm_argument_checks", test_gemm_argument_checks, devices=devices, check_output=False)
 add_function_test(
     TestGemm, "test_gemm_api_capture_save_load", test_gemm_api_capture_save_load, devices=devices, check_output=False
+)
+add_function_test(
+    TestGemm,
+    "test_gemm_api_capture_transposed_and_bias_grad",
+    test_gemm_api_capture_transposed_and_bias_grad,
+    devices=devices,
+    check_output=False,
 )
 add_function_test(
     TestGemm, "test_gemm_is_cublaslt_available", test_gemm_is_cublaslt_available, devices=devices, check_output=False

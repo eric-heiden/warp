@@ -47,6 +47,9 @@ inline uint32_t apic_type_size(uint8_t dtype)
     case APIC_TYPE_UINT64:
     case APIC_TYPE_FLOAT64:
         return 8;
+    case APIC_TYPE_FLOAT16:
+    case APIC_TYPE_BFLOAT16:
+        return 2;
     default:
         return 0;
     }
@@ -614,6 +617,9 @@ bool apic_validate_operation_stream(
 // ============================================================================
 
 bool apic_read_file(const char* path, std::vector<uint8_t>& data);
+
+// Whether a validated operation stream (including IF/WHILE bodies) contains ``op`` (apic.cpp).
+bool apic_stream_has_op(const uint8_t* data, size_t size, uint32_t count, uint32_t op);
 std::string apic_sha256_hex(const uint8_t* data, size_t size);
 
 // .wrp parsers (apic.cpp). Metadata and memory populate graph fields;

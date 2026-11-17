@@ -10,10 +10,10 @@
 // APIC Format Constants
 // =============================================================================
 
-#define APIC_FORMAT_VERSION 19
+#define APIC_FORMAT_VERSION 20
 // The loader also requires the producing Warp version, so require recapture
 // rather than decode older layouts.
-#define APIC_MIN_SUPPORTED_FORMAT_VERSION 19
+#define APIC_MIN_SUPPORTED_FORMAT_VERSION 20
 #define APIC_UNSIGNED_LAUNCH_BOUNDS_VERSION 16
 #define APIC_MAGIC "WRP1"
 #define APIC_MAGIC_VALUE 0x31505257  // "WRP1" as little-endian uint32
@@ -50,6 +50,16 @@ enum APICOpType : uint32_t {
     APIC_OP_BVH_REBUILD = 18,  // wp_bvh_rebuild_host
     APIC_OP_HASH_GRID_UPDATE = 19,  // wp_hash_grid_update_host
     APIC_OP_BSR_COMPRESS = 20,  // wp_bsr_compress_inplace_host/device
+    APIC_OP_GEMM = 21,  // wp.gemm (cuBLASLt or the built-in GEMM on replay)
+};
+
+// Fused GEMM epilogues (APICGemmRecord::epilogue).
+enum APICGemmEpilogue : uint8_t {
+    APIC_GEMM_EPILOGUE_NONE = 0,
+    APIC_GEMM_EPILOGUE_BIAS = 1,
+    APIC_GEMM_EPILOGUE_RELU = 2,
+    APIC_GEMM_EPILOGUE_RELU_BIAS = 3,
+    APIC_GEMM_EPILOGUE_BGRADA = 4,  // bias region receives column sums of op(b) over K
 };
 
 enum APICReductionKind : uint8_t {
@@ -65,6 +75,8 @@ enum APICType : uint8_t {
     APIC_TYPE_UINT64 = 4,
     APIC_TYPE_FLOAT32 = 5,
     APIC_TYPE_FLOAT64 = 6,
+    APIC_TYPE_FLOAT16 = 7,  // GEMM operands only
+    APIC_TYPE_BFLOAT16 = 8,  // GEMM operands only
 };
 
 // Per-value-blob relocation kinds. A relocation patches one 8-byte slot
@@ -547,6 +559,47 @@ struct APICBsrCompressRecord {
     uint64_t values_offset;
 };
 static_assert(sizeof(APICBsrCompressRecord) == 96, "APICBsrCompressRecord must remain 96 bytes");
+
+// GEMM op (fixed size). Records a wp.gemm() call semantically,
+// ``c = epilogue(alpha * op(a) @ op(b) + bias) + beta * c`` on row-major
+// matrices, rather than the library kernel cuBLASLt enqueued: cuBLASLt's
+// kernels live in its own fatbinary and cannot be serialized. CUDA graph
+// reconstruction re-plans the problem with the guest's cuBLASLt (heuristic
+// algorithm choice for the guest GPU) and falls back to Warp's built-in
+// device GEMM when cuBLASLt cannot be loaded; CPU replay runs the built-in
+// host GEMM. ``bias`` is the bias-gradient output for BGRADA and -1 when
+// absent. Leading dimensions and batch strides are in elements.
+struct APICGemmRecord {
+    APICOpHeader header;  // op_type = APIC_OP_GEMM
+    int32_t a_region_id;
+    int32_t b_region_id;
+    int32_t c_region_id;
+    int32_t bias_region_id;  // -1 if absent
+    uint64_t a_offset;
+    uint64_t b_offset;
+    uint64_t c_offset;
+    uint64_t bias_offset;
+    int64_t stride_a;
+    int64_t stride_b;
+    int64_t stride_c;
+    double alpha;
+    double beta;
+    int32_t m;
+    int32_t n;
+    int32_t k;
+    int32_t lda;
+    int32_t ldb;
+    int32_t ldc;
+    int32_t batch;
+    uint8_t ab_dtype;  // APICType: FLOAT16, BFLOAT16, FLOAT32 or FLOAT64
+    uint8_t c_dtype;  // APICType: ab_dtype, or FLOAT32 for FLOAT16/BFLOAT16 operands
+    uint8_t trans_a;
+    uint8_t trans_b;
+    uint8_t epilogue;  // APICGemmEpilogue
+    uint8_t tf32;
+    uint8_t _pad[6];
+};
+static_assert(sizeof(APICGemmRecord) == 136, "APICGemmRecord must remain 136 bytes");
 
 // Same-process host BVH update (APIC_OP_BVH_REFIT or APIC_OP_BVH_REBUILD).
 // Records a wp_bvh_refit_host() / wp_bvh_rebuild_host() call so CPU graph

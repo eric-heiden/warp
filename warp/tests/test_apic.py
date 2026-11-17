@@ -1060,7 +1060,7 @@ def _mock_apic_cuda_export_graph(modules):
 _APIC_SECTION_METADATA = 1
 _APIC_SECTION_MEMORY = 2
 _APIC_SECTION_OPERATIONS = 3
-_APIC_FORMAT_VERSION = 19
+_APIC_FORMAT_VERSION = 20
 
 # These layouts mirror the packed structs in warp/native/apic_types.h. "<"
 # selects little-endian standard sizes without implicit alignment; "4s", "i",

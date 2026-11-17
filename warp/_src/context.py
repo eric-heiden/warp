@@ -7252,6 +7252,8 @@ class Runtime:
                 ctypes.c_char_p,
             ]
             self.core.wp_apic_load_graph_ex.restype = ctypes.c_void_p
+            self.core.wp_apic_graph_has_op.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self.core.wp_apic_graph_has_op.restype = ctypes.c_bool
             self.core.wp_apic_destroy_graph.argtypes = [ctypes.c_void_p]
             self.core.wp_apic_destroy_graph.restype = None
             self.core.wp_apic_register_loaded_cpu_kernel.argtypes = [
@@ -14979,6 +14981,16 @@ def _apic_wrap_loaded_graph(native_graph, device: Device) -> Graph:
     """Wrap a native ``APICGraph*`` in a :class:`Graph` and record its parameter bindings."""
     graph = Graph(device)
     graph._native_graph = native_graph
+
+    if runtime.core.wp_apic_graph_has_op(native_graph, 21):  # APIC_OP_GEMM
+        # CUDA: load cuBLASLt from pip wheels or the CUDA toolkit before the graph is reconstructed on first
+        # launch; without it, the native loader tries the system library path and then uses the built-in device
+        # GEMM. CPU: register NumPy's BLAS for the host GEMMs.
+        import warp._src.gemm as gemm_module  # noqa: PLC0415
+
+        gemm_module._setup_native(runtime.core)
+        if device.is_cuda:
+            gemm_module.is_cublaslt_available()
 
     num_params = runtime.core.wp_apic_get_num_params(native_graph)
     for i in range(num_params):

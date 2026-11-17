@@ -8,14 +8,14 @@ per problem shape and issues a single ``cublasLtMatmul()`` per call. Plans are c
 (do a warm-up call before graph capture to keep plan creation outside of the captured region), and the
 launch itself is safe for CUDA graph capture.
 
-CPU arrays, CUDA devices without a loadable cuBLASLt, and CUDA API captures (``apic=True``, whose operation
-stream cannot represent cuBLASLt calls) use a built-in Warp kernel instead: it supports the same arguments,
-is recorded like any other kernel launch, and is much slower than cuBLASLt for large problems.
+Every call goes through one native entry point (``wp_gemm_device`` / ``wp_gemm_host``). Inside an API capture
+(``apic=True``, and CPU captures) it records a semantic GEMM operation, so a saved graph re-plans the GEMM with
+the cuBLASLt of the process that loads it. CPU arrays and CUDA devices without a loadable cuBLASLt use built-in
+GEMMs compiled into ``warp.so``.
 """
 
 from __future__ import annotations
 
-import atexit
 import ctypes
 import glob
 import os
@@ -52,7 +52,6 @@ _DTYPES = {
 }
 
 _state = {"loaded": None, "version": 0}
-_plans: dict = {}
 
 
 def _lib_candidates():
@@ -91,6 +90,108 @@ def _lib_candidates():
         yield f"libcublasLt.so.{major}"
         yield f"cublasLt64_{major}.dll"
     yield "libcublasLt.so"
+
+
+class _GemmDesc(ctypes.Structure):
+    """Mirror of ``wp_gemm_desc`` in ``warp/native/gemm.h``."""
+
+    _fields_ = [
+        ("ab_dtype", ctypes.c_int32),
+        ("c_dtype", ctypes.c_int32),
+        ("trans_a", ctypes.c_int32),
+        ("trans_b", ctypes.c_int32),
+        ("m", ctypes.c_int32),
+        ("n", ctypes.c_int32),
+        ("k", ctypes.c_int32),
+        ("lda", ctypes.c_int32),
+        ("ldb", ctypes.c_int32),
+        ("ldc", ctypes.c_int32),
+        ("batch", ctypes.c_int32),
+        ("epilogue", ctypes.c_int32),
+        ("stride_a", ctypes.c_int64),
+        ("stride_b", ctypes.c_int64),
+        ("stride_c", ctypes.c_int64),
+        ("alpha", ctypes.c_double),
+        ("beta", ctypes.c_double),
+        ("tf32", ctypes.c_int32),
+        ("autotune", ctypes.c_int32),
+    ]
+
+
+# APICType values (warp/native/apic_types.h)
+_APIC_TYPES = {_types.float32: 5, _types.float64: 6, _types.float16: 7, _types.bfloat16: 8}
+# APICGemmEpilogue values
+_APIC_EP = {(None, False): 0, (None, True): 1, ("relu", False): 2, ("relu", True): 3}
+_APIC_EP_BGRADA = 4
+
+_native_ready = False
+
+
+def _setup_native(core):
+    global _native_ready
+    if _native_ready:
+        return
+    core.wp_gemm_host.argtypes = [ctypes.POINTER(_GemmDesc)] + [ctypes.c_void_p] * 4
+    core.wp_gemm_host.restype = ctypes.c_bool
+    core.wp_gemm_device.argtypes = (
+        [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_GemmDesc)] + [ctypes.c_void_p] * 4 + [ctypes.c_int]
+    )
+    core.wp_gemm_device.restype = ctypes.c_bool
+    core.wp_gemm_set_host_blas.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    core.wp_gemm_set_host_blas.restype = None
+    _register_host_blas(core)
+    _native_ready = True
+
+
+_use_host_blas = os.environ.get("WARP_GEMM_HOST_BLAS", "1") != "0"  # "0" forces the built-in host GEMM
+_host_blas_info = None
+
+
+def _numpy_blas():
+    """Return ``(sgemm, dgemm, ilp64, path)`` for the CBLAS library NumPy links against, or ``None``.
+
+    NumPy wheels bundle OpenBLAS (``scipy_openblas64`` with prefixed ILP64 symbols in NumPy 2, ``openblas64_``
+    in NumPy 1) or use Accelerate on macOS. Loading it again with ctypes returns the library NumPy already loaded.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    base = os.path.dirname(os.path.dirname(np.__file__))
+    candidates = []
+    for d in (os.path.join(base, "numpy.libs"), os.path.join(os.path.dirname(np.__file__), ".dylibs"), base):
+        candidates += sorted(glob.glob(os.path.join(d, "*openblas*")))
+    if sys.platform == "darwin":
+        candidates.append("/System/Library/Frameworks/Accelerate.framework/Accelerate")
+    symbols = (
+        ("scipy_cblas_sgemm64_", "scipy_cblas_dgemm64_", True),
+        ("cblas_sgemm64_", "cblas_dgemm64_", True),
+        ("scipy_cblas_sgemm", "scipy_cblas_dgemm", False),
+        ("cblas_sgemm", "cblas_dgemm", False),
+    )
+    for path in candidates:
+        try:
+            lib = ctypes.CDLL(path)
+        except OSError:
+            continue
+        for s_name, d_name, ilp64 in symbols:
+            try:
+                s_fn, d_fn = getattr(lib, s_name), getattr(lib, d_name)
+            except AttributeError:
+                continue
+            return (
+                ctypes.cast(s_fn, ctypes.c_void_p).value,
+                ctypes.cast(d_fn, ctypes.c_void_p).value,
+                ilp64,
+                path,
+            )
+    return None
+
+
+def _register_host_blas(core):
+    global _host_blas_info
+    if _host_blas_info is None:
+        _host_blas_info = _numpy_blas() or (None, None, False, None)
+    s_fn, d_fn, ilp64, _ = _host_blas_info
+    core.wp_gemm_set_host_blas(s_fn, d_fn, int(ilp64), int(_use_host_blas))
 
 
 def _setup_signatures(core):
@@ -139,6 +240,9 @@ def _ensure_loaded():
         _ctx.init()
     core = _ctx.runtime.core
     _setup_signatures(core)
+    if os.environ.get("WARP_CUBLASLT_PATH", "").lower() in ("none", "0", "off"):
+        _state["loaded"] = False  # cuBLASLt disabled explicitly: use the built-in GEMMs
+        raise RuntimeError("cuBLASLt is disabled by WARP_CUBLASLT_PATH")
     for cand in _lib_candidates():
         v = core.wp_cublaslt_init(cand.encode())
         if v:
@@ -167,37 +271,23 @@ def is_cublaslt_available() -> bool:
     return True
 
 
-_force_fallback = False  # tests: use the built-in kernel on CUDA devices too
+_force_fallback = False  # tests: use the built-in GEMM on CUDA devices too
+# Built-in GEMM implementation: "native" (compiled into warp.so, recorded as an APIC GEMM operation) or "warp"
+# (the generic Warp kernels below, recorded as kernel launches). Kept selectable for benchmarking.
+_builtin_impl = "native"
 
 
 def _select_backend(device) -> str:
-    """``"cublaslt"`` or ``"warp"`` (the built-in kernel) for a call on ``device``."""
+    """``"cublaslt"`` or ``"builtin"`` for a call on ``device``."""
     if device.is_cpu or _force_fallback:
-        return "warp"
-    if _ctx._get_apic_capture_for_device(device) is not None:
-        log_warning(
-            "wp.gemm() inside an API capture (apic=True) uses the built-in Warp GEMM kernel, since the captured "
-            "operation stream cannot represent cuBLASLt calls; it is much slower than cuBLASLt for large problems.",
-            once=True,
-        )
-        return "warp"
+        return "builtin"
     if not is_cublaslt_available():
         log_warning(
             f"wp.gemm() uses the built-in Warp GEMM kernel, which is much slower than cuBLASLt: {_INSTALL_HINT}.",
             once=True,
         )
-        return "warp"
+        return "builtin"
     return "cublaslt"
-
-
-def _destroy_plans():
-    if _state["loaded"]:
-        for p in _plans.values():
-            _ctx.runtime.core.wp_cublaslt_plan_destroy(p)
-    _plans.clear()
-
-
-atexit.register(_destroy_plans)
 
 
 def _mat_info(a, trans):
@@ -246,9 +336,10 @@ def gemm(
     with ``float16`` or ``bfloat16`` operands (the products are accumulated in ``float32`` in all cases but
     ``float64``). On CUDA devices, the call enqueues a single cuBLASLt kernel launch on the device's current
     stream and can be captured in a CUDA graph. cuBLASLt is loaded at runtime (see
-    :func:`warp.is_cublaslt_available`); CPU arrays, CUDA devices without cuBLASLt and API captures
-    (``apic=True``) use a built-in Warp kernel instead, which is recorded in CPU graphs and saved graphs like any
-    kernel launch but is much slower than cuBLASLt for large problems.
+    :func:`warp.is_cublaslt_available`). CUDA devices without cuBLASLt use a built-in tiled GEMM compiled into Warp,
+    and CPU arrays use the BLAS library NumPy ships with, or a built-in blocked GEMM. Inside API captures
+    (``apic=True``) and CPU captures the call is recorded as a GEMM operation: saved graphs re-plan it with the
+    cuBLASLt available where they are loaded, or fall back to the built-in GEMMs.
 
     Args:
         a: Left operand, shape ``(M, K)`` (or ``(K, M)`` if ``trans_a``).
@@ -339,11 +430,11 @@ def gemm(
         )
     if recorded and out.dtype != a.dtype:
         raise RuntimeError("gemm() with mixed operand and output dtypes cannot be recorded on a wp.Tape")
-    if _select_backend(a.device) == "warp":
+    backend = _select_backend(a.device)
+    if backend == "builtin" and _builtin_impl == "warp":
         _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, bias_grad, K)
     else:
-        _ensure_loaded()
-        _cublaslt_gemm(
+        _native_gemm(
             a,
             b,
             out,
@@ -357,6 +448,7 @@ def gemm(
             tf32,
             autotune,
             stream,
+            backend,
             M,
             N,
             K,
@@ -372,7 +464,7 @@ def gemm(
     return out
 
 
-def _cublaslt_gemm(
+def _native_gemm(
     a,
     b,
     out,
@@ -386,6 +478,7 @@ def _cublaslt_gemm(
     tf32,
     autotune,
     stream,
+    backend,
     M,
     N,
     K,
@@ -395,36 +488,16 @@ def _cublaslt_gemm(
     sa,
     sb,
 ):
-    """Launch the GEMM with cuBLASLt (arguments validated by :func:`gemm`)."""
+    """Launch the GEMM through ``wp_gemm_device`` / ``wp_gemm_host`` (arguments validated by :func:`gemm`)."""
+    core = _ctx.runtime.core
+    _setup_native(core)
     _, _, ldc, _, sc = _mat_info(out, False)
-    dt, _ = _DTYPES[a.dtype]
-    ct, _ = _DTYPES[out.dtype]  # output (and bias) type: float32 for mixed precision
-    if a.dtype == _types.float64:
-        compute, scale = _COMPUTE_64F, _CUDA_R_64F
-    else:
-        compute = _COMPUTE_32F_TF32 if (tf32 and a.dtype == _types.float32) else _COMPUTE_32F
-        scale = _CUDA_R_32F
-    ep = _EP[(activation, bias is not None)]
-    aux_ld = 0
-    if bias_grad is not None:
-        # weight-gradient GEMM out = op(a) @ op(b): fuse the column sums of op(b) over K (the batch) into bias_grad
-        ep = _EP_BGRADA
-    # pointer alignment is part of the plan: cuBLASLt algorithms are only valid for the alignment they were chosen for
-    min_align = 256
-    for arr in (a, b, out, bias, bias_grad):
-        if arr is not None and arr.ptr:
-            min_align = min(min_align, arr.ptr & -arr.ptr)
-    for ld_elems, x in ((lda, a), (ldb, b), (ldc, out)):
-        ld_bytes = ld_elems * _DTYPES[x.dtype][1]
-        min_align = min(min_align, ld_bytes & -ld_bytes)
-    key = (
-        a.device.context,
-        min_align,
-        dt,
-        ct,
-        compute,
-        trans_a,
-        trans_b,
+    ep = _APIC_EP_BGRADA if bias_grad is not None else _APIC_EP[(activation, bias is not None)]
+    desc = _GemmDesc(
+        _APIC_TYPES[a.dtype],
+        _APIC_TYPES[out.dtype],
+        int(trans_a),
+        int(trans_b),
         M,
         N,
         K,
@@ -432,66 +505,42 @@ def _cublaslt_gemm(
         ldb,
         ldc,
         batch,
+        ep,
         sa,
         sb,
         sc,
-        ep,
-        aux_ld,
-    )
-    plan = _plans.get(key)
-    if plan is None:
-        plan = _ctx.runtime.core.wp_cublaslt_plan_create(
-            a.device.context,
-            dt,
-            dt,
-            ct,
-            compute,
-            scale,
-            int(trans_a),
-            int(trans_b),
-            M,
-            N,
-            K,
-            lda,
-            ldb,
-            ldc,
-            batch,
-            sa,
-            sb,
-            sc,
-            ep,
-            ct,
-            aux_ld,
-            ct,
-            autotune,
-            min_align,
-        )
-        if not plan:
-            raise RuntimeError(
-                f"gemm() failed to create a cuBLASLt plan: {_ctx.runtime.core.wp_get_error_string().decode()}"
-            )
-        _plans[key] = plan
-    if stream is None:
-        stream_ptr = a.device.stream.cuda_stream
-    else:
-        stream_ptr = stream.cuda_stream
-    ok = _ctx.runtime.core.wp_cublaslt_plan_run(
-        plan,
-        stream_ptr,
-        a.ptr,
-        b.ptr,
-        out.ptr,
-        (bias_grad.ptr if bias_grad is not None else (bias.ptr if bias is not None else None)),
-        None,
         float(alpha),
         float(beta),
+        int(bool(tf32)),
+        int(autotune),
     )
+    vec = bias_grad if bias_grad is not None else bias
+    device = a.device
+    capture = _ctx._get_apic_capture_for_device(device)
+    if capture is not None:
+        for x in (a, b, out, vec):
+            if x is not None:
+                capture.track_array(x)
+    if device.is_cpu:
+        ok = core.wp_gemm_host(ctypes.byref(desc), a.ptr, b.ptr, out.ptr, vec.ptr if vec is not None else None)
+    else:
+        stream_ptr = device.stream.cuda_stream if stream is None else stream.cuda_stream
+        ok = core.wp_gemm_device(
+            device.context,
+            stream_ptr,
+            ctypes.byref(desc),
+            a.ptr,
+            b.ptr,
+            out.ptr,
+            vec.ptr if vec is not None else None,
+            1 if backend == "cublaslt" else 2,
+        )
     if not ok:
-        raise RuntimeError(f"gemm() launch failed: {_ctx.runtime.core.wp_get_error_string().decode()}")
+        raise RuntimeError(f"gemm() failed: {core.wp_get_error_string().decode()}")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Built-in Warp kernel (CPU arrays, CUDA without cuBLASLt, CUDA API captures)
+# Generic Warp kernels (the previous built-in GEMM, selectable with ``_builtin_impl = "warp"`` for benchmarks)
 
 _fallback_cache: dict = {}
 

@@ -21,6 +21,7 @@
 #include "apic_internal.h"
 #include "cpu_block_runtime.h"
 #include "error.h"
+#include "gemm.h"
 #include "hashgrid.h"
 #include "mesh.h"
 #include "version.h"
@@ -2232,6 +2233,22 @@ bool apic_validate_operation_stream(
             }
             break;
         }
+        case APIC_OP_GEMM: {
+            if (header->total_size != sizeof(APICGemmRecord)) {
+                fprintf(stderr, "Warp APIC error: invalid GEMM record size at operation %u\n", i);
+                return false;
+            }
+            const APICGemmRecord* rec = reinterpret_cast<const APICGemmRecord*>(ptr);
+            bool needs_bias = rec->epilogue == APIC_GEMM_EPILOGUE_BIAS || rec->epilogue == APIC_GEMM_EPILOGUE_RELU_BIAS
+                || rec->epilogue == APIC_GEMM_EPILOGUE_BGRADA;
+            if (!wp_gemm_record_valid(*rec) || rec->a_region_id <= 0 || rec->b_region_id <= 0 || rec->c_region_id <= 0
+                || (needs_bias && rec->bias_region_id <= 0)
+                || (rec->epilogue == APIC_GEMM_EPILOGUE_BGRADA && rec->trans_b)) {
+                fprintf(stderr, "Warp APIC error: invalid GEMM record at operation %u\n", i);
+                return false;
+            }
+            break;
+        }
         case APIC_OP_BVH_REFIT:
         case APIC_OP_BVH_REBUILD:
             if (op_end < op_start + sizeof(APICBvhRecord)) {
@@ -3113,6 +3130,28 @@ static bool apic_cpu_replay_stream(
                 reinterpret_cast<int*>(offsets), reinterpret_cast<int*>(row_counts), reinterpret_cast<int*>(columns),
                 values, rec->compress_values != 0
             );
+            break;
+        }
+
+        case APIC_OP_GEMM: {
+            const APICGemmRecord* rec = reinterpret_cast<const APICGemmRecord*>(ptr);
+            const wp_gemm_desc d = wp_gemm_desc_from_record(*rec);
+            uint64_t a_bytes, b_bytes, c_bytes, bias_bytes;
+            wp_gemm_spans(
+                d, apic_type_size(rec->ab_dtype), apic_type_size(rec->c_dtype), &a_bytes, &b_bytes, &c_bytes,
+                &bias_bytes
+            );
+            void* a = resolve_ptr(rec->a_region_id, rec->a_offset, a_bytes);
+            void* b = resolve_ptr(rec->b_region_id, rec->b_offset, b_bytes);
+            void* c = resolve_ptr(rec->c_region_id, rec->c_offset, c_bytes);
+            void* bias
+                = rec->bias_region_id > 0 ? resolve_ptr(rec->bias_region_id, rec->bias_offset, bias_bytes) : nullptr;
+            if (!a || !b || !c || (rec->bias_region_id > 0 && !bias)) {
+                wp::set_error_string("Warp APIC error: GEMM pointer resolution failed at operation %u", i);
+                return false;
+            }
+            if (!wp_gemm_builtin_host(d, a, b, c, bias))
+                return false;
             break;
         }
 
@@ -4075,6 +4114,36 @@ APICGraph* wp_apic_load_graph_from_bytes(
           };
 
     return apic_load_graph_from_image(context, static_cast<const uint8_t*>(data), size, resolve_module, device_type);
+}
+
+// Whether a validated operation stream (including IF/WHILE bodies) contains ``op``.
+bool apic_stream_has_op(const uint8_t* data, size_t size, uint32_t count, uint32_t op)
+{
+    const uint8_t* ptr = data;
+    for (uint32_t i = 0; i < count && ptr < data + size; i++) {
+        const APICOpHeader* header = reinterpret_cast<const APICOpHeader*>(ptr);
+        if (header->op_type == op)
+            return true;
+        if (header->op_type == APIC_OP_IF || header->op_type == APIC_OP_WHILE) {
+            const APICCondRecord* rec = reinterpret_cast<const APICCondRecord*>(ptr);
+            const uint8_t* branch_a = ptr + sizeof(APICCondRecord);
+            if (apic_stream_has_op(branch_a, rec->branch_a_size, rec->branch_a_op_count, op))
+                return true;
+            if (header->op_type == APIC_OP_IF
+                && apic_stream_has_op(branch_a + rec->branch_a_size, rec->branch_b_size, rec->branch_b_op_count, op))
+                return true;
+        }
+        ptr += header->total_size;
+    }
+    return false;
+}
+
+bool wp_apic_graph_has_op(APICGraph* graph, uint32_t op)
+{
+    return graph && graph->operations_validated
+        && apic_stream_has_op(
+               graph->operation_stream.data(), graph->operation_stream.size(), graph->operation_count, op
+        );
 }
 
 // ============================================================================

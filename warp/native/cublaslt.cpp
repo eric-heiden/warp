@@ -13,12 +13,17 @@
 
 #include "warp.h"
 
+#include "apic_types.h"
 #include "error.h"
+#include "gemm.h"
 
 #if WP_ENABLE_CUDA
 
 #include "cuda_util.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -444,6 +449,155 @@ WP_API void wp_cublaslt_plan_destroy(void* plan)
 
 }  // extern "C"
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Descriptor-based entry points used by wp_gemm_device() and API-capture replay. Plans are cached natively per
+// (context, alignment, descriptor), so a loaded graph can re-plan its GEMMs without Python.
+
+namespace {
+
+std::mutex g_plan_mutex;
+std::map<std::vector<int64_t>, void*> g_plan_cache;
+
+int lt_data_type(int apic_type)
+{
+    switch (apic_type) {
+    case APIC_TYPE_FLOAT64:
+        return CUDA_R_64F;
+    case APIC_TYPE_FLOAT16:
+        return CUDA_R_16F;
+    case APIC_TYPE_BFLOAT16:
+        return CUDA_R_16BF;
+    default:
+        return CUDA_R_32F;
+    }
+}
+
+int lt_epilogue(int ep)
+{
+    switch (ep) {
+    case APIC_GEMM_EPILOGUE_BIAS:
+        return CUBLASLT_EPILOGUE_BIAS;
+    case APIC_GEMM_EPILOGUE_RELU:
+        return CUBLASLT_EPILOGUE_RELU;
+    case APIC_GEMM_EPILOGUE_RELU_BIAS:
+        return CUBLASLT_EPILOGUE_RELU_BIAS;
+    case APIC_GEMM_EPILOGUE_BGRADA:
+        return CUBLASLT_EPILOGUE_BGRADA;
+    default:
+        return 0;
+    }
+}
+
+int ptr_align(const void* p)
+{
+    uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    return v ? int(v & (~v + 1)) : 256;
+}
+
+}  // namespace
+
+bool wp_gemm_cublaslt_loaded() { return g_lib != nullptr; }
+
+bool wp_gemm_cublaslt_prepare(void* context)
+{
+    if (!g_lib)
+        return false;
+    ContextGuard guard(context);
+    return get_device_state(context) != nullptr;
+}
+
+bool wp_gemm_cublaslt(
+    void* context, void* stream, const wp_gemm_desc& d, const void* a, const void* b, void* c, void* bias
+)
+{
+    if (!g_lib) {
+        wp::set_error_string("cuBLASLt is not loaded");
+        return false;
+    }
+    const int ab = lt_data_type(d.ab_dtype), ct = lt_data_type(d.c_dtype);
+    const bool f64 = d.ab_dtype == APIC_TYPE_FLOAT64;
+    const int compute = f64
+        ? CUBLAS_COMPUTE_64F
+        : ((d.tf32 && d.ab_dtype == APIC_TYPE_FLOAT32) ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F);
+    const int scale = f64 ? CUDA_R_64F : CUDA_R_32F;
+    const int ep = lt_epilogue(d.epilogue);
+    const bool uses_bias = d.epilogue != APIC_GEMM_EPILOGUE_NONE && d.epilogue != APIC_GEMM_EPILOGUE_RELU;
+    // algorithms are only valid for the pointer and leading-dimension alignment they were chosen for
+    const int ab_bytes = (d.ab_dtype == APIC_TYPE_FLOAT64) ? 8 : (d.ab_dtype == APIC_TYPE_FLOAT32 ? 4 : 2);
+    const int c_bytes = (d.c_dtype == APIC_TYPE_FLOAT64) ? 8 : (d.c_dtype == APIC_TYPE_FLOAT32 ? 4 : 2);
+    int min_align = 256;
+    for (const void* p : { a, b, (const void*)c, uses_bias ? (const void*)bias : nullptr })
+        if (p)
+            min_align = std::min(min_align, ptr_align(p));
+    for (int64_t ld_bytes : { int64_t(d.lda) * ab_bytes, int64_t(d.ldb) * ab_bytes, int64_t(d.ldc) * c_bytes })
+        if (ld_bytes)
+            min_align = std::min<int64_t>(min_align, ld_bytes & -ld_bytes);
+
+    std::vector<int64_t> key = { int64_t(reinterpret_cast<uintptr_t>(context)),
+                                 min_align,
+                                 ab,
+                                 ct,
+                                 compute,
+                                 d.trans_a,
+                                 d.trans_b,
+                                 d.m,
+                                 d.n,
+                                 d.k,
+                                 d.lda,
+                                 d.ldb,
+                                 d.ldc,
+                                 d.batch,
+                                 d.stride_a,
+                                 d.stride_b,
+                                 d.stride_c,
+                                 ep };
+    void* plan = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_plan_mutex);
+        auto it = g_plan_cache.find(key);
+        if (it != g_plan_cache.end())
+            plan = it->second;
+    }
+    if (!plan) {
+        plan = wp_cublaslt_plan_create(
+            context, ab, ab, ct, compute, scale, d.trans_a, d.trans_b, d.m, d.n, d.k, d.lda, d.ldb, d.ldc, d.batch,
+            d.stride_a, d.stride_b, d.stride_c, ep, ct, 0, ct, d.autotune, min_align
+        );
+        if (!plan)
+            return false;
+        std::lock_guard<std::mutex> lock(g_plan_mutex);
+        g_plan_cache[key] = plan;
+    }
+    return wp_cublaslt_plan_run(plan, stream, a, b, c, uses_bias ? bias : nullptr, nullptr, d.alpha, d.beta);
+}
+
+extern "C" {
+
+// Load cuBLASLt from WARP_CUBLASLT_PATH or the default library search path, newest major version first.
+// Python loads it from pip wheels or the CUDA toolkit first; this is the path for standalone C++ graph loading.
+WP_API int wp_cublaslt_init_default()
+{
+    if (g_lib)
+        return int(pfn_cublasLtGetVersion());
+    const char* env = std::getenv("WARP_CUBLASLT_PATH");
+    if (env && (!strcmp(env, "none") || !strcmp(env, "0") || !strcmp(env, "off")))
+        return 0;  // disabled explicitly: use the built-in device GEMM
+#if defined(_WIN32)
+    const char* names[] = { env, "cublasLt64_13.dll", "cublasLt64_12.dll" };
+#else
+    const char* names[] = { env, "libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so" };
+#endif
+    for (const char* name : names)
+        if (name && *name)
+            if (int v = wp_cublaslt_init(name))
+                return v;
+    return 0;
+}
+
+WP_API bool wp_cublaslt_is_loaded() { return g_lib != nullptr; }
+
+}  // extern "C"
+
 #else  // !WP_ENABLE_CUDA
 
 extern "C" {
@@ -482,6 +636,8 @@ WP_API bool wp_cublaslt_plan_run(void*, void*, const void*, const void*, void*, 
     return false;
 }
 WP_API void wp_cublaslt_plan_destroy(void*) { }
+WP_API int wp_cublaslt_init_default() { return 0; }
+WP_API bool wp_cublaslt_is_loaded() { return false; }
 }
 
 #endif
