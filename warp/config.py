@@ -272,7 +272,8 @@ Each kernel begins with ``griddepcontrol.wait``, which waits for the preceding k
 captured graph) to complete before executing, so results are unchanged. Launches set the programmatic stream
 serialization attribute, which lets the GPU overlap a kernel's launch processing with the tail of its predecessor.
 This reduces the per-kernel cost of graphs made of many small, dependent kernels (for example a MuJoCo Warp step).
-Requires compute capability 9.0+ (the prologue is a no-op elsewhere). The ``"enable_pdl"`` module option overrides it.
+Takes effect on devices of compute capability 9.0+; elsewhere kernels launch as usual, since the attribute alone
+made each captured launch about 5x slower on an sm_89 GPU. The ``"enable_pdl"`` module option overrides it.
 """
 
 enable_mathdx_gemm: bool = True

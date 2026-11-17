@@ -43,7 +43,8 @@ def test_pdl_chain_matches(test, device):
     np.testing.assert_array_equal(results[0], results[1])
 
 
-devices = [d for d in get_selected_cuda_test_devices(mode="basic") if wp.get_device(d).arch >= 90]
+# PDL launches only on sm_90+; elsewhere the option must leave results unchanged too
+devices = get_selected_cuda_test_devices(mode="basic")
 
 
 class TestPDL(unittest.TestCase):

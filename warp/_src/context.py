@@ -4045,8 +4045,9 @@ class ModuleExec:
             else:
                 backward_kernel = None
 
-            # kernels of modules compiled with a PDL prologue are launched with programmatic dependent launch
-            if self.meta.get("enable_pdl"):
+            # kernels of modules compiled with a PDL prologue are launched with programmatic dependent launch, on
+            # devices that support it: below sm_90 the prologue is empty, and the launch attribute only slows launches
+            if self.meta.get("enable_pdl") and self.device.arch >= 90:
                 runtime.core.wp_cuda_set_kernel_pdl(forward_kernel, 1)
                 if backward_kernel:
                     runtime.core.wp_cuda_set_kernel_pdl(backward_kernel, 1)
