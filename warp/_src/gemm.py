@@ -353,7 +353,8 @@ def gemm(
         activation: Optional fused activation: ``"relu"``. Its backward pass needs only the output (``out > 0``).
         bias_grad: Optional 1D output array of length ``N`` receiving, for a weight-gradient GEMM ``a.T @ b``
             (``trans_a=True``, ``trans_b=False``, no bias or activation), the column sums of ``b`` over the reduction
-            dimension, i.e. the bias gradient of a linear layer.
+            dimension, i.e. the bias gradient of a linear layer. With 3D (batched) arrays the sums also run over the
+            batch.
         tf32: Allow TF32 tensor cores for float32 inputs (cuBLASLt only).
         autotune: Number of cuBLASLt heuristic candidates to time on the first (non-captured) call with ``beta == 0``;
             the fastest is kept. Use 0 or 1 to disable.

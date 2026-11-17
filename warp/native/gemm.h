@@ -62,6 +62,8 @@ bool wp_gemm_builtin_host(const wp_gemm_desc& d, const void* a, const void* b, v
 bool wp_gemm_builtin_device(
     void* context, void* stream, const wp_gemm_desc& d, const void* a, const void* b, void* c, void* bias
 );
+// bias[j] = sum over batches and k of b[k, j] (the BGRADA bias gradient, see wp_gemm_desc), on the device.
+bool wp_gemm_colsum_device(void* context, void* stream, const wp_gemm_desc& d, const void* b, void* bias);
 
 // cuBLASLt implementation (cublaslt.cpp). Returns false if cuBLASLt is not loaded or the call fails.
 bool wp_gemm_cublaslt(

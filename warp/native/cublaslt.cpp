@@ -514,6 +514,14 @@ bool wp_gemm_cublaslt(
         wp::set_error_string("cuBLASLt is not loaded");
         return false;
     }
+    if (d.epilogue == APIC_GEMM_EPILOGUE_BGRADA && d.batch > 1) {
+        // cuBLASLt's BGRADA epilogue does not stride the bias pointer per batch and writes only the first batch's
+        // column sums. The bias gradient of a batched GEMM sums over the batch too, so reduce it separately.
+        wp_gemm_desc plain = d;
+        plain.epilogue = APIC_GEMM_EPILOGUE_NONE;
+        return wp_gemm_cublaslt(context, stream, plain, a, b, c, nullptr)
+            && wp_gemm_colsum_device(context, stream, d, b, bias);
+    }
     const int ab = lt_data_type(d.ab_dtype), ct = lt_data_type(d.c_dtype);
     const bool f64 = d.ab_dtype == APIC_TYPE_FLOAT64;
     const int compute = f64

@@ -55,6 +55,14 @@ def test_gemm_bias_grad(test, device):
     wp.gemm(wp.array(x, device=device), wp.array(dy, device=device), gw, trans_a=True, bias_grad=gb2)
     assert_np_equal(gw.numpy(), x.T @ dy, tol=1e-3)
     assert_np_equal(gb2.numpy(), dy.sum(axis=0), tol=1e-3)
+    # batched: per-batch weight gradients, one bias gradient summed over the batch as well
+    xb = rng.standard_normal((3, B, H)).astype(np.float32)
+    dyb = rng.standard_normal((3, B, D)).astype(np.float32)
+    gwb = wp.zeros((3, H, D), dtype=float, device=device)
+    gbb = wp.zeros(D, dtype=float, device=device)
+    wp.gemm(wp.array(xb, device=device), wp.array(dyb, device=device), gwb, trans_a=True, bias_grad=gbb)
+    assert_np_equal(gwb.numpy(), np.swapaxes(xb, 1, 2) @ dyb, tol=1e-3)
+    assert_np_equal(gbb.numpy(), dyb.sum(axis=(0, 1)), tol=1e-3)
 
 
 def test_gemm_batched_and_misaligned(test, device):

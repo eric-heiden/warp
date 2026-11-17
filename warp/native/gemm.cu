@@ -332,6 +332,19 @@ bool run(const wp_gemm_desc& d, const void* a, const void* b, void* c, void* bia
     return check_cuda(cudaGetLastError());
 }
 
+template <typename TAB> bool run_colsum(const wp_gemm_desc& d, const void* b, void* bias, cudaStream_t stream)
+{
+    GemmArgs p = {};
+    p.b = b;
+    p.n = d.n;
+    p.k = d.k;
+    p.ldb = d.ldb;
+    p.sb = d.stride_b;
+    p.c_f32 = d.c_dtype == APIC_TYPE_FLOAT32 && d.ab_dtype != APIC_TYPE_FLOAT32;
+    gemm_colsum<TAB><<<dim3((d.n + 31) / 32), dim3(32, 8), 0, stream>>>(p, d.batch, bias);
+    return check_cuda(cudaGetLastError());
+}
+
 }  // namespace
 
 bool wp_gemm_builtin_device(
@@ -351,6 +364,27 @@ bool wp_gemm_builtin_device(
         return run<__half>(d, a, b, c, bias, s);
     case APIC_TYPE_BFLOAT16:
         return run<__nv_bfloat16>(d, a, b, c, bias, s);
+    default:
+        wp::set_error_string("Warp GEMM error: unsupported dtype %d", d.ab_dtype);
+        return false;
+    }
+}
+
+bool wp_gemm_colsum_device(void* context, void* stream, const wp_gemm_desc& d, const void* b, void* bias)
+{
+    if (d.n <= 0 || !bias)
+        return true;
+    ContextGuard guard(context);
+    cudaStream_t s = static_cast<cudaStream_t>(stream);
+    switch (d.ab_dtype) {
+    case APIC_TYPE_FLOAT32:
+        return run_colsum<float>(d, b, bias, s);
+    case APIC_TYPE_FLOAT64:
+        return run_colsum<double>(d, b, bias, s);
+    case APIC_TYPE_FLOAT16:
+        return run_colsum<__half>(d, b, bias, s);
+    case APIC_TYPE_BFLOAT16:
+        return run_colsum<__nv_bfloat16>(d, b, bias, s);
     default:
         wp::set_error_string("Warp GEMM error: unsupported dtype %d", d.ab_dtype);
         return false;
