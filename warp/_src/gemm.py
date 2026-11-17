@@ -24,7 +24,7 @@ from typing import Any
 
 import warp._src.context as _ctx
 import warp._src.types as _types
-from warp._src.logger import log_warning
+from warp._src.logger import log_debug, log_warning
 
 _INSTALL_HINT = (
     "install the cuBLAS wheel matching Warp's CUDA version (pip install warp-lang[cublas-cu12] or "
@@ -51,44 +51,150 @@ _DTYPES = {
     _types.bfloat16: (_CUDA_R_16BF, 2),
 }
 
-_state = {"loaded": None, "version": 0}
+_state = {"loaded": None, "version": 0, "path": None}
+
+# cuBLASLt file names per CUDA major version: (Linux soname, Windows DLL)
+_LIB_NAMES = {13: ("libcublasLt.so.13", "cublasLt64_13.dll"), 12: ("libcublasLt.so.12", "cublasLt64_12.dll")}
+# Lowest compute capability each cuBLASLt major version supports (CUDA 13 dropped Maxwell, Pascal and Volta).
+_MIN_ARCH = {13: 75, 12: 50}
+
+
+def _parse_version(text):
+    """Leading dotted version number in ``text`` as a tuple of ints, e.g. ``"12.9.1.4"`` -> ``(12, 9, 1, 4)``."""
+    out = []
+    for part in text.split("."):
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        out.append(int(digits))
+        if len(digits) != len(part):
+            break
+    return tuple(out)
+
+
+def _wheel_versions(site_dir):
+    """Map library paths shipped by ``nvidia-cublas*`` wheels installed in ``site_dir`` to the wheel version."""
+    versions = {}
+    for dist in glob.glob(os.path.join(site_dir, "nvidia_cublas*.dist-info")):
+        # nvidia_cublas_cu12-12.9.1.4.dist-info, nvidia_cublas-13.1.0.3.dist-info
+        version = _parse_version(os.path.basename(dist).split("-", 1)[-1])
+        try:
+            with open(os.path.join(dist, "RECORD"), encoding="utf-8") as f:
+                for line in f:
+                    rel = line.split(",", 1)[0]
+                    if "ublasLt" in rel:
+                        versions[os.path.normcase(os.path.realpath(os.path.join(site_dir, rel)))] = version
+        except OSError:
+            continue
+    return versions
+
+
+def _toolkit_version(root):
+    """cuBLAS version of the CUDA toolkit at ``root`` from its ``version.json``, or the CUDA version in its name."""
+    try:
+        import json  # noqa: PLC0415
+
+        with open(os.path.join(root, "version.json"), encoding="utf-8") as f:
+            info = json.load(f)
+        return _parse_version(info.get("libcublas", info.get("cuda", {})).get("version", ""))
+    except (OSError, ValueError, AttributeError):
+        pass
+    name = os.path.basename(os.path.normpath(root)).lower()
+    for prefix in ("cuda-", "v"):
+        if name.startswith(prefix):
+            return _parse_version(name[len(prefix) :])
+    return ()
+
+
+def _find_cublaslt(site_dirs, toolkit_roots, system_dirs):
+    """Return ``[(version, path), ...]`` for every cuBLASLt library found, newest first, without loading any.
+
+    Versions come from the wheel metadata (pip ``nvidia-cublas`` wheels in ``site_dirs``), the versioned file
+    name the library resolves to (``libcublasLt.so.12.9.1.4``), or the toolkit's ``version.json``. A library
+    whose version cannot be determined ranks by its major version alone, below every versioned library of that
+    major version.
+    """
+    found = {}
+
+    def add(path, version):
+        real = os.path.normcase(os.path.realpath(path))
+        if os.path.isfile(real):
+            version = max(version, _parse_version(os.path.basename(real).partition(".so.")[2]))
+            if version > found.get(real, (None, ()))[1]:
+                found[real] = (path, version)
+
+    for major, (so, dll) in _LIB_NAMES.items():
+        for base in site_dirs:
+            wheel = _wheel_versions(base)
+            for pattern in (
+                f"nvidia/cu{major}/lib/{so}",
+                f"nvidia/cublas/lib/{so}",
+                f"nvidia/cu{major}/bin/{dll}",
+                f"nvidia/cu{major}/bin/*/{dll}",
+                f"nvidia/cublas/bin/{dll}",
+            ):
+                for path in glob.glob(os.path.join(base, pattern)):
+                    real = os.path.normcase(os.path.realpath(path))
+                    add(path, wheel.get(real, (major,)))
+        for root in toolkit_roots:
+            version = _toolkit_version(root)
+            if version[:1] != (major,):
+                version = (major,)
+            for sub in ("lib64", "lib", os.path.join("targets", "*", "lib"), "bin", os.path.join("bin", "x64")):
+                for name in (so, dll):
+                    for path in glob.glob(os.path.join(root, sub, name)):
+                        add(path, version)
+        for d in system_dirs:
+            for path in glob.glob(os.path.join(d, so)):
+                add(path, (major,))
+    return sorted(((v, p) for p, v in found.values()), key=lambda vp: vp[0], reverse=True)
+
+
+def _default_search_dirs():
+    """Site directories, CUDA toolkit roots and system library directories to search for cuBLASLt."""
+    site_dirs = [p for p in sys.path if p and os.path.isdir(p)]
+    roots = [os.environ[v] for v in ("WARP_CUDA_PATH", "CUDA_HOME", "CUDA_PATH") if os.environ.get(v)]
+    system_dirs = []
+    if sys.platform == "win32":
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        roots += glob.glob(os.path.join(pf, "NVIDIA GPU Computing Toolkit", "CUDA", "v*"))
+    elif sys.platform.startswith("linux"):
+        roots += glob.glob("/usr/local/cuda*") + glob.glob("/opt/cuda*")
+        system_dirs += [*glob.glob("/usr/lib/*-linux-gnu"), "/usr/lib64", "/usr/lib"]
+    return site_dirs, roots, system_dirs
+
+
+def _supported_majors():
+    """cuBLASLt major versions the CUDA driver and every CUDA device of this process can use."""
+    runtime = _ctx.runtime
+    driver = runtime.driver_version if runtime is not None else None
+    archs = [d.arch for d in runtime.cuda_devices] if runtime is not None else []
+    return [m for m in _LIB_NAMES if (driver is None or driver[0] >= m) and all(a >= _MIN_ARCH[m] for a in archs if a)]
 
 
 def _lib_candidates():
-    """Candidate cuBLASLt libraries, newest major version first.
+    """cuBLASLt libraries to try loading, in order.
 
-    Newer cuBLASLt releases carry native kernels for newer GPU architectures (older ones fall back to
-    forward-compatible PTX kernels), so CUDA 13 libraries are preferred over CUDA 12 ones, and pip wheels
-    (``nvidia-cublas``) or the configured CUDA toolkit are preferred over whatever the loader finds first.
+    ``WARP_CUBLASLT_PATH`` comes first. Then every cuBLASLt found in pip ``nvidia-cublas`` wheels on
+    ``sys.path``, CUDA toolkits (``WARP_CUDA_PATH``, ``CUDA_HOME``, ``CUDA_PATH`` and the default install
+    locations) and the system library directories, newest version first: newer cuBLASLt releases carry kernels
+    tuned for newer GPUs, while older ones fall back to slower generic kernels. Major versions that the CUDA
+    driver or one of the GPUs cannot use are skipped. The plain library names, resolved by the system loader,
+    come last.
     """
     env = os.environ.get("WARP_CUBLASLT_PATH")
     if env:
         yield env
-
-    def found(patterns):
-        for base in sys.path:
-            for p in patterns:
-                yield from sorted(glob.glob(os.path.join(base, p)), reverse=True)
-        for var in ("WARP_CUDA_PATH", "CUDA_HOME", "CUDA_PATH"):
-            root = os.environ.get(var)
-            if root:
-                for p in patterns:
-                    name = os.path.basename(p)
-                    yield from sorted(glob.glob(os.path.join(root, "lib*", name)), reverse=True)
-                    yield from sorted(glob.glob(os.path.join(root, "targets", "*", "lib", name)), reverse=True)
-
-    for major in ("13", "12"):
-        yield from found(
-            (
-                f"nvidia/cu{major}/lib/libcublasLt.so.{major}*",
-                f"nvidia/cublas/lib/libcublasLt.so.{major}*",
-                f"nvidia/cu{major}/bin/cublasLt64_{major}.dll",
-                f"nvidia/cu{major}/bin/*/cublasLt64_{major}.dll",
-                f"nvidia/cublas/bin/cublasLt64_{major}.dll",
-            )
-        )
-        yield f"libcublasLt.so.{major}"
-        yield f"cublasLt64_{major}.dll"
+    majors = _supported_majors()
+    for version, path in _find_cublaslt(*_default_search_dirs()):
+        if version[0] in majors:
+            yield path
+    for major in majors:
+        yield from _LIB_NAMES[major]
     yield "libcublasLt.so"
 
 
@@ -246,7 +352,8 @@ def _ensure_loaded():
     for cand in _lib_candidates():
         v = core.wp_cublaslt_init(cand.encode())
         if v:
-            _state["loaded"], _state["version"] = True, v
+            _state["loaded"], _state["version"], _state["path"] = True, v, cand
+            log_debug(f"Loaded cuBLASLt {v} from {cand}")
             return
     _state["loaded"] = False
     raise RuntimeError(f"cuBLASLt could not be loaded; {_INSTALL_HINT}")
@@ -257,7 +364,8 @@ def is_cublaslt_available() -> bool:
 
     cuBLASLt is loaded at runtime, on the first call of this function or of :func:`warp.gemm`, from the
     ``nvidia-cublas`` wheels (``pip install warp-lang[cublas-cu12]`` or ``warp-lang[cublas-cu13]``), the CUDA
-    toolkit or the library search path; ``WARP_CUBLASLT_PATH`` selects a library explicitly. Without it,
+    toolkit or the library search path. When several are installed, the newest one that the CUDA driver and
+    GPUs support is used; ``WARP_CUBLASLT_PATH`` selects a library explicitly. Without it,
     :func:`warp.gemm` uses a much slower built-in Warp kernel.
     """
     if _ctx.runtime is None:

@@ -262,6 +262,50 @@ def test_gemm_is_cublaslt_available(test, device):
         test.assertFalse(available)
 
 
+def test_gemm_cublaslt_search_order(test, device):
+    """Installed cuBLASLt libraries are ranked newest first, without loading them."""
+    import json  # noqa: PLC0415
+
+    import warp._src.gemm as gemm_module  # noqa: PLC0415
+
+    def touch(path, text=""):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        site = os.path.join(tmp, "site-packages")
+        wheel12 = os.path.join(site, "nvidia", "cublas", "lib", "libcublasLt.so.12")
+        wheel13 = os.path.join(site, "nvidia", "cu13", "lib", "libcublasLt.so.13")
+        touch(wheel12)
+        touch(wheel13)
+        touch(
+            os.path.join(site, "nvidia_cublas_cu12-12.8.4.1.dist-info", "RECORD"),
+            "nvidia/cublas/lib/libcublasLt.so.12,,1\n",
+        )
+        touch(
+            os.path.join(site, "nvidia_cublas-13.1.0.3.dist-info", "RECORD"), "nvidia/cu13/lib/libcublasLt.so.13,,1\n"
+        )
+        # a toolkit with version.json, and one known only by its directory name
+        tk129 = os.path.join(tmp, "toolkit")
+        touch(os.path.join(tk129, "version.json"), json.dumps({"libcublas": {"version": "12.9.1.4"}}))
+        touch(os.path.join(tk129, "lib64", "libcublasLt.so.12"))
+        tk126 = os.path.join(tmp, "cuda-12.6")
+        touch(os.path.join(tk126, "lib64", "libcublasLt.so.12"))
+        system = os.path.join(tmp, "system")
+        touch(os.path.join(system, "libcublasLt.so.12"))
+
+        found = gemm_module._find_cublaslt([site], [tk126, tk129], [system])
+        test.assertEqual([v for v, _ in found], [(13, 1, 0, 3), (12, 9, 1, 4), (12, 8, 4, 1), (12, 6), (12,)])
+        test.assertEqual(os.path.realpath(found[0][1]), os.path.realpath(wheel13))
+        test.assertEqual(os.path.realpath(found[2][1]), os.path.realpath(wheel12))
+        test.assertEqual(os.path.dirname(found[4][1]), system)
+
+    test.assertEqual(gemm_module._parse_version("12.9.1.4.dist-info"), (12, 9, 1, 4))
+    test.assertEqual(gemm_module._parse_version("13.1.0.3"), (13, 1, 0, 3))
+    test.assertEqual(gemm_module._parse_version("v12"), ())
+
+
 def _with_builtin_kernel(fn):
     """Run a test with the built-in Warp kernel on CUDA devices too."""
 
@@ -314,6 +358,9 @@ add_function_test(
 )
 add_function_test(
     TestGemm, "test_gemm_is_cublaslt_available", test_gemm_is_cublaslt_available, devices=devices, check_output=False
+)
+add_function_test(
+    TestGemm, "test_gemm_cublaslt_search_order", test_gemm_cublaslt_search_order, devices=None, check_output=False
 )
 
 
