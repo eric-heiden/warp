@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "api.h"
+
 #include <stdint.h>
 
 struct wp_gemm_desc {
@@ -72,7 +74,7 @@ bool wp_gemm_cublaslt(
 // Create the cuBLASLt handle and workspace for ``context`` (must not run during stream capture).
 bool wp_gemm_cublaslt_prepare(void* context);
 bool wp_gemm_cublaslt_loaded();
-extern "C" int wp_cublaslt_init_default();
+extern "C" WP_API int wp_cublaslt_init_default();
 
 // APIC record conversion (gemm.cpp).
 struct APICGemmRecord;

@@ -151,7 +151,7 @@ def test_gemm_float64_batched(test, device):
 
 def _to_float32(x):
     v = x.numpy()
-    if x.dtype == wp.bfloat16:
+    if x.dtype == wp.bfloat16 and v.dtype == np.uint16:  # raw bits unless ml_dtypes is installed
         return (v.astype(np.uint32) << 16).view(np.float32)
     return v.astype(np.float32)
 
@@ -164,7 +164,7 @@ def test_gemm_mixed_precision(test, device):
         b = rng.standard_normal((40, 32)).astype(np.float32)
         bias = rng.standard_normal(40).astype(np.float32)
         wa, wb = wp.array(a, dtype=dtype, device=device), wp.array(b, dtype=dtype, device=device)
-        # reference on the operands rounded to their precision (bfloat16 arrays are returned as raw uint16 bits)
+        # reference on the operands rounded to their precision
         ar, br = _to_float32(wa), _to_float32(wb)
         out = wp.zeros((48, 40), dtype=wp.float32, device=device)
         wp.gemm(wa, wb, out, trans_b=True, bias=wp.array(bias, device=device))
