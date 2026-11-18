@@ -20,6 +20,7 @@ import ctypes
 import glob
 import os
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import warp._src.context as _ctx
@@ -429,7 +430,7 @@ def gemm(
     trans_a: bool = False,
     trans_b: bool = False,
     bias=None,
-    activation: str | None = None,
+    activation: str | Callable | None = None,
     bias_grad=None,
     tf32: bool = False,
     autotune: int = 8,
@@ -458,7 +459,12 @@ def gemm(
         trans_a: Use the transpose of ``a``.
         trans_b: Use the transpose of ``b``.
         bias: Optional 1D array of length ``N`` added to each output row (fused epilogue).
-        activation: Optional fused activation: ``"relu"``. Its backward pass needs only the output (``out > 0``).
+        activation: Optional activation applied to ``alpha * op(a) @ op(b) + bias``: ``"relu"``, fused into the
+            cuBLASLt epilogue, or a :func:`warp.func` applied elementwise by a Warp kernel generated for it and
+            launched right after the GEMM. The function takes the value as its first argument and may take the row
+            and column of the element as two more ``int`` arguments (``f(x)`` or ``f(x, i, j)``); values are
+            ``float32`` (``float64`` for ``float64`` outputs), so annotate them with that type or ``Any``. Its
+            backward pass is Warp's generated adjoint of the function.
         bias_grad: Optional 1D output array of length ``N`` receiving, for a weight-gradient GEMM ``a.T @ b``
             (``trans_a=True``, ``trans_b=False``, no bias or activation), the column sums of ``b`` over the reduction
             dimension, i.e. the bias gradient of a linear layer. With 3D (batched) arrays the sums also run over the
@@ -473,7 +479,8 @@ def gemm(
 
     When a :class:`warp.Tape` is recording and ``a``, ``b`` or ``bias`` require gradients, the adjoint GEMMs (and
     the bias column sums) are recorded on the tape, so ``tape.backward()`` accumulates into their ``grad`` arrays.
-    This requires ``beta=0``, no fused activation and no ``bias_grad``.
+    This requires ``beta=0`` and no ``bias_grad``. With a :func:`warp.func` activation the tape also records the
+    activation kernel, and the pre-activation values it needs are kept in a temporary array.
 
     Returns:
         The output array.
@@ -524,8 +531,9 @@ def gemm(
         )
     if beta != 0.0 and activation is not None:
         raise ValueError("gemm() does not support beta != 0 together with a fused activation")
-    if activation not in (None, "relu"):
-        raise ValueError(f"gemm() unsupported activation {activation!r} (expected None or 'relu')")
+    func_activation = isinstance(activation, _ctx.Function)
+    if not func_activation and activation not in (None, "relu"):
+        raise ValueError(f"gemm() unsupported activation {activation!r} (expected None, 'relu' or a warp.func)")
     if bias_grad is not None and (activation is not None or bias is not None or not trans_a or trans_b):
         raise ValueError("gemm() bias_grad requires trans_a=True, trans_b=False and no bias or activation")
     for name, x in (("bias", bias), ("bias_grad", bias_grad)):
@@ -533,12 +541,13 @@ def gemm(
             raise ValueError(f"gemm() {name} must be a 1D array of length {N}")
     tape = _ctx.runtime.tape if record_tape else None
     recorded = tape is not None and any(x is not None and x.requires_grad for x in (a, b, bias))
-    if recorded and (activation is not None or bias_grad is not None or beta != 0.0):
-        raise RuntimeError(
-            "gemm() can only be recorded on a wp.Tape without a fused activation or bias_grad and with beta=0"
-        )
+    if recorded and (bias_grad is not None or beta != 0.0):
+        raise RuntimeError("gemm() can only be recorded on a wp.Tape without bias_grad and with beta=0")
     if recorded and out.dtype != a.dtype:
         raise RuntimeError("gemm() with mixed operand and output dtypes cannot be recorded on a wp.Tape")
+    if func_activation:
+        _gemm_func_activation(a, b, out, activation, recorded, alpha, trans_a, trans_b, bias, tf32, autotune, stream)
+        return out
     backend = _select_backend(a.device)
     if backend == "builtin" and _builtin_impl == "warp":
         _fallback_gemm(a, b, out, alpha, beta, trans_a, trans_b, bias, activation, bias_grad, K)
@@ -569,8 +578,138 @@ def gemm(
         )
 
     if recorded:
-        _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream)
+        _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream, relu=activation == "relu")
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# warp.func activations
+
+_activation_cache: dict = {}
+
+
+# Elements per thread of the flat activation kernel (contiguous outputs); 2.2x faster than one thread per element
+_ACT_PER_THREAD = 8
+
+
+def _activation_kernel(func, dtype, ndim: int):
+    """Kernel applying ``func`` elementwise (``out = func(pre)``) for ``dtype`` arrays.
+
+    ``ndim`` 1 is the flat kernel for contiguous arrays: ``pre`` and ``out`` are flattened, each thread handles
+    ``_ACT_PER_THREAD`` elements ``stride`` apart (coalesced), and ``rows``/``cols`` recover the element's row and
+    column. ``ndim`` 2 and 3 index the arrays directly, for strided outputs.
+    """
+    import inspect  # noqa: PLC0415
+
+    import warp as wp  # noqa: PLC0415
+
+    key = (func, dtype, ndim)
+    kernel = _activation_cache.get(key)
+    if kernel is not None:
+        return kernel
+    nargs = len(inspect.signature(func.func).parameters)
+    if nargs not in (1, 3):
+        raise TypeError(
+            f"gemm() activation {func.key!r} must take (x) or (x, i, j) as arguments, it takes {nargs} arguments"
+        )
+    ACC = wp.float64 if dtype == _types.float64 else wp.float32
+    with_index = nargs == 3
+    V = _ACT_PER_THREAD
+
+    @wp.func
+    def apply(x: Any, i: int, j: int):
+        if wp.static(with_index):
+            return func(ACC(x), i, j)
+        else:
+            return func(ACC(x))
+
+    if ndim == 1:
+
+        @wp.kernel(module="unique")
+        def kernel(pre: wp.array1d[dtype], out: wp.array1d[dtype], n: int, stride: int, rows: int, cols: int):
+            t = wp.tid()
+            for v in range(V):
+                idx = t + v * stride
+                if idx < n:
+                    out[idx] = dtype(apply(pre[idx], (idx // cols) % rows, idx % cols))
+
+    elif ndim == 2:
+
+        @wp.kernel(module="unique")
+        def kernel(pre: wp.array2d[dtype], out: wp.array2d[dtype]):
+            i, j = wp.tid()
+            out[i, j] = dtype(apply(pre[i, j], i, j))
+
+    else:
+
+        @wp.kernel(module="unique")
+        def kernel(pre: wp.array3d[dtype], out: wp.array3d[dtype]):
+            n, i, j = wp.tid()
+            out[n, i, j] = dtype(apply(pre[n, i, j], i, j))
+
+    _activation_cache[key] = kernel
+    return kernel
+
+
+def _launch_activation(func, pre, out, stream, adj_pre=None, adj_out=None):
+    """Launch ``out = func(pre)``, or its adjoint when ``adj_pre`` and ``adj_out`` are given."""
+    adjoint = adj_out is not None
+    arrays = [pre, out, adj_pre, adj_out] if adjoint else [pre, out]
+    flat = all(x.is_contiguous for x in arrays)
+    kernel = _activation_kernel(func, out.dtype, 1 if flat else out.ndim)
+    dim, scalars = out.shape, []
+    if flat:
+        n = out.size
+        stride = (n + _ACT_PER_THREAD - 1) // _ACT_PER_THREAD
+        arrays = [x.flatten() for x in arrays]
+        dim, scalars = stride, [n, stride, out.shape[-2], out.shape[-1]]
+    kw = {"adj_inputs": [arrays[2], arrays[3]] + [0] * len(scalars), "adjoint": True} if adjoint else {}
+    _ctx.launch(
+        kernel,
+        dim=dim,
+        inputs=[arrays[0], arrays[1], *scalars],
+        device=out.device,
+        stream=stream,
+        record_tape=False,
+        **kw,
+    )
+
+
+def _gemm_func_activation(a, b, out, func, recorded, alpha, trans_a, trans_b, bias, tf32, autotune, stream):
+    """``out = func(alpha * op(a) @ op(b) + bias)``: the GEMM (with its fused bias), then one activation kernel.
+
+    Without a tape the activation runs in place on ``out``. When recording, the pre-activation values go to a
+    temporary array; the backward pass runs Warp's adjoint of the activation kernel, which accumulates into the
+    temporary's gradient, and the GEMM's own backward pass consumes that gradient. Like the GEMM's backward pass,
+    the adjoint reads ``out.grad`` without zeroing it: it is launched on a view of ``out`` without a gradient
+    array, which also avoids a slow store-then-atomic pattern in the generated adjoint (5.7x slower for large
+    outputs).
+    """
+    _activation_kernel(func, out.dtype, out.ndim)  # validate the signature before launching the GEMM
+    pre = _ctx.empty(out.shape, dtype=out.dtype, device=out.device, requires_grad=True) if recorded else out
+    gemm(
+        a,
+        b,
+        pre,
+        alpha=alpha,
+        trans_a=trans_a,
+        trans_b=trans_b,
+        bias=bias,
+        tf32=tf32,
+        autotune=autotune,
+        stream=stream,
+        record_tape=recorded,
+    )
+    _launch_activation(func, pre, out, stream)
+    if not recorded:
+        return
+    out_view = _types.array(ptr=out.ptr, shape=out.shape, strides=out.strides, dtype=out.dtype, device=out.device)
+
+    def backward():
+        if out.grad is not None:
+            _launch_activation(func, pre, out_view, stream, adj_pre=pre.grad, adj_out=out.grad)
+
+    _ctx.runtime.tape.record_func(backward, [pre, out])
 
 
 def _native_gemm(
@@ -834,17 +973,51 @@ def _colsum(dout, grad):
     wp.launch(kernel, dim=(nrb, d2.shape[1]), inputs=[d2, grad.flatten()], device=d2.device)
 
 
-def _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream):
-    """Record the adjoint of ``out = alpha * op(a) @ op(b) + bias`` on ``tape``.
+_relu_grad_kernels: dict = {}
 
-    With ``G = d(loss)/d(out)``: ``d op(a) = alpha * G @ op(b)^T``, ``d op(b) = alpha * op(a)^T @ G`` and
-    ``d bias = column sums of G``; gradients are accumulated into the ``grad`` arrays.
+
+def _relu_grad(out, g):
+    """``g * (out > 0)``, the gradient of a fused ReLU with respect to its input, in a new array."""
+    import warp as wp  # noqa: PLC0415
+
+    key = (out.dtype, out.ndim)
+    kernel = _relu_grad_kernels.get(key)
+    if kernel is None:
+        dtype = out.dtype
+        if out.ndim == 2:
+
+            @wp.kernel(enable_backward=False, module="unique")
+            def kernel(y: wp.array2d[dtype], gy: wp.array2d[dtype], gx: wp.array2d[dtype]):
+                i, j = wp.tid()
+                gx[i, j] = wp.where(y[i, j] > dtype(0.0), gy[i, j], dtype(0.0))
+
+        else:
+
+            @wp.kernel(enable_backward=False, module="unique")
+            def kernel(y: wp.array3d[dtype], gy: wp.array3d[dtype], gx: wp.array3d[dtype]):
+                n, i, j = wp.tid()
+                gx[n, i, j] = wp.where(y[n, i, j] > dtype(0.0), gy[n, i, j], dtype(0.0))
+
+        _relu_grad_kernels[key] = kernel
+    gx = _ctx.empty(out.shape, dtype=out.dtype, device=out.device)
+    _ctx.launch(kernel, dim=out.shape, inputs=[out, g, gx], device=out.device, record_tape=False)
+    return gx
+
+
+def _record_backward(tape, a, b, out, bias, alpha, trans_a, trans_b, tf32, stream, relu=False):
+    """Record the adjoint of ``out = act(alpha * op(a) @ op(b) + bias)`` on ``tape``, ``act`` being ReLU or identity.
+
+    With ``G = d(loss)/d(pre-activation)`` (``d(loss)/d(out)`` masked by ``out > 0`` for ReLU):
+    ``d op(a) = alpha * G @ op(b)^T``, ``d op(b) = alpha * op(a)^T @ G`` and ``d bias = column sums of G``;
+    gradients are accumulated into the ``grad`` arrays.
     """
 
     def backward():
         g = out.grad
         if g is None:
             return
+        if relu:
+            g = _relu_grad(out, g)
         kw = {"tf32": tf32, "stream": stream, "alpha": alpha, "beta": 1.0}
         if a.requires_grad and a.grad is not None:
             if not trans_a:
