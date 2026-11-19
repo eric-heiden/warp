@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Benchmarks for :func:`warp.gemm` on dense-layer shapes and its activation epilogues.
+"""Benchmarks for :func:`warp.gemm` on dense-layer shapes, with and without its fused ReLU epilogue.
 
 Each timed call replays a CUDA graph of ``LAUNCHES_PER_SAMPLE`` GEMMs and the timer reads the GPU timeline.
-``activation`` compares no activation, cuBLASLt's fused ReLU and a :func:`warp.func` SiLU, which runs as a
-generated Warp kernel after the GEMM. ``LayerTrainStep`` times a dense layer's forward and backward pass recorded
-on a :class:`warp.Tape`.
+``GemmLayerTrainStep`` times a dense layer's forward and backward pass recorded on a :class:`warp.Tape`.
 """
 
 import numpy as np
@@ -19,13 +17,8 @@ from .benchmarks_utils import LAUNCHES_PER_SAMPLE, CudaEventTimer, capture_launc
 LAYER_SHAPES = ("4096x64x512", "4096x512x256", "4096x256x128")
 
 
-@wp.func
-def silu(x: float):
-    return x / (1.0 + wp.exp(-x))
-
-
 def _activation(name):
-    return {"none": None, "relu": "relu", "silu": silu}[name]
+    return {"none": None, "relu": "relu"}[name]
 
 
 def _layer(shape, dtype, device, requires_grad=False):
@@ -41,7 +34,7 @@ def _layer(shape, dtype, device, requires_grad=False):
 class GemmLayerForward:
     """``y = activation(x @ w + b)`` for dense-layer shapes."""
 
-    params = (LAYER_SHAPES, ("float32", "float16"), ("none", "relu", "silu"))
+    params = (LAYER_SHAPES, ("float32", "float16"), ("none", "relu"))
     param_names = ("shape", "dtype", "activation")
 
     timer = CudaEventTimer()
@@ -72,7 +65,7 @@ class GemmLayerForward:
 class GemmLayerTrainStep:
     """Forward and backward pass of ``y = activation(x @ w + b)`` recorded on a tape (float32)."""
 
-    params = (LAYER_SHAPES, ("none", "relu", "silu"))
+    params = (LAYER_SHAPES, ("none", "relu"))
     param_names = ("shape", "activation")
 
     timer = CudaEventTimer()

@@ -6,7 +6,6 @@
 import os
 import tempfile
 import unittest
-from typing import Any
 
 import numpy as np
 
@@ -256,72 +255,8 @@ def test_gemm_api_capture_transposed_and_bias_grad(test, device):
         del loaded
 
 
-@wp.func
-def _silu(x: Any):
-    return x / (x.dtype(1.0) + wp.exp(-x))
-
-
-@wp.func
-def _odd_columns_tanh(x: float, i: int, j: int):
-    if j % 2 == 1:
-        return wp.tanh(x)
-    return x + float(i)
-
-
-def _silu_np(x):
-    return x / (1.0 + np.exp(-x))
-
-
-def test_gemm_func_activation(test, device):
-    """A warp.func activation is applied elementwise after the GEMM and its bias."""
-    rng = np.random.default_rng(10)
-    M, N, K = 37, 20, 13
-    an, bn = rng.standard_normal((M, K)), rng.standard_normal((K, N))
-    biasn = rng.standard_normal(N)
-    for dtype, tol in ((wp.float32, 1e-4), (wp.float64, 1e-10)):
-        np_t = np.float32 if dtype == wp.float32 else np.float64
-        a, b = wp.array(an.astype(np_t), device=device), wp.array(bn.astype(np_t), device=device)
-        bias = wp.array(biasn.astype(np_t), device=device)
-        out = wp.gemm(a, b, bias=bias, alpha=0.5, activation=_silu)
-        assert_np_equal(out.numpy(), _silu_np(0.5 * an @ bn + biasn), tol=tol)
-    a32, b32 = wp.array(an.astype(np.float32), device=device), wp.array(bn.astype(np.float32), device=device)
-    # f(x, i, j) sees the row and column of the element
-    pre = an @ bn
-    expected = np.where(np.arange(N) % 2 == 1, np.tanh(pre), pre + np.arange(M)[:, None])
-    out = wp.gemm(a32, b32, activation=_odd_columns_tanh)
-    assert_np_equal(out.numpy(), expected, tol=1e-4)
-    # batched, transposed operand
-    ab, bb = rng.standard_normal((3, K, M)).astype(np.float32), rng.standard_normal((3, K, N)).astype(np.float32)
-    out = wp.gemm(wp.array(ab, device=device), wp.array(bb, device=device), trans_a=True, activation=_silu)
-    assert_np_equal(out.numpy(), _silu_np(np.swapaxes(ab, 1, 2) @ bb), tol=1e-4)
-    # batched with f(x, i, j): i and j index the rows and columns of each matrix
-    out = wp.gemm(wp.array(ab, device=device), wp.array(bb, device=device), trans_a=True, activation=_odd_columns_tanh)
-    pre_b = np.swapaxes(ab, 1, 2) @ bb
-    expected_b = np.where(np.arange(N) % 2 == 1, np.tanh(pre_b), pre_b + np.arange(M)[None, :, None])
-    assert_np_equal(out.numpy(), expected_b, tol=1e-4)
-    # strided output (a column block of a wider array) takes the indexed kernel instead of the flat one
-    wide = wp.zeros((M, 2 * N), dtype=float, device=device)
-    view = wide[:, N:]
-    test.assertFalse(view.is_contiguous)
-    wp.gemm(a32, b32, view, activation=_odd_columns_tanh)
-    assert_np_equal(wide.numpy()[:, N:], expected, tol=1e-4)
-    assert_np_equal(wide.numpy()[:, :N], np.zeros((M, N)), tol=0.0)
-    # half-precision operands and output
-    a16, b16 = wp.array(an.astype(np.float16), device=device), wp.array(bn.astype(np.float16), device=device)
-    out = wp.gemm(a16, b16, activation=_silu)
-    ref = _silu_np(an.astype(np.float16).astype(np.float32) @ bn.astype(np.float16).astype(np.float32))
-    assert_np_equal(out.numpy().astype(np.float32), ref, tol=2e-2)
-    with test.assertRaisesRegex(TypeError, "must take"):
-
-        @wp.func
-        def two_args(x: float, i: int):
-            return x
-
-        wp.gemm(a32, b32, activation=two_args)
-
-
 def test_gemm_activation_tape_backward(test, device):
-    """Fused ReLU and warp.func activations are recorded on a tape; the activation adjoint is Warp's."""
+    """A GEMM with a fused ReLU is recorded on a tape; its backward pass masks the gradient by out > 0."""
     rng = np.random.default_rng(11)
     M, N, K = 29, 18, 11
     for ta, tb in [(False, False), (True, False), (False, True)]:
@@ -331,10 +266,9 @@ def test_gemm_activation_tape_backward(test, device):
         gn = rng.standard_normal((M, N)).astype(np.float32)
         opa, opb = (an.T if ta else an), (bn.T if tb else bn)
         pre = 0.5 * opa @ opb + biasn
-        sig = 1.0 / (1.0 + np.exp(-pre))
         for activation, y, dpre in (
+            (None, pre, gn),
             ("relu", np.maximum(pre, 0.0), gn * (pre > 0.0)),
-            (_silu, pre * sig, gn * sig * (1.0 + pre * (1.0 - sig))),
         ):
             a = wp.array(an, device=device, requires_grad=True)
             b = wp.array(bn, device=device, requires_grad=True)
@@ -349,30 +283,6 @@ def test_gemm_activation_tape_backward(test, device):
             assert_np_equal(a.grad.numpy(), ga.T if ta else ga, tol=1e-3)
             assert_np_equal(b.grad.numpy(), gb.T if tb else gb, tol=1e-3)
             assert_np_equal(bias.grad.numpy(), dpre.sum(axis=0), tol=1e-3)
-
-
-def test_gemm_func_activation_api_capture(test, device):
-    """A GEMM with a warp.func activation is saved as a GEMM operation followed by the activation kernel."""
-    rng = np.random.default_rng(12)
-    an, bn = rng.standard_normal((24, 16)).astype(np.float32), rng.standard_normal((16, 8)).astype(np.float32)
-    biasn = rng.standard_normal(8).astype(np.float32)
-    a, b, bias = wp.array(an, device=device), wp.array(bn, device=device), wp.array(biasn, device=device)
-    out = wp.zeros((24, 8), dtype=float, device=device)
-    wp.gemm(a, b, out, bias=bias, activation=_silu)  # load the modules outside of the capture
-    out.zero_()
-    with wp.ScopedCapture(device=device, apic=True) as capture:
-        wp.gemm(a, b, out, bias=bias, activation=_silu)
-    expected = _silu_np(an @ bn + biasn)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = os.path.join(tmpdir, "gemm_graph")
-        wp.capture_save(capture.graph, path, inputs={"a": a, "b": b, "bias": bias}, outputs={"out": out})
-        loaded = wp.capture_load(path, device=device)
-        test.assertTrue(wp._src.context.runtime.core.wp_apic_graph_has_op(loaded._native_graph, 21))  # APIC_OP_GEMM
-        wp.capture_launch(loaded)
-        result = wp.zeros((24, 8), dtype=float, device=device)
-        loaded.get_param("out", result)
-        assert_np_equal(result.numpy(), expected, tol=1e-4)
-        del loaded
 
 
 def test_gemm_is_cublaslt_available(test, device):
@@ -458,7 +368,6 @@ _tests = [
     ("test_gemm_record_tape_false", test_gemm_record_tape_false),
     ("test_gemm_float64_batched", test_gemm_float64_batched),
     ("test_gemm_mixed_precision", test_gemm_mixed_precision),
-    ("test_gemm_func_activation", test_gemm_func_activation),
     ("test_gemm_activation_tape_backward", test_gemm_activation_tape_backward),
 ]
 for _name, _fn in _tests:
@@ -475,13 +384,6 @@ add_function_test(
     TestGemm,
     "test_gemm_api_capture_transposed_and_bias_grad",
     test_gemm_api_capture_transposed_and_bias_grad,
-    devices=devices,
-    check_output=False,
-)
-add_function_test(
-    TestGemm,
-    "test_gemm_func_activation_api_capture",
-    test_gemm_func_activation_api_capture,
     devices=devices,
     check_output=False,
 )
